@@ -476,7 +476,7 @@ baseline, grouping, memory, 수치 parity, scale-out와 rollback을 차례로 �
 
 ### Muon 고정 소스의 함수 경계를 추적한다
 
-정의와 실험 조건은 `https://arxiv.org/abs/2502.16982`, PyTorch 공식 recipe는 `https://docs.pytorch.org/tutorials/recipes/recipes/muon_optimizer.html`에서 확인한다. NVIDIA 고정 구현 `https://github.com/NVIDIA/NeMo-Run/tree/83537ba67cb4c998251567f78a534776fecb1965`와 `emerging_optimizers/orthogonalized_optimizers/muon.py:38`은 coefficient, backend, fallback을 읽는 출발점이다. 논문의 수식과 library의 scaling convention이 같다고 가정하지 말고 input normalization, transpose, iteration count, post-scale을 순서대로 펼친다.
+정의와 실험 조건은 [Muon 원 논문](https://arxiv.org/abs/2502.16982), PyTorch 공식 recipe는 [Muon optimizer recipe](https://docs.pytorch.org/tutorials/recipes/recipes/muon_optimizer.html)에서 확인한다. NVIDIA 고정 구현 [`NeMo-Run`](https://github.com/NVIDIA/NeMo-Run/tree/83537ba67cb4c998251567f78a534776fecb1965)와 `emerging_optimizers/orthogonalized_optimizers/muon.py:38`은 coefficient, backend, fallback을 읽는 출발점이다. 논문의 수식과 library의 scaling convention이 같다고 가정하지 말고 input normalization, transpose, iteration count, post-scale을 순서대로 펼친다.
 
 Newton–Schulz 한 반복은 matmul을 여러 번 수행한다. 입력 norm이 안정 영역 밖이면 반복 횟수를 늘릴수록 좋아진다는 직관이 깨진다. 실험은 `ns_steps=0..k`, FP32/BF16, aspect ratio와 condition number를 교차한다. 관측 열은 residual, delta RMS, maximum absolute value, kernel time, temporary bytes다. 결과가 나쁘면 lr 전에 normalization과 coefficient family가 실제 선택되었는지 확인한다.
 
@@ -490,13 +490,13 @@ AdamW를 기준 좌표로 두고 Muon, Shampoo, SOAP, Sophia와 Lion의 state �
 
 Shampoo step은 gradient 수신, Gram accumulation, precondition 여부 판정, inverse-root 계산 또는 cached root 재사용, graft magnitude 계산, update 적용, counter commit 순서다. `precondition_frequency=10`에서 counter를 save 직전 올리는지 뒤에 올리는지에 따라 resume 첫 root 갱신 시점이 달라진다. root를 저장하지 않으면 load 뒤 Gram에서 재계산한 root가 허용오차 안에 드는지, 계산 시간은 restart SLO에 드는지 검증한다.
 
-원 논문은 `https://proceedings.mlr.press/v80/gupta18a.html`, scalable distributed 비교점은 `https://arxiv.org/abs/2002.09018`에 둔다. 이 링크가 production 세부를 모두 증명하지는 않는다. block partition, graft, protected eigendecomposition과 owner는 채택 library commit에서 다시 고정한다. theory coordinate, code coordinate, local fixture를 서로 다른 열에 두는 이유다.
+원 논문은 [Shampoo](https://proceedings.mlr.press/v80/gupta18a.html), scalable distributed 비교점은 [Scalable Second Order Optimization](https://arxiv.org/abs/2002.09018)에 둔다. 이 링크가 production 세부를 모두 증명하지는 않는다. block partition, graft, protected eigendecomposition과 owner는 채택 library commit에서 다시 고정한다. theory coordinate, code coordinate, local fixture를 서로 다른 열에 두는 이유다.
 
 SOAP에는 eigenbasis 갱신 clock과 그 basis의 Adam moment 갱신 clock이 따로 있다. basis가 바뀌는 step에서 old moment를 회전하는지 reset하는지 확인한다. repeated eigenvalue에서는 basis가 회전해도 같은 subspace일 수 있으므로 원소별 basis equality는 부적절하다. subspace projector, transformed update와 one-step을 oracle로 쓴다.
 
-Sophia 논문 `https://arxiv.org/abs/2305.14342`의 curvature estimator와 채택 구현의 estimator를 구분한다. curvature batch가 training sampler cursor를 소비하면 token accounting과 curriculum이 바뀐다. 별도 iterator라면 seed와 cursor가 checkpoint 대상이다. curvature update 직후 kill, 직전 kill, stale curvature를 반복하는 고장 실험으로 cadence counter를 검증한다.
+[*Sophia* 원 논문](https://arxiv.org/abs/2305.14342)의 curvature estimator와 채택 구현의 estimator를 구분한다. curvature batch가 training sampler cursor를 소비하면 token accounting과 curriculum이 바뀐다. 별도 iterator라면 seed와 cursor가 checkpoint 대상이다. curvature update 직후 kill, 직전 kill, stale curvature를 반복하는 고장 실험으로 cadence counter를 검증한다.
 
-Lion 논문 `https://arxiv.org/abs/2302.06675`의 sign update는 state byte를 줄이지만 lr과 decay를 AdamW에서 복사할 근거를 주지 않는다. sign 직전 momentum 조합과 state 갱신 조합이 다를 수 있어 두 beta 위치를 코드와 test에서 대조한다. gradient가 `+ε,-ε`로 진동하는 fixture, zero fixture, decay-only fixture가 branch를 드러낸다.
+[*Symbolic Discovery of Optimization Algorithms*(Lion)](https://arxiv.org/abs/2302.06675)의 sign update는 state byte를 줄이지만 lr과 decay를 AdamW에서 복사할 근거를 주지 않는다. sign 직전 momentum 조합과 state 갱신 조합이 다를 수 있어 두 beta 위치를 코드와 test에서 대조한다. gradient가 `+ε,-ε`로 진동하는 fixture, zero fixture, decay-only fixture가 branch를 드러낸다.
 
 ### 공정 비교와 디버깅 결정 트리
 

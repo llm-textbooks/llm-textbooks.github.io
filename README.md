@@ -25,6 +25,9 @@ npx serve _site
 3. 표, 코드, KaTeX 수식, Mermaid 도식, 내부·외부 링크를 독서 UI에 맞게 구성합니다.
 4. Pagefind 한국어 검색 색인을 생성합니다.
 5. 모든 내부 링크, heading ID, 표 wrapper, 필수 자산과 권별 문서 수를 검사합니다.
+6. 논문·코드·모델 카드·공식 문서 링크를 분류하고 mutable GitHub branch 링크를 차단합니다.
+
+각 장 끝의 **이 장의 원전 바로가기** 패널은 본문에 인용된 링크를 논문, 코드, 모델·데이터, 공식 문서로 자동 분류합니다. 코드 근거는 가능하면 `repository + 40자리 commit + file + #Lx-Ly`, 논문은 arXiv/DOI/공식 출판 페이지, 모델은 revision이 고정된 모델 카드를 사용합니다.
 
 생성 결과는 `_site/`에 만들어지며 Git에는 포함되지 않습니다. `main` 브랜치에 반영되면 GitHub Actions가 같은 검사를 통과한 정적 artifact만 GitHub Pages에 배포합니다.
 

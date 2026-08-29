@@ -59,11 +59,11 @@ token ID와 label, 유효 loss 토큰 수, 주요 activation shape, gradient nor
 
 이 책의 인용은 장식이 아니라 추적 시작점이다. 가장 안전한 읽기 순서는 `원전의 불변 식별자 → 보존 원문의 chunk와 hash → 수식의 적용 범위 → 현재 코드의 tensor·상태 전이 → 반례와 실패 fixture`다. 제목이나 개념어가 같다는 이유만으로 원 논문과 현재 구현을 같은 것으로 취급하지 않는다.
 
-8장의 scaled dot-product attention을 예로 들자. 먼저 *Attention Is All You Need*의 arXiv ID `1706.03762`와 30books에 보존된 text content digest를 확인한다. 그다음 `QK^T/√d_k`, mask, row-wise softmax, `PV`라는 수식으로 내려간다. 현재 Llama·Qwen 계열 코드는 GQA head 공유, RoPE, backend dispatch와 dtype 조건을 더한다. 따라서 원 논문은 수학적 선행 근거지만 현재 함수 전체의 구현 명세는 아니다. 모든 위치가 mask된 행에서 NaN이나 구현별 fallback이 생기는 반례가 이 확대 해석을 막는다.
+8장의 scaled dot-product attention을 예로 들자. 먼저 [*Attention Is All You Need*의 arXiv 원문](https://arxiv.org/abs/1706.03762v7)과 30books에 보존된 text content digest를 확인한다. 그다음 `QK^T/√d_k`, mask, row-wise softmax, `PV`라는 수식으로 내려간다. 현재 Llama·Qwen 계열 코드는 GQA head 공유, RoPE, backend dispatch와 dtype 조건을 더한다. 따라서 원 논문은 수학적 선행 근거지만 현재 함수 전체의 구현 명세는 아니다. 모든 위치가 mask된 행에서 NaN이나 구현별 fallback이 생기는 반례가 이 확대 해석을 막는다.
 
-13장의 scaling law도 같은 방식으로 읽는다. `2001.08361`의 관측식은 모델·데이터·compute 축의 경험적 power law다. 데이터 혼합기나 curriculum 코드가 그 식을 “구현”하는 것은 아니다. 현재 코드에서는 어떤 token·sample을 실제 소비했는지, optimizer와 stopping rule이 무엇인지 별도로 추적한다. 관측 범위 밖 외삽, 데이터 질 변화와 downstream metric 전환은 실패 계약이다.
+13장의 scaling law도 같은 방식으로 읽는다. [*Scaling Laws for Neural Language Models*의 arXiv 원문](https://arxiv.org/abs/2001.08361)의 관측식은 모델·데이터·compute 축의 경험적 power law다. 데이터 혼합기나 curriculum 코드가 그 식을 “구현”하는 것은 아니다. 현재 코드에서는 어떤 token·sample을 실제 소비했는지, optimizer와 stopping rule이 무엇인지 별도로 추적한다. 관측 범위 밖 외삽, 데이터 질 변화와 downstream metric 전환은 실패 계약이다.
 
-15장의 GPipe는 `1811.06965`의 micro-batch flush pipeline에서 시작한다. bubble 식을 읽고 activation rematerialization과 batch semantics를 분리한 뒤 현재 Megatron schedule의 1F1B·interleaving·virtual stage 상태로 내려간다. 둘은 역사적으로 연결되지만 같은 scheduler가 아니다. microbatch 수가 pipeline stage 수보다 작을 때, uneven sequence가 들어올 때, 마지막 partial batch가 생길 때의 bubble·denominator fixture가 구현 차이를 드러낸다.
+15장의 GPipe는 [원 논문(arXiv:1811.06965)](https://arxiv.org/abs/1811.06965)의 micro-batch flush pipeline에서 시작한다. bubble 식을 읽고 activation rematerialization과 batch semantics를 분리한 뒤 현재 Megatron schedule의 1F1B·interleaving·virtual stage 상태로 내려간다. 둘은 역사적으로 연결되지만 같은 scheduler가 아니다. microbatch 수가 pipeline stage 수보다 작을 때, uneven sequence가 들어올 때, 마지막 partial batch가 생길 때의 bubble·denominator fixture가 구현 차이를 드러낸다.
 
 역연결이 없다는 기록도 정보다. 현재 30books graph에는 paper-like entry 27개와 concept 164개가 있지만 arXiv ID가 없는 entry가 9개이고, 원문 전체를 사용할 수 없다고 표시된 entry도 1개다. 이 경우 제목 유사도나 concept label만으로 `exactMatch`를 만들지 않는다. 독자는 링크 수보다 chunk hash, 문자 좌표, 관계 종류와 “무엇을 증명하지 않는가”를 먼저 확인해야 한다.
 

@@ -539,7 +539,7 @@ change RFC에는 old/new counter ratio, boundary table, expected validation chec
 
 **scheduler를 세 시계의 계약으로 읽는다**
 
-Transformers의 공개 factory는 `https://github.com/huggingface/transformers/blob/v4.56.0/src/transformers/optimization.py`와 `https://github.com/huggingface/transformers/blob/v4.56.0/src/transformers/trainer.py`를 함께 읽는다. PyTorch 기반 계약은 `https://github.com/pytorch/pytorch/blob/v2.8.0/torch/optim/lr_scheduler.py`와 `https://pytorch.org/docs/stable/optim.html#how-to-adjust-learning-rate`에 고정한다. scaling-law 배경은 `https://arxiv.org/abs/2203.15556`, gradient-noise 관점은 `https://arxiv.org/abs/1812.06162`에 둔다.
+Transformers의 공개 factory는 [`optimization.py`](https://github.com/huggingface/transformers/blob/v4.56.0/src/transformers/optimization.py)와 [`trainer.py`](https://github.com/huggingface/transformers/blob/v4.56.0/src/transformers/trainer.py)를 함께 읽는다. PyTorch 기반 계약은 [`lr_scheduler.py`](https://github.com/pytorch/pytorch/blob/v2.8.0/torch/optim/lr_scheduler.py)와 [PyTorch optimizer 문서](https://pytorch.org/docs/stable/optim.html#how-to-adjust-learning-rate)에 고정한다. scaling-law 배경은 [Chinchilla 논문](https://arxiv.org/abs/2203.15556), gradient-noise 관점은 [An Empirical Model of Large-Batch Training](https://arxiv.org/abs/1812.06162)에 둔다.
 
 논문·API·채택 code commit은 서로 다른 증거다.
 

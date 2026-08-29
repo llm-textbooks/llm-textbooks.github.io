@@ -1621,9 +1621,9 @@ Engram row edit의 locality는 조건부 명제다 row `r`에 delta를 쓰면 �
 
 override map으로 base table을 덮으면 rollback은 쉽지만 address conflict 정책이 필요하다. 같은 row에 두 tenant가 다른 값을 요구하면 last-write-wins로 숨기지 않는다. tenant, fact, table generation, original/new bytes, TTL과 parent digest를 기록한다. address 집합이 실제로 서로소일 때만 edit write가 commute한다고 말할 수 있다.
 
-`User as Engram`의 contamination·reasoning 개선 수치는 특정 사용자 수, fact schema, model과 baseline에서 나온 관측이다. “33,000배”, “5.6배”를 보편적 장점으로 옮기지 않는다. direct recall, cross-user leakage, paraphrase, top-k ceiling과 optimization 조건을 원 실험 범위와 함께 설명한다.
+[*User as Engram*](https://arxiv.org/abs/2606.19172)의 contamination·reasoning 개선 수치는 특정 사용자 수, fact schema, model과 baseline에서 나온 관측이다. “33,000배”, “5.6배”를 보편적 장점으로 옮기지 않는다. direct recall, cross-user leakage, paraphrase, top-k ceiling과 optimization 조건을 원 실험 범위와 함께 설명한다.
 
-Engram-Nine은 충돌 제거와 일반화의 긴장을 드러낸다 Engram-Nine(`arXiv:2601.16531`)은 corpus의 빈번한 n-gram에 minimal perfect hash hot tier를 두고 나머지를 multi-head cold hash로 보낸다. MPHF는 등록된 member set에서는 충돌이 없지만 non-member에도 어떤 index를 내므로 fingerprint membership test가 필요하다. 동적 삽입·삭제를 자동 제공하는 dictionary도 아니다.
+Engram-Nine은 충돌 제거와 일반화의 긴장을 드러낸다. [Engram-Nine 원 논문(arXiv:2601.16531v2)](https://arxiv.org/abs/2601.16531v2)은 corpus의 빈번한 n-gram에 minimal perfect hash hot tier를 두고 나머지를 multi-head cold hash로 보낸다. MPHF는 등록된 member set에서는 충돌이 없지만 non-member에도 어떤 index를 내므로 fingerprint membership test가 필요하다. 동적 삽입·삭제를 자동 제공하는 dictionary도 아니다.
 
 소규모 통제 실험은 embedding parameter budget을 맞춘 뒤 collision-free hot tier를 비교했다. 일부 구간에서 hot loss와 cold loss의 순서가 뒤집히고, gate 선호가 이 변화에 늦게 반응하는 현상을 보고했다. 이는 collision이 일반화에 좋다는 확정 인과가 아니다. frequency, optimization age와 row drift가 함께 바뀌므로 gate reset·분리, alpha와 marginal loss의 상관 같은 추가 실험이 필요하다.
 

@@ -414,7 +414,7 @@ local mirror나 cache를 거친 입력도 resolved dependency에서 사라지지
 
 ### in-toto statement는 봉투와 내용물을 분리한다
 
-in-toto attestation framework는 statement의 `subject`와 `predicateType`, predicate를 구분한다. 이 저장소에 고정한 [`in-toto Attestation Framework`](https://github.com/in-toto/attestation/tree/main/spec/v1)는 statement가 무엇에 대한 주장인지 subject digest로 지정하고, 주장의 schema를 predicate type으로 식별한다. 서명은 이 statement를 DSSE 같은 envelope에 담아 보호한다. 서명된 JSON이 있다고 끝나는 것이 아니라 verifier가 이해하고 허용한 predicate type인지 확인해야 한다.
+in-toto attestation framework는 statement의 `subject`와 `predicateType`, predicate를 구분한다. 이 저장소에 고정한 [`in-toto Attestation Framework`](https://github.com/in-toto/attestation/tree/051624ce466deaed4c5a66e66877f69b471fccbe/spec/v1)는 statement가 무엇에 대한 주장인지 subject digest로 지정하고, 주장의 schema를 predicate type으로 식별한다. 서명은 이 statement를 DSSE 같은 envelope에 담아 보호한다. 서명된 JSON이 있다고 끝나는 것이 아니라 verifier가 이해하고 허용한 predicate type인지 확인해야 한다.
 
 envelope signature가 유효해도 subject digest가 배포하려는 artifact와 다르면 아무것도 증명하지 않는다. predicate가 SLSA provenance라고 주장하지만 알 수 없는 major version이면 의미를 임의로 추측하지 않는다. builder identity가 유효해도 해당 repository·branch·release channel을 만들 권한이 있는지는 별도 authorization policy가 판단한다. authenticity, semantic validity, authorization은 서로 다른 gate다.
 

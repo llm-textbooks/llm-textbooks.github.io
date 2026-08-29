@@ -60,11 +60,13 @@ for (const file of htmlFiles) {
   });
 }
 
-for (const asset of ["assets/site.css","assets/site.js","assets/favicon.svg","assets/mermaid.min.js","assets/katex.min.css","pagefind/pagefind.js","pagefind/pagefind-ui.js","downloads/volume-1-cuda-llm-serving-ko.epub","downloads/volume-2-finetuning-mechanisms-ko.epub","sitemap.xml","robots.txt","site-manifest.json"]) {
+for (const asset of ["assets/site.css","assets/site.js","assets/favicon.svg","assets/mermaid.min.js","assets/katex.min.css","pagefind/pagefind.js","pagefind/pagefind-ui.js","downloads/volume-1-cuda-llm-serving-ko.epub","downloads/volume-2-finetuning-mechanisms-ko.epub","sitemap.xml","robots.txt","site-manifest.json","source-link-report.json"]) {
   if (!fs.existsSync(path.join(SITE, asset))) errors.push(`missing artifact ${asset}`);
 }
 
 const manifest = JSON.parse(fs.readFileSync(path.join(SITE,"site-manifest.json"),"utf8"));
+const sourceReport = JSON.parse(fs.readFileSync(path.join(SITE,"source-link-report.json"),"utf8"));
+if (sourceReport.counts.fatal !== 0) errors.push(`source-link audit has ${sourceReport.counts.fatal} fatal finding(s)`);
 const counts = Object.fromEntries(manifest.books.map(b => [b.id,b.documents]));
 if (counts["volume-1"] !== 78) errors.push(`volume-1 expected 78 documents, got ${counts["volume-1"]}`);
 if (counts["volume-2"] !== 53) errors.push(`volume-2 expected 53 documents, got ${counts["volume-2"]}`);

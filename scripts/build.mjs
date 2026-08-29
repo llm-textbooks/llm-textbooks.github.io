@@ -99,6 +99,8 @@ function linkClass(href) {
 
 function renderMarkdown(book, doc, markdown) {
   const headings = [];
+  const references = [];
+  const referenceUrls = new Set();
   const slugger = new StableSlugger(`${book.id}-${doc.slug}`);
   const renderer = {
     heading(token) {
@@ -111,6 +113,10 @@ function renderMarkdown(book, doc, markdown) {
       const href = resolveMarkdownLink(book, doc, token.href);
       const body = this.parser.parseInline(token.tokens);
       const external = /^https?:/.test(href || "");
+      if (external && !referenceUrls.has(href)) {
+        referenceUrls.add(href);
+        references.push({ href, label: stripTags(body) || href, kind: referenceKind(href) });
+      }
       return `<a href="${esc(href)}" class="${linkClass(href)}"${token.title ? ` title="${esc(token.title)}"` : ""}${external ? ' rel="noopener noreferrer external"' : ""}>${body}${external ? '<span class="external-mark" aria-hidden="true">↗</span>' : ""}</a>`;
     },
     code(token) {
@@ -134,7 +140,26 @@ function renderMarkdown(book, doc, markdown) {
   let html = marked.parse(prepared);
   html = html.replace(/<table>/g, '<div class="table-scroll" tabindex="0" role="region" aria-label="가로로 스크롤할 수 있는 표"><table>')
     .replace(/<\/table>/g, "</table></div>");
-  return { html, headings };
+  return { html, headings, references };
+}
+
+function referenceKind(href) {
+  if (/arxiv\.org|doi\.org|aclanthology\.org|openreview\.net|proceedings\.mlr\.press/.test(href)) return "논문";
+  if (/github\.com|gitlab\.com|codeberg\.org/.test(href)) return "코드";
+  if (/huggingface\.co/.test(href)) return "모델·데이터";
+  if (/docs\.|developer\.|pytorch\.org|nvidia\.com|kubernetes\.io/.test(href)) return "공식 문서";
+  return "관련 원문";
+}
+
+function referencePanel(references) {
+  if (!references?.length) return "";
+  const order = ["논문", "코드", "모델·데이터", "공식 문서", "관련 원문"];
+  const grouped = new Map(order.map(kind => [kind, []]));
+  for (const ref of references) grouped.get(ref.kind).push(ref);
+  const groups = order.filter(kind => grouped.get(kind).length).map(kind =>
+    `<section><h3>${kind} <span>${grouped.get(kind).length}</span></h3><ul>${grouped.get(kind).map(ref => `<li><a href="${esc(ref.href)}" rel="noopener noreferrer external">${esc(ref.label)}<span class="external-mark" aria-hidden="true">↗</span></a><small>${esc(new URL(ref.href).hostname)}</small></li>`).join("")}</ul></section>`
+  ).join("");
+  return `<details class="origin-references" data-pagefind-ignore><summary>이 장의 원전 바로가기 <span>${references.length}</span></summary><div>${groups}</div></details>`;
 }
 
 function shell({ title, description, body, canonical = "/", book = null, doc = null, toc = [] }) {
@@ -195,7 +220,7 @@ for (const book of published) {
     const doc = book.docs[i];
     const prev = book.docs[i - 1], next = book.docs[i + 1];
     const sourceUrl = `${REPO}/blob/main/${doc.source}`;
-    const body = `<article class="chapter" data-pagefind-filter="volume:${book.number}권" data-pagefind-meta="title:${esc(doc.title)}"><div class="chapter-meta"><a href="${book.route}">${book.number}권</a><span>${esc(book.parts[doc.partIndex].title)}</span><span>${doc.kind === "chapters" ? `${doc.order}장` : doc.kind}</span></div>${doc.rendered.html}<div class="chapter-source"><a href="${sourceUrl}">이 장의 Markdown 원문과 개정 이력 보기 ↗</a></div><nav class="pager" aria-label="이전과 다음 장">${prev ? `<a rel="prev" href="${prev.route}"><small>이전</small>${esc(prev.title)}</a>` : "<span></span>"}${next ? `<a rel="next" href="${next.route}"><small>다음</small>${esc(next.title)}</a>` : ""}</nav></article>`;
+    const body = `<article class="chapter" data-pagefind-filter="volume:${book.number}권" data-pagefind-meta="title:${esc(doc.title)}"><div class="chapter-meta"><a href="${book.route}">${book.number}권</a><span>${esc(book.parts[doc.partIndex].title)}</span><span>${doc.kind === "chapters" ? `${doc.order}장` : doc.kind}</span></div>${doc.rendered.html}${referencePanel(doc.rendered.references)}<div class="chapter-source"><a href="${sourceUrl}">이 장의 Markdown 원문과 개정 이력 보기 ↗</a></div><nav class="pager" aria-label="이전과 다음 장">${prev ? `<a rel="prev" href="${prev.route}"><small>이전</small>${esc(prev.title)}</a>` : "<span></span>"}${next ? `<a rel="next" href="${next.route}"><small>다음</small>${esc(next.title)}</a>` : ""}</nav></article>`;
     write(path.posix.join(doc.route, "index.html").slice(1), shell({ title: doc.title, description: doc.description, body, canonical: doc.route, book, doc, toc: doc.rendered.headings }));
   }
   const bookBody = `<section class="book-hero"><p class="eyebrow">LLM 시스템 메커니즘 · ${book.number}권</p><h1>${esc(book.manifest.title)}</h1><p class="lead">${esc(book.manifest.subtitle || book.manifest.description)}</p><div class="actions"><a class="button primary" href="${book.docs[0]?.route}">처음부터 읽기</a><a class="button" href="${book.download}">EPUB 내려받기</a></div><dl><div><dt>구성</dt><dd>${book.parts.length}부 · ${book.docs.length}개 문서</dd></div><div><dt>언어</dt><dd>한국어</dd></div><div><dt>상태</dt><dd>계속 개정되는 공개판</dd></div></dl></section><div class="parts-grid">${book.parts.map(p => partCard(book,p)).join("")}</div>`;
