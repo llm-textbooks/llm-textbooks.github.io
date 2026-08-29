@@ -2,6 +2,8 @@
 
 단일 GPU 기준선을 여러 GPU로 확장할 때 먼저 물어야 할 것은 “몇 배 빠른가”가 아니다. 누가 parameter·gradient·optimizer state·sample을 소유하고, 한 rank가 죽을 때 어느 상태가 확정됐는가다.
 
+이 장의 실행은 `GR-001/MN-029`다. 28장의 동일한 `BatchID`와 `UpdateID` 의미를 여러 rank로 분할하되, global loss 분모와 committed update가 단일 GPU 기준선과 같아야 한다. 장애 주입은 별도 데모가 아니라 이 동등성의 어느 합의 경계를 깨뜨리는지 확인하는 반증 실험이다.
+
 ```mermaid
 stateDiagram-v2
   [*] --> Running
@@ -2247,75 +2249,27 @@ cleanup도 독립된 invariant다. old process, rendezvous lease, object-store t
 
 새 사고가 기존 분류에 맞지 않으면 억지로 끼워 넣지 않는다. 새로운 failure class, detector와 invariant를 추가하고 이전 campaign 가운데 영향을 받는 cell을 다시 실행한다. 이 반복이 쌓일수록 장은 고정된 정답지가 아니라 실제 장애에서 더 정밀해지는 검증 체계가 된다.
 
-## 29.16 비동기 체크포인트의 두 완료를 갈라서 주입한다
+## 29.16 GR-001/Chaos fork — membership·collective·durability를 따로 깨뜨린다
 
-비동기 저장에는 적어도 두 개의 완료가 있다. 첫째는 학습 tensor를 고정된 staging buffer로 옮겨 trainer가 원본을 다시 변경해도 되는 시점이다. 둘째는 writer가 storage에 payload와 metadata를 내보내 다음 process가 읽을 수 있는 시점이다. pinned-memory staging future가 완료됐다는 이유로 저장 future까지 완료됐다고 기록하면, 장애 직전 catalog에는 존재하지만 실제 loader는 읽지 못하는 유령 checkpoint가 생긴다.
+비동기 checkpoint, Xid, observability loss, 병렬 경계와 object-store chaos 증보는 하나의 fault matrix로 합친다. 한 사건에 여러 fault를 섞기 전에 control→단일 mutation→detector→bounded recovery→next-update oracle 순서를 지킨다.
 
-TorchTitan의 고정된 단위 시험은 이 구분을 코드 계약으로 보여 준다. pinned-memory mode에서는 staging completion handle을 별도로 보존하고 `maybe_wait_for_staging()`이 그 future를 기다린 뒤 비운다. 일반 async mode의 연속 save 시험은 다음 save가 이전 saving future를 기다리는지 검사한다. 이 fixture가 증명하는 것은 lifecycle ordering이다. object store가 데이터를 durable하게 복제했는지, process kill 뒤 partial multipart upload가 어떻게 보이는지, metadata와 shard의 publish가 원자적인지는 증명하지 않는다.
+```mermaid
+flowchart LR
+ B[GR-001 B117/U0042/CK43 control] --> I[fault at named phase]
+ I --> D[first detector + evidence freeze]
+ D --> F[fence old membership/resources]
+ F --> R[restore last complete generation]
+ R --> N[next sample/update + new checkpoint]
+```
 
-failure campaign은 두 경계에 따로 crash를 넣는다. A군은 staging 시작 전, B군은 staging 완료 뒤 storage future 완료 전, C군은 payload 완료 뒤 completion marker publish 전에 process를 종료한다. 각 군에서 checkpoint catalog, temporary object, completion marker와 loader 후보를 기록한다. B군 checkpoint를 loader가 선택하거나 C군의 shard 혼합을 complete로 판정하면 실패다. 다음 save가 무한 대기한다면 future cancellation·exception propagation 경로도 실패다.
+| fault family | injection point | 통과 조건 |
+|---|---|---|
+| membership | rendezvous 전/후 rank kill | 새 generation, duplicate U0042 없음 |
+| collective | ordinal/count/dtype mismatch, zero-token rank | first divergent rank/group/op 검출 |
+| Xid/GPU | forward/backward/optimizer 사이 device loss | old CUDA/PG fenced, complete parent 복원 |
+| telemetry | exporter/collector/alert path drop | 학습 실패와 관측 실패 분리 |
+| async save | staging 완료 뒤, durable publish 전 kill | incomplete CK43 비가시성 |
+| object store | shard truncate, stale listing, manifest CAS fail | 이전 committed generation만 선택 |
+| pipeline/expert | flush boundary, empty expert, migration | global sample/gradient mass 보존 |
 
-복구 oracle은 “checkpoint directory가 있다”가 아니다. 선택된 generation의 모든 shard size·digest와 metadata key coverage를 확인하고 parameter, optimizer slot, scheduler, RNG와 data cursor가 같은 UpdateID인지 비교한다. 이어 첫 batch의 SampleID, loss numerator·denominator, gradient와 parameter delta를 golden run과 비교한다. telemetry에는 staging 완료, storage 완료, marker publish를 서로 다른 event type으로 남기고, W&B나 MLflow의 run resume를 그 어느 완료의 대용으로도 쓰지 않는다.
-
-이 절의 공개 근거는 CPU 단위 lifecycle test와 정적 소스다. 실제 멀티노드 GPU, 원격 object store, 노드 전원 차단과 network partition은 실행하지 않았다. 따라서 위 A·B·C는 실행 결과가 아니라 deployment가 채워야 할 시험 설계다. release 표에는 storage backend와 consistency mode별로 `NotExecuted`, `Failed`, `Passed`를 구분하고, 측정하지 않은 recovery time과 durability를 추정값으로 채우지 않는다.
-
-## 29.17 Xid 주입을 rank·cursor·checkpoint 세대의 복구 시험으로 확장한다
-
-합성 campaign은 Xid 한 건을 만드는 데서 끝나지 않는다. `INC-<run>-<attempt>-<ordinal>`을 발급하고 GPU UUID와 node를 고정한 뒤, 그 장치를 소유한 global rank와 당시의 UpdateID·DataCursor digest를 기록한다. 이어 profiler window와 memory snapshot에는 같은 ID를 metadata로 넣되 metric label에는 넣지 않는다. 이렇게 해야 고유 사건 수가 늘어도 Prometheus series 수가 함께 폭발하지 않는다.
-
-주입 시점은 gradient accumulation의 microstep과 optimizer commit 사이로 나눈다. commit 전 rank 사망이면 해당 UpdateID 전체를 폐기해야 하고, commit 뒤라면 checkpoint generation과 sampler cursor가 그 commit을 함께 반영했는지 확인한다. 비동기 저장에서는 staging future 완료와 storage future 완료를 별도 event로 기록한다. 전자만 끝난 checkpoint는 복구 후보가 아니다.
-
-복원 뒤에는 새 attempt의 rank 번호가 이전 번호와 같다고 가정하지 않는다. stable worker identity, GPU UUID, checkpoint generation으로 계보를 잇고 첫 sample ID, loss numerator·denominator, scheduler step, parameter checksum을 golden fixture와 비교한다. 이 oracle 중 하나라도 없으면 “프로세스 재기동 성공”일 뿐 “학습 의미 복구 성공”이 아니다.
-
-이 종단 fixture는 공개 component test를 조합한 시험 설계다. DCGM의 Xid 파생 metric 시험, W&B resume 시험, PyTorch profiler·snapshot 시험, TorchTitan async checkpoint 시험은 각각 자기 경계를 검증한다. 그러나 이들을 하나의 IncidentID로 관통한 공개 직접 시험은 찾지 못했다. 따라서 종단 계약에는 `testedBy`를 붙이지 않고 `NeedsReview`로 남기며, 실제 장비의 Xid/ECC와 SDC fault injection 결과를 별도로 요구한다.
-
-## 29.18 관측 경로 손실과 학습 장애를 동시에 주입한다
-
-학습 장애만 주입하면 감시 체계가 정상이라는 위험한 전제를 남긴다. campaign은 Xid 또는 rank hang과 함께 scrape 중단, frozen exporter timestamp, remote-write queue saturation을 각각 주입한다. 원천 GPU metric, local Prometheus, remote backend와 alert state를 별도 관측해 어느 hop에서 처음 사라졌는지 기록한다.
-
-elastic restart 뒤에는 GPU UUID/MIG identity와 새 rank·attempt의 매핑을 다시 발행한다. W&B history가 이어졌다는 사실은 checkpoint 복구가 아니다. versioned artifact, checkpoint generation·manifest digest, UpdateID·DataCursor, optimizer/RNG state를 join하고 durable save와 validity marker가 끝난 generation만 선택한다.
-
-합격 oracle은 세 층이다. telemetry 층은 stale와 0, remote drop과 원천 부재를 구분한다. alert 층은 `for` 진입과 `keep_firing_for` 해제를 기대한 시각에 전이한다. 학습 층은 복원 첫 sample·loss denominator·scheduler step·parameter checksum이 golden fixture와 맞는다. 공개 component test를 이 live-cluster SLO 결과로 승격하지 않는다.
-
-## 29.19 병렬 조합의 zero-token·flush·migration 경계를 주입한다
-
-fixture는 non-divisible sequence, unequal last microbatch와 zero-token expert를 함께 만든다. 각 rank의 local shape, padding mask, collective ordinal, PP send/recv tag와 global loss denominator를 golden ledger와 비교한다. zero-token rank도 필요한 collective에 empty tensor로 참여해야 한다.
-
-pipeline warmup·steady·cooldown 각각에서 stage 하나를 중단한다. checkpoint가 microbatch 일부의 gradient를 commit한 상태인지, UpdateID 전체가 원자적으로 폐기되는지 확인한다. activation send만 끝나고 gradient receive가 끝나지 않은 microbatch를 완료로 세면 실패다.
-
-복구 때 world size와 TP/PP/EP degree를 바꾼다. canonical parameter ID·global range, optimizer slot과 expert ID를 새 rank에 배치하고 첫 update를 기존 topology의 reference와 비교한다. 공개 단위 시험은 일부 mesh와 schedule을 닫지만 이 live cluster migration·deadlock·성능을 증명하지 않는다.
-
-## 29.20 object-store generation publish chaos matrix
-
-fault point를 shard upload 전·중·후, manifest 전·후, conditional commit 요청 전·응답 유실 뒤로 나눈다. stale listing, multipart 잔류, overwrite window, lease expiry와 두 writer split-brain도 독립 주입한다. reader의 oracle은 last-good 또는 완전한 new generation 하나만 선택하는 것이다. model은 새 세대인데 optimizer는 이전 세대인 mixed read가 한 번이라도 나오면 실패다.
-
-FSDP1↔FSDP2와 ZeRO stage/world-size migration은 storage 성공과 별도다. 소스 명세서의 canonical parameter ID와 global ranges를 target ownership으로 재배치하고 moment, master weight, step과 scheduler/scaler를 복원한 뒤 첫 update를 reference와 비교한다. upstream filesystem round-trip이나 remote adapter smoke test를 production backend의 전원 차단 durability·writer quorum 증거로 인용하지 않는다.
-## 29.21 membership과 commit을 따로 깨뜨리는 장애 행렬
-
-분산 golden run은 정상 경로 한 번으로 완성되지 않는다. 다만 이번 책의 정적 근거 구축에서는 실제 클러스터를 실행하지 않으므로, 아래 행렬은 upstream canonical test가 직접 고정한 범위와 target fabric에서 반드시 실행해야 할 범위를 명시적으로 나눈다.
-
-**최초 불일치 순서를 oracle로 삼는다.**
-
-기준 원장의 열을 `allocation → rendezvous round → rank map → collective ordinal → checkpoint generation → sampler cursor → first resumed update digest → commit ordinal` 순으로 놓는다. 변형은 한 번에 하나만 넣는다.
-
-| 변형 | 최초 기대 불일치 | 통과 조건 | 현재 근거 |
-|---|---|---|---|
-| late join·membership 교체 | rendezvous round/rank map | old round가 새 group에 진입하지 않음 | PyTorch rendezvous 직접 시험 |
-| store 응답 지연 | rendezvous deadline | timeout이 명시적이며 stale namespace가 격리됨 | PyTorch timeout 직접 시험 |
-| rank 하나의 op 교환 | collective ordinal | transport timeout 전에 sequence mismatch 식별 | target cluster `NOT_RUN` |
-| worker kill | worker attempt | group 재형성과 rank 집합 복원 | Ray·torch elastic 직접 시험 |
-| partial checkpoint upload | checkpoint generation | pointer 미공개, 이전 durable generation 선택 | 정적 protocol, target storage `NOT_RUN` |
-| world 8→4→8 | global shard interval | offset·length coverage가 중복·공백 없이 tensor 전체를 덮음 | PyTorch DCP 직접 시험 |
-| 같은 UpdateID 두 번 보고 | commit ordinal | metric·pointer·sampler advance가 한 번만 반영 | 정적 fixture, controller `NOT_RUN` |
-| rack·cluster partition | earliest heartbeat/store/NCCL event | failure domain과 전파 순서 식별 | 실제 fabric `NOT_RUN` |
-
-**성공 판정을 세 층으로 나눈다.**
-
-제어면 성공은 scheduler와 rendezvous가 새 worker group을 만들었다는 뜻이다. 상태면 성공은 model·optimizer·scheduler·sampler·RNG가 하나의 durable generation에서 복원됐다는 뜻이다. 수치면 성공은 첫 resumed update가 선언한 동일성 등급—sample-exact, update-equivalent, statistical continuity—을 만족한다는 뜻이다. 세 판정을 한 `recovered=true`로 합치지 않는다.
-
-실제 release 전에는 두 node 이상의 제한된 test cluster에서 rank kill, store 단절, NIC 경로 단절, partial checkpoint, topology 변경을 rehearsal한다. NCCL async error와 communicator cleanup, RDMA/NIC counter, checkpoint publish log를 같은 monotonic timeline으로 묶는다. upstream unit test가 green이라는 사실은 이 실행을 대신하지 않는다. 오히려 upstream test가 고정한 control-plane·reshard 산술을 baseline oracle로 삼아 target fabric에서 처음 갈라지는 지점을 좁힌다.
-**P0-3 종단 failure matrix.**
-
-모델과 분산 runtime을 띄우기 전, `scripts/verify_p03_static_oracle.py`가 상태 전이의 최소 의미를 실행한다. 고정 JSON 입력에서 zero-valid no-commit, unequal-rank global mean, revision fence, ownership, publish 전후 kill, resume와 elastic rejection을 검사하고 mutation 열 개가 모두 fail closed인지 확인한다. 이 PASS는 Python 상태 기계에만 유효하다. NCCL·FSDP·filesystem·GPU에서 같은 원자성과 복구가 성립한다는 증거로 재사용하지 않는다.
-
-필수 행은 global zero-valid, rank별 valid count 1:3, singleton/all-equal group, mixed PolicyID·RewardRevision, stale rollout, duplicate/missing SampleID, all-reduce 뒤 rank kill, optimizer shard write 중 kill, microstep resume와 unsupported elastic world-size다. 각 행은 최초 failure layer와 no-commit 상태를 미리 적는다. 기존 PPO·GRPO·FSDP unit test는 구성요소 근거이지 이 matrix가 실행됐다는 증거가 아니다.
+비동기 staging future 완료를 durable commit으로 세지 않는다. Xid 주입은 process 재시작뿐 아니라 cursor·optimizer·scheduler generation과 U0042 exactly-once를 검사한다. detector latency, false diagnosis, lost UpdateID/sample/token, cleanup과 RTO/RPO를 함께 회계한다. [멀티노드 장애 실습](../labs/29-multinode-failure-lab.md)과 [rank hang](../playbooks/06-rank-hang.md)·[partial checkpoint](../playbooks/09-partial-checkpoint.md)을 실행 entry로 쓰며, 30장에는 PASS/NOT_RUN/UNSUPPORTED support matrix와 residual risk를 넘긴다.

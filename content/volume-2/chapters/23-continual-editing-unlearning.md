@@ -24,6 +24,58 @@
 
 이 표의 마지막 열이 이 장의 핵심이다. surface success를 더 많이 세는 것이 아니라, 성공으로 오인하기 쉬운 상태를 일부러 만들어 평가가 그것을 거부하는지 확인한다.
 
+## 23.0 GR-001 변경 원장: 학습된 모델을 고치는 순간부터 출시 후보까지
+
+앞 장까지의 `GR-001`은 동일한 base digest와 tokenizer revision 위에서 SFT와 preference 학습을 마쳤다. 이 장은 그 모델에 변경 요청 `CHG-023`을 적용한다. 예시는 “폐기된 제품 정책을 새 정책으로 교체하고, 삭제 대상 문서의 영향을 제거하라”는 요청이다. 편집 성공 문장만 남기지 않는다. 요청 행, 실제 parameter delta, 모든 파생 artifact와 평가 계획을 한 commit으로 만든다.
+
+```mermaid
+flowchart LR
+  R[RequestRow<br/>CHG-023] --> T[TargetSet<br/>fact + source rows]
+  T --> E[Edit/Unlearn Run<br/>EDR-023]
+  B[GR-001 Checkpoint<br/>CKPT-020] --> E
+  E --> D[DeltaID<br/>DELTA-023]
+  D --> C[Candidate<br/>CKPT-023]
+  C --> V[EvalPlan<br/>EVP-024]
+  C --> X[Descendant closure<br/>adapter·merge·cache]
+  X --> V
+  V -->|24장| G[EvalRunID]
+```
+
+|row/state|예시 값|소유자와 수명|이 장의 불변조건|
+|---|---|---|---|
+|`ChangeSetID`|`CHG-023`|변경 승인자가 만들고 영구 보존|target·retain·forbidden set의 revision이 고정됨|
+|parent|`CKPT-020@sha256:…91c`|model registry|GR-001의 tokenizer·config·base digest와 일치|
+|target row|`DOC-0042 / fact-7`|data steward|삭제·교체 이유와 원천 계보가 존재|
+|parameter delta|`DELTA-023`, layer 14 MLP|training worker→artifact store|방법 이름이 아니라 바뀐 tensor와 norm을 기록|
+|descendants|adapter 2, merged 1, cache generation 3|registry·serving owner|도달 가능한 구 artifact가 하나도 promotion되지 않음|
+|evaluation plan|`EVP-024`|독립 evaluator|efficacy·paraphrase·locality·retention·privacy row가 동결됨|
+
+### 수학과 코드가 만나는 변경량
+
+ROME류의 한 층 편집을 단순화하면 $W'=W+uv^\top$이고, 보존 손실을 포함한 변경 목적은 다음처럼 쓸 수 있다.
+
+$$
+L_{change}=L_{target}(\theta+\Delta\theta)
++\lambda_{loc}D(f_{\theta+\Delta\theta}(X_{retain}),f_\theta(X_{retain}))
++\lambda_{size}\lVert\Delta\theta\rVert_F^2.
+$$
+
+|수학 기호|실행 객체|shape·분모|코드에서 확인할 경계|
+|---|---|---|---|
+|$W$|선택한 projection weight|`[d_out,d_in]`|[ROME `execute_rome`의 복사·복원 경계](https://github.com/zjunlp/EasyEdit/blob/14cea8245f06715684592ab55184939b99d70784/easyeditor/models/rome/rome_main.py#L144-L159)|
+|$u$|key 방향|`[d_out]`|[key 계산과 activation 수집](https://github.com/zjunlp/EasyEdit/blob/14cea8245f06715684592ab55184939b99d70784/easyeditor/models/rome/compute_u.py#L61-L127)|
+|$v$|value 보정 방향|`[d_in]`|[목표 log-prob와 KL 제약 최적화](https://github.com/zjunlp/EasyEdit/blob/14cea8245f06715684592ab55184939b99d70784/easyeditor/models/rome/compute_v.py#L15-L208)|
+|$D$|retain logits divergence|retain valid token 평균|24장에 넘길 locality row를 생성|
+|$\Delta\theta$|`DELTA-023` tensor set|tensor별 FP32 norm과 digest|0이 아닌 tensor 목록이 manifest와 같아야 함|
+
+코드 좌표는 구현 동작의 근거이지 GR-001에서의 성공 증거가 아니다. 실제 성공은 고정된 `EVP-024`를 다음 장에서 실행해야 성립한다. 연구 배경은 [ROME 논문](https://arxiv.org/abs/2202.05262)과 [OpenUnlearning의 고정 저장소](https://github.com/locuslab/open-unlearning/tree/4ad738aaf60f6a4385f6e2506d01da99e76c31f3)에서 원전으로 확인한다.
+
+### 반증 실험과 24장 인계
+
+`CHG-023-M1`에서는 target answer만 출력 필터로 바꾸고 weight delta를 0으로 둔다. 표면 efficacy는 통과할 수 있지만 paraphrase와 raw-logit 검사는 실패해야 한다. `M2`에서는 삭제 대상 adapter 하나를 descendant 목록에서 빼고, 역방향 계보 검사가 이를 잡아야 한다. `M3`에서는 optimizer moment를 parent에서 남겨 다음 한 step 뒤 target이 재출현하는지 측정한다. 기대 oracle은 “최종 점수 하락”이 아니라 각각 `raw-logit`, `descendant-closure`, `relearning` 단계가 최초 불일치라는 것이다.
+
+이 실험은 [평가·오염·불확실성 실습](../labs/24-eval-contamination-uncertainty-lab.md)으로 이어진다. 이 장의 출력은 모델 한 개가 아니라 `{CKPT-023, DELTA-023, CHG-023, EVP-024, descendant-set}` 묶음이다. 아래의 지속학습·ROME·MEMIT·Engram·unlearning 심화 절은 모두 이 묶음의 방법 선택과 실패 경계를 확장한다. 새 계보를 따로 만들지 않는다.
+
 ## 23.1 지속학습·편집·삭제를 서로 다른 변경 문제로 정의한다
 
 세 문제는 모두 모델 행동을 바꾸지만 허용하는 데이터, parameter 범위와 성공 조건이 다르다. 먼저 변경의 주체와 보존해야 할 능력을 분리한다.
@@ -2059,103 +2111,26 @@ quantization·merge 뒤에는 effective dequantized delta를 다시 계산한다
 
 이 확인은 행정 절차가 아니라 기술적 반증이다. resolver가 가리킨 weight·adapter·memory row를 한 항목씩 비활성화해 direct target, locality와 retain set이 어느 경계에서 변하는지 다시 측정한다. 예상하지 않은 항목을 껐을 때 결과가 되돌아간다면 실제 변경 주체를 잘못 기록한 것이다. 그때는 certificate 문구를 넓히지 말고 write set과 descendant graph부터 고친다.
 
-## 23.16 지속 사전학습과 시험 시 적응을 하나의 “계속 학습”으로 뭉개지 않는다
+## 23.16 GR-001/Change fork — 편집·삭제·적응의 상태 수명을 분리한다
 
-forgetting·BWT·FWT는 평가 행렬의 어느 칸을 빼느냐로 정의된다 도메인 문서를 더 읽히는 continual pretraining, 새 instruction family를 순차적으로 넣는 continual instruction tuning, 배포 중 입력만 보고 잠시 parameter를 바꾸는 test-time adaptation은 모두 이전 checkpoint 이후에 학습한다. 그러나 읽는 데이터, label의 존재, update의 수명과 rollback 경계가 다르다. 이들을 같은 `continual=true` 옵션으로 묶으면 평균 점수는 남아도 무엇이 망가졌는지 설명할 수 없다.
+continual pretraining, TTA/TTT-layer, distillation·pruning과 direction removal은 모두 “모델 변경”이지만 mutation owner와 수명이 다르다. 후반 증보는 `ChangeID→target/support/retain/forbidden sets→method state→new subject→evaluation→revocation` trace 아래로 합친다.
 
-task 또는 domain `j`까지 학습한 checkpoint를 `C_j`, 그 checkpoint를 평가 집합 `i`에서 잰 점수를 `R[j,i]`라고 쓰자. 마지막 checkpoint의 평균 성능은 `mean_i R[T,i]`이지만 이것만으로는 과거 능력 보존과 새 task의 전이 효과가 섞인다. backward transfer는 보통 `R[T,i]-R[i,i]`를 과거 task에 평균한다. 음수이면 과거 task를 처음 배운 직후보다 나빠졌다는 뜻이다. forgetting은 각 task가 과거 어느 시점에 얻은 최고 점수와 마지막 점수의 차이를 쓰기도 한다. 최고값을 사후 선택하면 평가 잡음까지 “한때 얻은 능력”으로 세므로, checkpoint cadence와 선택 규칙을 먼저 봉인해야 한다.
+```mermaid
+flowchart LR
+ R[ChangeRequest] --> S[target / retain / locality sets]
+ S --> M[edit, unlearn, adapt, distill, prune]
+ M --> A[new artifact + mutable state]
+ A --> E[efficacy / locality / forgetting / safety]
+ E --> D[approve, reject, revoke]
+```
 
-forward transfer는 task `i`를 학습하기 전의 `R[i-1,i]`를 무학습 기준선과 비교한다. 따라서 BWT와 FWT는 숫자 이름이 아니라 평가 시점과 기준 checkpoint의 계약이다. instruction tuning에서는 동일한 prompt가 template 변경으로 tokenization이 달라질 수 있으므로 `R`의 각 칸에 tokenizer·template·decode policy를 같이 매달아야 한다. continual pretraining의 perplexity와 instruction-following judge score를 한 행렬에 그대로 평균하지 않고, metric family별 행렬과 Pareto 표를 둔다.
+| method | durable mutation | 반드시 보존할 state·oracle |
+|---|---|---|
+| continual pretraining | model+optimizer generation | replay mixture, forgetting slices, cursor |
+| knowledge edit | selected parameter/update or external memory | target efficacy, paraphrase, locality |
+| unlearning | model/data-deletion evidence | forget/retain/control와 descendant graph |
+| TTA/TTT | request/session-local state일 수 있음 | reset boundary, leakage·poisoning |
+| distill/prune | 새 architecture/parameter subject | teacher relation, mapping, quality/cost |
+| direction removal | representation transform | projection geometry와 collateral change |
 
-운영 원장은 `PhaseID → input mixture snapshot → consumed token interval → optimizer/scheduler state → C_j → evaluation matrix row`를 연결한다. replay를 썼다면 원본 domain의 “문서 수”가 아니라 실제 valid target token 질량과 sampling probability를 기록한다. EWC라면 Fisher diagonal의 부모 checkpoint·추정 corpus·normalization을, output distillation이라면 teacher digest·prompt coverage·temperature와 KL 방향을 남긴다. task별 adapter 격리는 base의 망각을 줄일 수 있지만 문제를 router의 task inference와 adapter lifecycle로 옮긴다. router 오분류를 base forgetting으로 보고하지 않는다.
-
-가장 작은 fixture는 세 task와 네 checkpoint면 된다. 각 phase 직후 모든 task를 같은 evaluator로 재평가해 `R`을 완전히 채운다. task 순서를 뒤집은 run, 같은 compute의 replay 없는 run, replay item은 같지만 realized token 질량이 같은 run을 둔다. 마지막 조건이 중요한 이유는 packing과 길이 차이 때문에 row 수가 같아도 gradient 질량은 달라지기 때문이다. resume run에서는 data cursor뿐 아니라 replay reservoir, sampler RNG, optimizer moments와 scheduler token clock를 복구해 uninterrupted run과 최초로 달라지는 update를 찾는다.
-
-TENT·CoTTA·EATA·SAR는 서로 다른 mutable state를 가진다 시험 시 적응은 label이 없는 test stream에서 prediction 자체로 update 신호를 만든다. 그러므로 test set을 “평가만 하는 immutable 데이터”라고 가정한 일반 benchmark와 충돌한다. clean-reset 결과와 continual-stream 결과를 분리하고, sample order·batch composition·corruption segment와 reset policy를 EvaluationID에 넣어야 한다. 배치 크기 1에서 BatchNorm 통계가 의미 있는지, 같은 사용자의 다음 요청이 이전 사용자의 update를 상속하는지도 threat model이다.
-
-### TENT는 prediction entropy와 변경 가능한 normalization 상태를 함께 제한한다
-
-TENT의 핵심은 prediction entropy
-
-\[
-H(p_\theta(\cdot\mid x))=-\sum_c p_\theta(c\mid x)\log p_\theta(c\mid x)
-\]
-
-를 줄이되 보통 normalization의 affine scale·shift만 학습 가능하게 만드는 것이다. 저자 코드의 설정 함수는 다른 parameter의 `requires_grad`를 끄고 normalization state를 조정한다. 따라서 “model 전체가 test sample로 fine-tune된다”는 설명은 틀리다. 반대로 낮은 entropy는 정답성의 증거가 아니다. 분포가 바뀐 상태에서 자신 있게 틀린 prediction을 더 날카롭게 만들 수 있다.
-
-CoTTA는 student 외에 EMA teacher, source anchor, augmentation ensemble과 stochastic restore mask를 오래 유지한다. 복원 확률은 정규화 강도가 아니라 각 parameter를 anchor 값으로 되돌릴 확률이다. teacher momentum, augmentation confidence threshold와 restore RNG를 빼고 checkpoint를 저장하면 같은 이름의 CoTTA라도 이어진 state가 아니다. episodic reset은 요청마다 이 네 상태를 원점으로 돌리고, continual mode는 순서 의존성을 의도적으로 받아들인다.
-
-EATA의 고정 revision `EATA.forward_and_adapt_eata`는 entropy가 `e_margin`보다 작은 표본만 먼저 남긴다. 이어 현재까지의 평균 prediction과 cosine similarity가 `d_margin`보다 작은 표본을 비중복 표본으로 남기고, `exp(-(H-e_margin))`에 해당하는 계수로 entropy loss를 가중한다. Fisher가 주어지면 원천 parameter에서 멀어지는 정도를 diagonal quadratic penalty로 더한다. 여기서 갱신되는 것은 model·optimizer만이 아니다. `current_model_probs`, 두 단계 통과 표본 수와 Fisher 기준점도 streaming state다. 선택 표본이 0개이면 optimizer step을 건너뛰지만 moving probability의 처리까지 확인해야 한다.
-
-SAR의 `forward_and_adapt_sar`는 첫 entropy backward 뒤 SAM의 `first_step`으로 perturbation 위치에 이동하고, 같은 입력을 다시 forward해 두 번째 reliable subset에서 gradient를 구한 뒤 `second_step`으로 원 위치 기준 update를 적용한다. entropy EMA가 collapse 기준 아래로 내려가면 저장해 둔 model·optimizer state로 reset한다. 두 forward의 filter 집합은 같다고 가정할 수 없고, 빈 집합의 `mean`은 NaN이 될 수 있다. 저자 코드에는 recovery threshold 인자가 있지만 실제 비교가 상수 `0.2`로 적힌 고정 revision도 보인다. 설정 이름과 소비 지점이 같은지 읽어야 하는 이유다.
-
-이 네 방법을 비교하는 fixture는 logits 두 묶음으로 시작한다. 하나는 낮은 entropy의 오답, 다른 하나는 높은 entropy지만 작은 perturbation에 정답으로 바뀌는 표본이다. 각 방법에 대해 선택 index, loss numerator·denominator, trainable parameter 이름, optimizer step 수, EMA/Fisher/anchor 변화와 reset 후 checksum을 저장한다. batch 순서를 `A→B`와 `B→A`로 바꾸고 episodic·continual mode를 각각 실행한다. 결과가 다르면 버그라고 단정하지 말고 state contract가 의도한 순서 의존인지 먼저 판정한다.
-
-공개 저자 저장소의 EATA와 SAR snapshot에서는 이 수치 경계를 독립적으로 고정한 canonical unit-test suite를 찾지 못했다. 예제 실행 스크립트를 test oracle로 승격하지 않는다. 반면 함수 좌표는 목적함수와 상태 후보를 식별하는 Grade-A 정적 근거로 쓸 수 있다. 책의 fixture는 독자가 추가해야 할 검증 명세이지, 이 책에서 모델을 실행해 얻은 결과가 아니다.
-
-LLM의 test-time training과 vision TTA의 경계를 보존한다 LLM에서 긴 context를 읽으며 auxiliary next-token 또는 reconstruction loss로 weight를 바꾸는 TTT, external memory를 채우는 방법, prompt 내 gradient-free adaptation은 vision의 normalization adaptation과 동일하지 않다. 어느 token이 self-supervised target인지, inner-loop update가 request·session·tenant 중 어디까지 지속되는지, base checkpoint와 optimizer state를 어떻게 복구하는지 먼저 적는다. context answer를 이미 본 뒤 같은 question을 평가하면 leakage다.
-
-안전한 서비스에서는 mutable replica를 일반 serving pool과 분리한다. `AdaptationGeneration`을 요청에 붙이고, timeout·NaN·OOM·빈 target에서 immutable parent로 원자적으로 돌아간다. 여러 요청을 microbatch로 섞으면 한 tenant의 입력이 다른 tenant의 update에 기여하므로 batching key에 adaptation scope가 들어가야 한다. 16장의 cluster admission, 17장의 checkpoint 원자성과 26장의 generation별 metric을 이 장의 reset ledger에 연결한다.
-
-마지막 판정표에는 source-only, entropy minimization, EMA/restore, Fisher 보호, sharpness-aware update와 LLM inner-loop를 행으로 놓는다. 열은 trainable state, persistent state, label 사용, update cadence, reset unit, order sensitivity, canonical test 존재와 미실행 조건이다. “TTA가 강건성을 높였다”는 문장은 이 표에서 실제로 검증한 corruption·순서·batch·architecture 칸보다 넓어서는 안 된다.
-## 23.17 지식을 옮기고 모델을 줄일 때 무엇이 실제로 보존되는가
-
-증류와 가지치기는 모두 ‘작은 모델을 만든다’고 묶이지만, 보존하는 대상은 다르다. 증류는 같은 입력에서 교사가 만든 **분포·표현·궤적**을 학생의 목적함수로 옮긴다. 가지치기는 이미 학습된 함수의 매개변수나 블록 일부를 제거하고, 남은 함수가 허용 오차 안에 머무는지를 묻는다. 전자는 target을 바꾸고, 후자는 hypothesis space를 바꾼다. 이 차이를 놓치면 KL이 낮은데 생성이 무너지는 현상과 sparsity가 높은데 빨라지지 않는 현상을 같은 종류의 실패로 오진한다.
-
-첫 단계 — logit·hidden·attention 증류의 shape와 분모를 먼저 고정한다. 교사와 학생의 vocabulary가 같고 logits가 각각 $z_t,z_s\in\mathbb{R}^{B\times T\times V}$라면 가장 단순한 soft-target loss는 다음과 같다.
-
-$$
-L_{KD}=-\frac{1}{N}\sum_{b,t:m_{bt}=1}\sum_v
-p_t(v\mid x_{\le t};\tau)\log p_s(v\mid x_{\le t};\tau),\qquad
-N=\sum_{b,t}m_{bt}.
-$$
-
-$\tau$는 단순한 ‘부드러움 옵션’이 아니다. 같은 logit gap을 $1/\tau$로 줄여 tail token에 더 많은 질량을 주며, 구현에 따라 gradient 크기를 보상하려고 $\tau^2$를 곱하기도 한다. 그러므로 실험표에는 temperature뿐 아니라 loss 바깥의 $\tau^2$ 보상, prompt와 padding을 제외하는 mask, 분모가 sequence 수인지 유효 token 수인지까지 적어야 한다.
-
-DPKD 저자 코드의 `get_distil_loss`는 teacher forward를 `no_grad`로 실행하고 `[B,T,V]` teacher probability와 student log-probability를 곱한 뒤 `label != -100`인 token 수로 나눈다. 여기서 teacher를 eval 상태로 고정하는 일과 teacher graph를 끊는 일은 서로 다른 계약이다. 전자는 dropout 같은 상태 전이를 막고, 후자는 gradient ownership을 학생에만 둔다.
-
-Hidden-state KD는 $H_s\in\mathbb{R}^{B\times T\times d_s}$와 $H_t\in\mathbb{R}^{B\times T\times d_t}$가 다를 수 있어 projection $P\in\mathbb{R}^{d_s\times d_t}$가 필요하다. $\lVert H_sP-H_t\rVert_2^2$가 작다는 말은 token별 좌표가 가까워졌다는 뜻이지, 다음-token 분포나 representation geometry 전체가 보존됐다는 뜻은 아니다. layer 수가 다르면 어느 student layer가 어느 teacher layer를 따라갈지도 별도 matching 문제다.
-
-Attention KD 역시 $[B,h_s,T,T]$와 $[B,h_t,T,T]$를 곧바로 비교할 수 없다. head pooling이나 learned alignment를 먼저 정의하고 causal·padding mask 뒤에 남은 행만 정규화해야 한다. 모든 행을 평균하면 긴 padding 표본이 더 쉬운 loss를 제공하는 역전이 생긴다.
-
-검산은 네 단계로 한다. 첫째, 동일 logits에서는 loss가 0 또는 entropy 상수라는 선택한 정의의 기대값을 만족한다. 둘째, 한 token만 unmask했을 때 batch와 sequence 길이가 달라도 loss가 같다. 셋째, teacher parameter의 gradient는 `None`이고 student에는 finite gradient가 생긴다. 넷째, vocabulary가 다르면 묵시적으로 tensor를 맞추지 말고 token transport table 또는 공유 support를 명시한다. 이 네 가지를 통과하지 않은 hidden·attention KD 결과는 benchmark 점수보다 먼저 구현 계약부터 의심해야 한다.
-
-둘째 단계 — GKD·DPKD·DistillM을 ‘누가 어느 prefix를 만들었나’로 읽는다. Offline KD는 고정 데이터의 prefix에서 교사 분포를 묻는다. 그러나 배포 시 학생은 자기 token을 다시 입력으로 받는다. 학생이 조금 틀리면 학습에서 보지 못한 prefix로 이동하고 오차가 누적된다. On-policy KD가 필요한 이유는 이 **상태 분포의 불일치**를 줄이기 위해서다. TRL의 `GKDTrainer.training_step`은 확률 `lmbda`로 학생 completion을 생성해 입력을 교체하고, `seq_kd`에서는 교사 completion을 쓰는 별도 분기를 둔다. 따라서 `lmbda`는 KL의 가중치가 아니라, 어떤 정책이 학습 prefix를 소유하는지를 바꾸는 상태 전이 확률이다.
-
-GKD의 generalized JSD는 teacher $p$, student $q$, mixture $m=\beta p+(1-\beta)q$를 만들고 두 KL 방향을 섞는다. 고정된 TRL 구현과 canonical test에서 $\beta=0$과 $1$은 각각 forward-KL과 reverse-KL 끝점으로 환원되고, `-100` label은 분모에서 제외된다. Forward-KL은 교사가 가진 여러 mode를 놓치는 비용을 크게 만들고, reverse-KL은 학생 질량이 교사의 낮은 확률 영역으로 새는 일을 강하게 벌한다. ‘어느 것이 더 좋다’가 아니라, rollout 정책과 결합했을 때 coverage와 mode seeking 중 무엇을 지불하는지 묻는 편이 정확하다.
-
-DPKD 계열의 preference 형식은 teacher argmax와 student argmax를 chosen/rejected처럼 구성하고 두 정책의 log-ratio 차이에 logistic loss를 건다. 이것은 token-level full-distribution CE와 같은 목적함수가 아니다. 두 후보가 같으면 preference signal이 약해지고, argmax 두 점 밖의 vocabulary 질량은 직접 보지 못한다. DistillM류의 순차·on-policy 접근도 같은 질문으로 해부할 수 있다. 생성 주체, teacher query 시점, teacher 전체 logits 또는 top-k만 저장하는지, prompt·EOS·padding mask, token/global denominator, teacher 갱신 여부를 한 표의 열로 놓는다. 이름보다 이 여섯 상태가 실제 메모리 비용과 bias를 결정한다.
-
-Speculative KD도 speculative decoding과 구분해야 한다. 전자는 draft/student가 만든 경로에서 teacher 신호를 받아 학생을 학습시키는 문제이고, 후자는 배포 중 draft token을 target model로 검증해 정확한 target 분포를 보존하는 추론 알고리즘이다. acceptance speedup을 KD 품질로, KD loss 감소를 speculative decoding 속도로 번역할 수 없다.
-
-셋째 단계 — Wanda·SparseGPT·ShortGPT가 제거하는 구조를 구분한다. Wanda는 선형층 weight $W_{ij}$에 calibration activation의 channel scale을 결합한 $|W_{ij}|\sqrt{s_j}$를 중요도로 쓴다. 저자 코드의 `prune_wanda`는 forward hook으로 입력 통계를 모은 뒤, unstructured 모드에서는 출력 행마다 낮은 metric의 weight를 선택해 0으로 만든다. `prune_n != 0`이면 연속된 `prune_m`개 열마다 `prune_n`개를 `topk(..., largest=False)`로 골라 N:M mask를 만든다. 여기서 구조적이라는 말은 layer 폭이 줄었다는 뜻이 아니라, backend가 인식할 수 있는 **block 내부 zero pattern**을 만족한다는 뜻이다. weight tensor shape는 그대로다.
-
-SparseGPT는 activation으로 근사 Hessian을 누적하고 damping 뒤 역행렬의 Cholesky factor를 사용한다. 한 column을 0으로 만들 때 생긴 오차를 아직 처리하지 않은 column에 `Err1 @ Hinv` 형태로 전파한다. 따라서 Wanda와의 차이는 importance 식 하나가 아니다. Wanda는 고른 mask를 즉시 0으로 만들고 다음 layer calibration을 진행하는 반면, SparseGPT는 같은 block 안에서 2차 근사에 따라 순차 보상한다. 둘 모두 calibration 분포가 바뀌면 mask가 바뀔 수 있고, weight가 0이라는 사실만으로 sparse kernel dispatch가 발생하지 않는다.
-
-ShortGPT는 weight가 아니라 residual block을 제거한다. `block_influence`는 입력과 출력 hidden을 펼쳐 cosine distance를 계산하고, `remove_layers`는 중요도가 낮은 index를 역순으로 실제 `ModuleList`에서 삭제한다. 역순 삭제는 앞 index가 당겨져 잘못된 layer를 지우는 일을 막는 구조 불변식이다. 이 방법은 depth와 KV-cache의 layer 축을 실제로 줄일 수 있지만, residual stream의 방향이 비슷하다는 사실이 attention pattern·logit·tool-use 행동까지 보존한다는 보장은 없다. 또한 generation 전용 skip 구현은 prefill과 decode에서 같은 block set을 건너뛰는지 별도로 감사해야 한다.
-
-2:4 sparsity는 ‘50%가 0’보다 강한 계약이다. backend가 요구하는 축의 연속 네 원소마다 정확히 두 원소가 0이어야 하며, dtype·alignment·GPU 세대·라이브러리 dispatch가 맞아야 Tensor Core sparse path가 가능하다. 무작위 50% unstructured mask와 2:4 mask는 동일한 sparsity라도 저장 형식과 실행 경로가 다르다. 반대로 ShortGPT처럼 layer를 물질적으로 삭제하면 dense GEMM 수가 감소하므로 kernel 지원 없이도 이론 FLOP은 줄지만, 작은 batch에서는 launch·memory·communication 비중 때문에 wall time이 같은 비율로 줄지 않는다.
-
-넷째 단계 — 압축 실험을 품질표가 아니라 폐루프로 승인한다. 압축 변경의 최소 산출물은 `teacher/student revision → calibration 또는 rollout dataset hash → mask·loss config → compressed checkpoint → structural oracle → quality oracle → hardware oracle`이다. Structural oracle은 Wanda N:M의 각 group zero count, SparseGPT 목표 sparsity와 finite compensation, ShortGPT의 layer count·config·state-dict 일치를 검사한다.
-
-Quality oracle은 원본과 압축 모델의 같은 tokenizer·chat template·generation config에서 perplexity뿐 아니라 calibration, 긴 문맥, 안전·도구 호출 회귀를 비교한다. Recovery SFT·LoRA·KD를 했다면 pruning 직후와 recovery 뒤를 분리해 기록한다. recovery가 mask를 깨뜨리거나 삭제한 구조를 우회해 파라미터를 되살리지 않았는지도 검사한다.
-
-Hardware oracle은 sparsity 숫자에서 추론하지 않는다. 같은 GPU·CUDA·driver·dtype·batch·sequence에서 profiler로 실제 kernel 이름과 shape를 확인하고 warm-up 뒤 prefill/decode 또는 train step wall time을 각각 측정한다. 현재 보존한 저자 snapshot과 정적 분석은 mask, 오차 보상, layer 삭제를 증명하지만, 이 책의 환경에서 2:4 sparse kernel이 선택되거나 특정 속도 향상이 재현됐음을 증명하지 않는다. 그래서 그러한 주장은 미실행 근거로 남긴다. 이 경계가 있어야 ‘정확히 절반을 지웠는데 왜 안 빨라졌는가’라는 질문에 모델 품질이 아니라 layout·dispatch·병목 비율로 답할 수 있다.
-
-## Continual pretraining·TTA·TTT-layer의 상태 수명을 분리한다
-
-세 이름은 모두 “추론 또는 시간의 진행 중 바뀌는 model”을 말하지만 update의 경계가 다르다. continual pretraining은 task/domain 구간을 넘어 parameter와 optimizer를 지속한다. TENT·CoTTA·EATA·SAR 같은 일반 test-time adaptation은 배포 입력 batch에서 normalization affine 등의 일부 parameter를 entropy 계열 loss로 바꾸며 episodic reset 정책을 가질 수 있다. LLM의 TTT-layer는 sequence 내부에서 hidden state 또는 fast weight를 token별로 갱신하는 layer architecture다. image batch TTA의 reset을 TTT-layer의 recurrent state와 같은 것으로 읽으면 저장·평가 단위가 틀어진다.
-
-TENT의 고정 구현은 초기 model·optimizer state를 복사하고 episodic mode에서 forward 전에 reset한다. SAR는 두 단계 sharpness-aware update와 entropy EMA를 recovery criterion으로 쓰며 reset 때 EMA를 `None`으로 돌린다. 여기서 SAR의 EMA는 teacher parameter EMA가 아니다. CoTTA의 teacher, augmentation과 stochastic restore, EATA의 Fisher와 running probability memory도 각각 별도 owner·lifetime을 가진다. checkpoint 원장은 model, optimizer, teacher, EMA, memory/buffer, RNG와 task/stream cursor를 독립 행으로 기록한다.
-
-순서 효과는 최종 평균 하나로 숨기지 않는다. task i 직후 정확도를 `a(i,i)`, 최종 T 뒤 task i 정확도를 `a(T,i)`라 두면 `BWT=(1/(T-1))Σ_{i<T}[a(T,i)-a(i,i)]`다. 아직 학습하지 않은 task i에 대한 이전 model `a(i-1,i)`를 base `b(i)`와 비교해 FWT를 정의하고, forgetting은 `max_{k<T}a(k,i)-a(T,i)`를 task별로 낸다. A→B와 B→A, continual과 episodic reset을 모두 실행하지 않으면 method gain과 순서 운을 분리할 수 없다.
-
-재개 fixture는 각 sample 전후의 state digest와 stream cursor를 함께 commit한다. reset 직전·model restore 뒤·optimizer restore 뒤·EMA/memory 초기화 뒤에 중단을 주입하고, fresh process의 다음 adaptation delta가 uninterrupted reference와 같은지 본다. 공개 연구 코드의 함수 존재는 이 종단 순서 계약의 직접 테스트가 아니므로 `TestNotLocated`로 유지한다. 오래된 framework·CUDA 조합이 현재 환경에서 재현되지 않으면 조용히 API를 바꾸지 말고 pinned environment로 격리하거나 지원 불가로 거부한다.
-
-## 23.18 방향 제거를 지식 편집·망각과 혼동하지 않는다
-
-Heretic의 direction-of-means는 harmful prompt 집합과 benign prompt 집합에서 마지막 위치 residual을 layer별로 모으고 `normalize(mean_bad-mean_good)`을 계산한다. 이는 특정 prompt 분포에서 선형으로 읽힌 표현 차이다. 사실 하나의 causal trace를 찾아 rewrite하거나, 삭제 대상 example의 영향함수를 상쇄하거나, 원 학습 데이터의 권리 삭제를 증명하는 unlearning certificate가 아니다.
-
-실제 가중치 개입은 정규화 방향 `d`의 projector `dd^T`를 만들고 선택 projection `W`에 `αdd^TW`를 빼는 연산이다. α는 layer 중심·폭과 component별 강도에서 달라진다. 방향 index가 정수가 아니면 인접 layer 방향을 선형 보간한 뒤 다시 정규화한다. 이 구조는 단일 direction조차 layer마다 동일하지 않을 수 있음을 보여 주지만, refusal이 정말 1차원이라는 보증은 아니다.
-
-편집 평가표에는 target behavior 외에 paraphrase·locality·portability·specificity와 역방향 공격을 둔다. direction intervention은 multilingual, long-context, tool-use, benign safety refusal과 unrelated capability를 따로 측정해야 한다. 저자 revision에는 projector 수식, architecture adapter, trial reload의 독립 canonical test가 없으므로 여섯 구현 claim은 `TestNotLocated`다. 소스 좌표가 정확하다는 사실과 행동 일반화가 검증됐다는 주장을 분리한다.
+`θ'=θ-αuuᵀθ` 같은 direction projection은 특정 prompt/knowledge 삭제를 자동 증명하지 않는다. Engram/외부 memory 변경도 weight edit와 다른 revocation surface다. target success만 보고 승인하지 않고 retain·locality·general capability·safety와 confidence를 같은 subject에서 측정한다. session reset 누락, edit 순서 교환, deletion descendant 잔존과 prune mapping 누락을 주입한다. 24장에는 ChangeID별 평가 subject·sets·hypothesis를, 27장에는 rights/deletion graph와 새 artifact provenance를 넘긴다.

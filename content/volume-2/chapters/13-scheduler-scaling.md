@@ -221,221 +221,9 @@ batch 후보마다 independent seed 여러 개의 microbatch gradient를 저장�
 
 plateau에서는 lr이 0 또는 min에 일찍 도달했는지, total-step 계산이 accumulation을 microstep으로 셌는지 본다. oscillation에서는 warmup 종료와 batch/world-size change를 찾는다. resume spike에서는 next lr와 bias correction step을 동시에 본다.
 
-## 13.3 branch 실험을 handoff manifest로 닫는다
+## 13.3 scheduler branch의 단일 인계 규범
 
-schedule branch는 config 한 줄을 바꾼 복사본이 아니다. parent checkpoint, clock generation, horizon, 데이터 cursor와 예상 learning-rate 열을 manifest로 고정한 뒤, 작은 branch 실험이 원래 가설만 바꾸었는지 판정한다.
-
-### 13.3.1 branch 계보를 고정하는 handoff manifest
-
-manifest에는 clock kind 하나만 쓰지 않고 모든 counter와 authoritative field를 표시한다. schedule segment별 start/end count, formula, base/min lr, warmup, branch parent를 넣는다. 한 update event는 consumed token/DocumentID, overflow/skip, applied lr, resulting CheckpointID와 연결된다.
-
-15장 분산화 이후에도 이 logical clock은 rank-local counter가 아니다. coordinator 또는 deterministic global reduction이 소유한다. 17장 checkpoint는 이 manifest와 다음 event를 함께 저장해야 resume drift를 판정할 수 있다.
-
-**event-sourced scheduler**
-
-counter 값을 checkpoint에 한 번 쓰는 대신 update event를 append한다. event에는 attempted/committed step, input/valid token 증가량, sample ID 범위, applied lr, skip reason, resulting optimizer commit을 기록한다. checkpoint는 event offset과 counter snapshot을 함께 저장한다. 복구기는 snapshot 이후 event를 재생해 counter를 검증한다.
-
-중복 event는 commit ID로 제거하고 gap이 있으면 재개를 막는다. dataloader가 token을 소비했지만 optimizer가 skip된 event도 남긴다. 이 ledger는 schedule 계산뿐 아니라 “lr가 적용된 데이터”를 역추적하게 한다.
-
-**curriculum과 clock 충돌**
-
-domain mixture가 token 10B에서 바뀌는데 scheduler는 optimizer step 기반이면 variable batch에서 두 사건의 상대 위치가 run마다 달라질 수 있다. curriculum, sequence-length warmup, optimizer lr schedule의 authoritative clock을 각각 선언하고 실제 event에서 교차점을 기록한다.
-
-sequence length를 2배로 늘리며 global sequence batch를 유지하면 token/update가 2배다. 메모리 때문에 accumulation을 바꾸면 또 달라진다. length curriculum 전후의 lr, valid token, gradient norm을 비교한다. loss spike를 길이 자체와 lr clock jump로 분리한다.
-
-### 13.3.2 scheduler branch 실험
-
-동일 parent checkpoint에서 cosine decay, linear decay, WSD 세 branch를 만든다. optimizer state와 다음 batch는 같고 미래 lr sequence만 다르다. 첫 step gradient가 같고 delta가 lr 비율대로 달라지는지 검산한다. branch마다 parent, formula digest, terminal token을 기록한다.
-
-중간 결과가 나쁜 branch를 조기 중단해도 탐색 ledger에 남긴다. best schedule만 남기면 selection bias를 감춘다. validation interval이 step 기반이면 branch별 token 위치가 같도록 조정한다.
-
-**elastic failure rehearsal**
-
-world size 8에서 checkpoint를 저장하고 4로 재개한다. global token/update를 유지하는 config와 유지하지 않는 config를 각각 실행한다. first batch multiset, scheduler next lr, optimizer step, sample cursor를 비교한다. sample-exact가 불가능하면 token-clock continuity만 통과했다고 표시한다.
-
-rank 하나가 overflow를 보고 다른 rank는 finite인 상황에서 found-inf를 global하게 합쳐 모든 rank가 같은 commit/skip 결정을 하는지 본다. 일부 rank만 optimizer와 scheduler를 전진하면 즉시 divergence와 collective mismatch가 생긴다.
-
-**운영 경보**
-
-`lr_expected != lr_applied`, committed step gap, token/update 급변, skip burst, schedule segment 경계 지연을 경보로 둔다. data mixture/length change와 같은 timestamp에 lr jump가 있으면 incident context에 연결한다. 단순 loss threshold보다 원인을 빨리 좁힌다.
-
-**열두 event 수치 timeline**
-
-warmup 4 committed update를 가진 run을 만든다. attempt 1·2는 정상, attempt 3은 overflow, attempt 4·5가 정상이라면 네 번째 committed update는 attempt 5다. scheduler가 committed clock을 읽으면 peak lr도 attempt 5에 도달한다. attempt clock을 읽으면 attempt 4에서 도달한다. 두 lr sequence를 표로 비교한다.
-
-각 attempt가 input token 1,024를 소비하지만 valid label은 `[800,700,900,0,850]`이라고 하자. overflow attempt도 data는 소비했고 empty-label attempt는 optimizer를 건너뛴다. input-token clock, valid-token clock, committed clock은 모두 다른 값이다. 어떤 clock도 숨겨진 “진짜 step”으로 합치지 않는다.
-
-**accumulation denominator 예제**
-
-microbatch A의 loss sum 100, valid 100과 B의 sum 20, valid 10이 있다. microbatch mean 평균은 `(1+2)/2=1.5`, global token mean은 `120/110≈1.091`이다. accumulation code가 각 mean을 같은 비중으로 backward하면 긴/짧은 batch weighting이 objective를 바꾼다. scheduler token count만 고쳐서는 gradient scale이 복원되지 않는다.
-
-DDP rank별 차이까지 더해 local numerator/denominator를 event에 남긴다. global denominator를 만든 뒤 accumulation scale을 적용하는 reference와 한-step gradient를 비교한다.
-
-**epoch라는 이름의 함정**
-
-PyTorch scheduler의 `last_epoch` 같은 필드가 실제 dataset epoch를 뜻한다고 가정하지 않는다. batch 단위 호출이면 update index에 가깝다. iterable dataset에는 안정적인 epoch length가 없을 수 있다. trainer가 epoch progress를 float로 저장하더라도 sampler cursor와 같지 않다.
-
-dataset size 변경 후 checkpoint를 load하면 epoch-derived total steps와 old scheduler horizon이 충돌한다. old horizon 유지 branch와 새 horizon 재계산 branch를 나누고 next lr을 명시한다. silent recompute를 허용하지 않는다.
-
-**scheduler와 weight decay 결합 수치**
-
-gradient가 0인 scalar `θ=1`, decay `0.1`에서 lr sequence가 `[0.01,0.01,0.001]`이면 최종 값은 세 shrink factor의 곱이다. constant wd라도 schedule에 따라 누적 regularization이 달라진다. schedule branch 비교에서 lr만 보고 decay budget을 같다고 말하지 않는다.
-
-LAMB/LARS trust ratio, schedule-free relative step, Adafactor internal lr처럼 optimizer가 scale을 다시 바꾸면 `lr_applied`뿐 아니라 최종 update RMS를 기록한다. scheduler output이 optimizer effective step과 같지 않다.
-
-**checkpoint 전후 호출 순서 test**
-
-`optimizer.step→scheduler.step→save`와 `optimizer.step→save→scheduler.step`은 같은 파일 이름이어도 next lr가 다르다. save hook이 어느 위치에 있는지 고정 source와 trace로 확인한다. scheduler step 직전 process kill, 직후 kill을 각각 주입한다.
-
-commit record에 optimizer commit과 scheduler event를 함께 묶으면 반쪽 전진을 찾을 수 있다. 복구기는 둘의 parent step이 맞지 않으면 이전 complete cut을 고른다.
-
-**token horizon migration**
-
-step schedule checkpoint를 token schedule로 바꿀 때 과거 event ledger에서 consumed token을 재구성한다. `old_step×nominal_tokens`로 근사한 branch는 exact migration과 구분한다. packing/length curriculum이 있었다면 nominal 근사가 크게 틀릴 수 있다.
-
-새 token schedule의 current position, remaining horizon, next lr를 migration report에 쓴다. optimizer state reset 여부와 별개로 schedule migration 자체가 새 RunID를 만든다.
-
-**multi-node clock owner**
-
-global clock을 rank 0 Python 변수 하나로만 두면 failover와 split-brain 위험이 있다. optimizer commit ID에서 deterministic하게 파생하거나 checkpoint coordinator가 durable event를 소유한다. 모든 rank는 broadcast된 applied lr와 commit counter를 assertion한다.
-
-rank 하나만 overflow를 봤을 때 found-inf all-reduce가 끝난 뒤 commit decision을 내린다. decision 전에 scheduler를 호출하지 않는다. rank별 lr checksum이 다르면 다음 collective 전에 fail-fast한다.
-
-**모니터링과 복구 판정**
-
-대시보드는 attempted/committed/token clock을 같은 x축에 억지로 겹치지 않고 변환 가능한 event join으로 보여준다. skip reason, token/update, lr expected/applied, update RMS를 함께 본다. clock gap이 급증하면 data empty batch, overflow, optimizer failure를 분기한다.
-
-resume 성공 판정은 첫 세 event의 GoldenBatchID, 모든 counter 증가량, applied/next lr, optimizer step을 control과 비교한다. bitwise가 불가능한 topology 변경에서는 적어도 declared clock continuity와 sample 등급을 명시한다.
-
-**장간 handoff**
-
-15장은 scheduler를 rank-local loop 변수로 다시 만들지 않고 이 장의 global commit event를 받는다. 17장은 counter snapshot만이 아니라 event offset과 next lr를 저장한다. 18·20장의 mask/rollout denominator도 valid-token clock과 같은 이름을 쓰되 objective별 의미를 기록한다.
-
-이 handoff가 있으면 world size, accumulation, response length가 바뀌어도 “step 10,000”을 모호하게 비교하지 않는다. 모든 곡선의 x축이 어떤 ledger field인지 책 전체에서 추적된다.
-
-**전체 run 예시**
-
-Run A는 world size 8, accumulation 4, variable sequence를 사용한다. event 500에서 4.2M input token, 3.1M valid label, committed update 497을 기록한다. 세 번의 overflow가 attempted와 committed 차이를 만든다. lr formula는 committed update warmup이지만 curriculum은 input token을 읽는다. 두 clock의 교차점을 manifest에 남긴다.
-
-checkpoint 뒤 world size 16, accumulation 2로 재개한다. nominal token/update는 유지되지만 첫 packed batch가 달라져 sample-exact는 실패한다. token-clock continuity와 optimizer state는 통과했다. 이 run을 단순 “완전 재현”이라고 쓰지 않고 topology-portable/numerical-equivalent 조건으로 평가한다.
-
-**schedule 오류를 재현하는 세 줄**
-
-optimizer step이 skip됐는데 scheduler만 호출하는 fixture, scheduler를 optimizer보다 먼저 호출하는 fixture, load 뒤 total horizon을 바꾸는 fixture를 둔다. 세 경우 모두 loss를 오래 돌리기 전에 expected lr table에서 실패해야 한다. 작은 oracle이 장기 divergence보다 싸다.
-
-**평가 시점 정렬**
-
-두 run의 evaluation을 같은 step 번호로 맞추면 token 수가 다를 수 있다. EvalID는 committed step, input/valid token, sample ledger offset을 함께 가진다. scaling-law 그래프는 token x축, 운영 throughput 그래프는 wall-clock, optimizer 안정성은 committed update x축을 사용한다.
-
-**recovery checklist**
-
-복구 직후 authoritative clock, current/next lr, optimizer step, scaler, 첫 GoldenBatchID를 출력한다. 세 event 동안 증가량을 control과 비교한다. 차이가 나면 학습을 계속해 평균내지 않고 data·clock·optimizer 분기로 즉시 좁힌다.
-
-**clock schema의 버전**
-
-새 counter를 추가하거나 의미를 바꾸면 schema version을 올린다. 옛 checkpoint의 `tokens_seen`이 input인지 valid인지 모호하면 자동 변환하지 않는다. migration은 원 field, 가정, 계산 결과를 report에 남긴다.
-
-이 명시성이 17장의 checkpoint loader가 schedule state를 조용히 오해하는 일을 막는다.
-
-**clock·분모·commit의 교차 검산표**
-
-독자는 열 개 event를 손으로 만든다. 정상 update, overflow, empty-label, gradient accumulation, checkpoint, resume을 포함한다. 각 행에는 input token 증가, valid label 증가, attempted/committed 증가, applied/next lr, optimizer step을 쓴다. scheduler 구현의 출력과 이 표가 다른 최초 행을 찾는다.
-
-resume fixture는 checkpoint 직전 두 event와 직후 세 event를 보존한다. load가 성공했다는 로그 대신 next lr, first GoldenBatchID, optimizer bias-correction step을 비교한다. world size가 바뀌면 DocumentID multiset과 token count를 별도 판정한다.
-
-**고정 구현 좌표를 만드는 절차**
-
-Transformers checkout `550d7b3834670483a4df436541272c055dc364bf`에서 `src/transformers/optimization.py`의 scheduler factory와 각 lambda, `src/transformers/trainer.py`의 optimizer/scheduler 호출 및 checkpoint load symbol을 함께 고정한다. factory만 읽으면 trainer 호출 순서와 skip behavior를 알 수 없고 trainer만 읽으면 formula closure를 알 수 없다.
-
-PyTorch optimizer/scheduler integration은 사용 중인 PyTorch commit에서 `LRScheduler.step`, state-dict test, AMP GradScaler step test를 고정한다. 줄 번호는 source note의 floating main이 아니라 실제 book build manifest의 commit/span으로 기록한다. upstream test가 overflow와 elastic world-size까지 검증하지 않으면 이 장의 proposed fixture를 별도 실행한다.
-
-**run 종료 판정**
-
-run 마지막 event와 checkpoint manifest의 committed counter, token counter, scheduler state가 같아야 한다. evaluation x축은 해당 EvalID가 실제 소비한 counter를 쓴다. mismatch가 있으면 curve를 출판하지 않고 event ledger를 복구한다.
-
-이 판정은 17장의 consistent cut에 scheduler를 포함하게 한다. model·optimizer는 step 100인데 scheduler만 101인 checkpoint는 complete가 아니다.
-
-**release 전 clock audit**
-
-모든 checkpoint를 parent 순서로 읽어 committed step, input/valid token, current/next lr가 역행하지 않는지 확인한다. 의도적인 branch는 새 RunID와 parent event를 갖는다. 같은 RunID에서 counter가 줄거나 lr segment가 설명 없이 바뀌면 corruption으로 판정한다.
-
-evaluation table의 각 row를 scheduler event와 join한다. “step 1000”만 있고 token과 denominator를 복원하지 못하는 metric은 다른 batch/world-size run과 직접 비교하지 않는다. 학습률 graph에도 authoritative x축 label을 표시한다.
-
-resume rehearsal은 overflow 직전, warmup 종료, WSD decay 시작처럼 경계가 민감한 checkpoint를 고른다. 평범한 중간 step 하나만 통과해서는 off-by-one을 충분히 검출하지 못한다. 세 경계 모두에서 다음 lr와 delta를 확인한다.
-
-이 audit 결과를 CheckpointID metadata에 넣으면 loader는 schedule state가 불완전한 artifact를 미리 거부할 수 있다.
-
-운영 dashboard도 동일 event schema를 읽어 offline report와 online alert의 counter 해석이 갈라지지 않게 한다. schema migration 전후의 field 의미가 다르면 두 series를 자동 연결하지 않는다. evaluator와 checkpoint loader가 같은 authoritative clock 이름을 사용해야 한다.
-
-최종 counter audit도 통과한다.
-
-**사례 연구: 같은 cosine 이름이 다른 학습을 만드는 과정**
-
-두 run은 warmup 1,000, cosine decay 100,000 step이라는 같은 문장을 쓴다. 그러나 A는 microbatch마다 scheduler를 전진하고 B는 committed optimizer update마다 전진한다. gradient accumulation 8이면 A의 schedule은 여덟 배 빨리 흐른다. overflow skip과 variable packing까지 들어오면 step이라는 말만으로 두 곡선을 비교할 수 없다.
-
-사례의 authoritative clock은 `CommittedOptimizerStep`과 `ValidTrainingToken` 두 개다. microstep, attempted update, consumed input token은 보조 counter다. schedule function이 어느 counter를 읽는지 manifest에 넣는다. evaluation과 checkpoint도 같은 event ledger에서 counter를 얻는다.
-
-**열두 microbatch 수치 timeline**
-
-accumulation 4인 열두 microbatch를 만든다. 첫 window는 성공, 둘째는 세 번째 microbatch에서 overflow, 셋째는 성공이다. attempted update는 3회지만 committed update는 2회다. overflow window의 gradient를 버리는 정책이라면 consumed input token은 증가해도 valid committed token은 update에 기여하지 않는다.
-
-warmup 4 committed update에서 lr factor가 `0.25,0.5,0.75,1.0`이라면 두 성공 update는 `0.25η,0.5η`를 쓴다. attempted clock은 세 번째 attempt에 `0.75η`를 줄 수 있다. microstep clock은 첫 window 안에서 lr이 바뀌는 더 큰 오류를 만든다. 독자는 event table에서 optimizer가 실제 읽은 lr을 계산한다.
-
-GradScaler가 optimizer step을 skip했는지 확인하는 방식은 framework revision에 따라 고정한다. return value 추측이나 scaler 값 감소 하나에 의존하지 않고 optimizer committed event와 parameter/state delta를 확인한다. scheduler 호출 순서를 source와 local overflow fixture로 검증한다.
-
-**token clock의 세 denominator**
-
-input token은 padding과 prompt를 포함할 수 있고 valid loss token은 labels mask만 센다. packed SFT는 같은 input token에서도 assistant valid 비율이 다르다. pretraining causal LM과 assistant-only SFT를 token budget 하나로 비교하려면 어느 token이 schedule에 기여하는지 선언한다.
-
-global valid count는 rank별 count sum이다. local mean을 평균하고 nominal batch×length를 token으로 쓰면 variable length와 last batch에서 틀린다. DP rank마다 `[120,80,100,60]` valid token이면 clock은 360이다. configured `4×128=512`를 더하지 않는다.
-
-gradient accumulation 중 각 microbatch count를 ledger에 더하되 overflow로 commit되지 않은 window를 schedule token에 포함할지 정책을 정한다. compute-consumed token과 update-contributing token을 모두 저장하면 두 해석을 사후 구분할 수 있다. 결과 표의 primary x축을 명시한다.
-
-**schedule 식을 손으로 검산한다**
-
-linear warmup은 `t/W` 또는 `(t+1)/W`처럼 off-by-one 정의가 다를 수 있다. 첫 optimizer update가 0 lr인지 `η/W`인지 source lambda와 호출 순서를 함께 봐야 한다. step 0에서 scheduler를 먼저 호출하는지 optimizer 뒤 호출하는지도 실제 lr을 바꾼다.
-
-cosine decay를 `η_min +(η_max−η_min)(1+cos(πp))/2`로 두고 progress `p=(t−W)/(T−W)`를 계산한다. `t=W`에서 max, `t=T`에서 min인지 경계 fixture로 확인한다. clamp가 없으면 T 이후 cosine이 다시 오를 수 있다. implementation의 clamp/terminal behavior를 source에서 읽는다.
-
-WSD는 warmup, stable, decay 세 구간의 boundary와 continuity를 검사한다. decay 시작 checkpoint에서 next lr가 stable 마지막과 이어지는지 본다. resume off-by-one은 경계에서 가장 잘 드러난다. 각 구간 첫/마지막 세 step을 golden table로 둔다.
-
-**Transformers source와 test 지도**
-
-고정 Transformers commit에서 scheduler factory는 name을 lambda closure로 해석한다. 각 scheduler 함수의 arguments, warmup/training step과 cycles/min ratio를 기록한다. Trainer에서는 optimizer/scheduler 생성, optimizer step success 뒤 scheduler 호출, checkpoint state save/load를 잇는다.
-
-factory source는 식을 보여주지만 GradScaler skip과 Trainer event order 전체를 증명하지 않는다. Trainer source는 호출 순서를 보여주지만 custom trainer override나 distributed wrapper가 같은 branch를 탔다는 증거가 아니다. run trace에서 selected scheduler class와 step event를 확인한다.
-
-upstream test 표에는 경계 lr sequence, state dict resume, invalid option assertion을 적는다. overflow skip, elastic world size, token clock은 upstream이 다루지 않을 수 있어 local/proposed fixture로 남긴다. 함수가 존재하는 것과 test된 behavior를 분리한다.
-
-**scaling rule은 schedule과 별 실험이다**
-
-global batch를 k배 늘릴 때 linear lr scaling은 특정 optimizer와 noise regime의 heuristic이지 법칙이 아니다. warmup step을 그대로 두면 warmup token은 k배가 된다. token budget을 유지하려면 warmup step을 나누거나 token clock을 사용해야 한다. 두 선택을 명시한다.
-
-sqrt scaling과 linear scaling, fixed lr를 같은 search budget에서 비교한다. primary endpoint는 token-to-validation과 stability다. large batch가 update 수를 줄여 decay 횟수와 data order를 바꾸므로 optimizer update budget과 token budget을 모두 보고한다.
-
-gradient accumulation으로 batch를 키우는 경우와 DP world size로 키우는 경우는 system behavior가 다르다. 전자는 더 긴 accumulation window, 후자는 collective와 rank별 denominator를 바꾼다. mathematical effective batch가 같아도 throughput과 failure probability가 다르다.
-
-**negative control 여섯 가지**
-
-첫 control은 scheduler를 완전히 끄고 fixed lr로 one-step/replay를 검증한다. 둘째는 scheduler를 optimizer보다 먼저 호출해 off-by-one test가 실패하는지 본다. 셋째는 overflow인데 scheduler만 전진시킨다. 넷째는 rank 1 valid count를 global clock에서 누락한다.
-
-checkpoint scheduler state를 한 step 앞서 저장하면 parameter/optimizer가 같아도 resume next lr는 달라져야 한다. 이어 world size를 바꾸고 nominal step clock만 유지해 token progress drift를 만들고, metric이 이 오류를 감지하는지 확인한다.
-
-negative control이 실패를 만들지 못하면 정상 test도 민감하지 않다. 각 control은 expected lr sequence와 failure code를 가진다. loss가 finite하다는 이유로 통과하지 않는다.
-
-**checkpoint event schema**
-
-한 scheduler event는 RunID, attempted/committed step, input/valid/contributing token, current lr와 next lr, scaler skip, optimizer commit ID를 가진다. parameter group별 lr가 다르면 배열과 group digest를 저장한다. scheduler state dict hash만으로 의미를 복원하지 않는다.
-
-checkpoint root는 model/optimizer/scheduler/scaler와 data cursor가 같은 committed event를 가리킨다. save 중 한 component만 미래 step이면 incomplete cut이다. root manifest를 마지막에 publish한다. loader는 current/next lr를 재계산해 event와 비교한다.
-
-resume 첫 세 update를 uninterrupted control과 비교한다. warmup 종료, WSD decay 시작, overflow 직전처럼 경계 checkpoint를 선택한다. 평범한 중간 지점만 통과하면 boundary off-by-one을 놓친다.
-
-**incident/RCA: warmup이 너무 빨리 끝났다**
-
-먼저 authoritative clock과 schedule input을 비교해 microstep 또는 attempted step을 읽었는지 확인한다. 그다음 world size/effective batch 변경 전후의 warmup token을 계산하고, resume에서 scheduler가 이중 step됐는지 event ledger로 검사한다.
-
-lr graph의 x축 label이 step뿐이면 valid token으로 다시 그린다. configured warmup 숫자와 realized token, committed update를 표에 둔다. 수정은 새 branch에서 boundary fixture와 next delta를 검증한다. 기존 curve의 x축을 조용히 재해석하지 않는다.
+branch는 `parent checkpoint, authoritative clock, horizon, next sample, expected LR sequence`를 한 manifest에 둔다. attempt·overflow·empty-label·committed update를 별 사건으로 남기고, resume 뒤 첫 `UpdateID`와 LR이 uninterrupted branch와 맞을 때만 다음 실험으로 넘긴다.
 
 ## 13.4 incident에서 scheduler 원인을 분리한다
 
@@ -2496,3 +2284,44 @@ overflow가 끼면 attempt와 commit을 나누고 scheduler 정책을 확인한�
 모든 결정은 다음 update를 예측하고 재생하며 실패했을 때 안전하게 되돌릴 수 있어야 비로소 실제 대규모 학습의 제어 계약이 된다. 14장에서는 이 시계가 overflow 때문에 commit되지 않은 update를 어떻게 다뤄야 하는지, BF16·FP8 표현과 loss scaler의 실제 상태 전이에서 검증한다.
 
 [설정한 mixture가 실제 손실 질량이 되기까지](../labs/06-mixture-realized-mass-lab.md)는 curriculum phase와 optimizer commit clock이 같은 draw를 어떻게 다르게 해석하는지 보여 준다. warmup에서 읽은 SFT 행도 해당 update가 실패하면 커밋 손실 질량은 0이며, 재개 시에는 다음 단계 ID·draw cursor·source별 exhaustion을 함께 복원해야 schedule과 데이터 시계가 다시 맞는다.
+
+## 13.11 GR-001 — scheduler가 UpdateID를 발행하는 순간
+
+이 절은 앞에서 여러 번 설명한 step·token·overflow 시계를 하나의 수직 기록으로 압축한다. `GR-001`은 예시 run이고 `U0042`는 **성공적으로 공개할 후보 UpdateID**다. batch를 읽었다는 사실이나 `optimizer.step()` 호출을 시작했다는 사실만으로 `U0042`가 되지는 않는다. 모든 rank의 finite 합의와 optimizer mutation이 끝난 뒤에만 `committed=true`가 된다.
+
+```mermaid
+sequenceDiagram
+    participant D as Data/collator
+    participant T as Trainer loop
+    participant O as Optimizer+Scaler
+    participant S as LR scheduler
+    participant P as 15장 ownership ledger
+    D->>T: BatchID=B117, valid_tokens=8192
+    T->>T: AttemptID=A0042, microstep 0..3
+    T->>O: unscale + finite vote
+    O->>O: parameter/moment mutation
+    O-->>T: optimizer_commit(U0042)
+    T->>S: scheduler.step(U0042)
+    S-->>P: GR-001/U0042 + applied LR + ClockGeneration
+```
+
+### 고정 소스에서 호출과 mutation을 분리한다
+
+Transformers 고정 revision `550d7b3834670483a4df436541272c055dc364bf`에서 [`Trainer._inner_training_loop`](https://github.com/huggingface/transformers/blob/550d7b3834670483a4df436541272c055dc364bf/src/transformers/trainer.py#L2430-L2835)는 accumulation, optimizer와 callback의 호출 owner다. scheduler 식의 owner는 [`get_scheduler`](https://github.com/huggingface/transformers/blob/550d7b3834670483a4df436541272c055dc364bf/src/transformers/optimization.py#L450-L540)와 그것이 선택하는 lambda다. 앞 함수가 `optimizer_was_run`과 step 경계를 결정하고, 뒤 함수가 현재 clock을 LR로 변환한다. 두 링크를 연결하지 않고 cosine 식만 읽으면 overflow로 optimizer가 skip된 attempt에서 LR가 움직였는지 답할 수 없다.
+
+호출 카드는 `B117 → A0042 → backward accumulation → finite vote → optimizer mutation → scheduler mutation → U0042 publish`다. scheduler의 입력은 막연한 “global step”이 아니라 `(ClockGeneration=CG7, committed_update=42, valid_tokens=8192, group_id, base_lr)`이고, mutation은 `last_epoch`, group별 `lr`와 framework state dict다. 출력은 15장이 소비할 `(U0042, applied_lr[group], denominator, skip_reason=none)`이다.
+
+### shape·단위·commit 원장
+
+| 필드 | GR-001/U0042 값 | 단위·shape | owner | publish 조건 |
+|---|---:|---|---|---|
+| microbatch gradient | 4개 | parameter와 같은 shape, fp32 accumulator | rank-local autograd | 아직 attempt |
+| valid tokens | 8,192 | token/update, 전 rank 합 | collator+reduction | denominator 합의 |
+| global batch | 64 | sequence/update | data owner | 중복·누락 0 |
+| parameter group LR | `2.0e-5` | scalar/group | scheduler `CG7` | optimizer commit 뒤 |
+| optimizer state delta | parameter별 | bytes=`numel×state dtype` | optimizer shard/replica | finite vote=true |
+| UpdateID | `U0042` | monotonic transaction ID | trainer coordinator | 모든 required rank commit |
+
+관측 이벤트는 `attempt_started`, `finite_vote`, `optimizer_committed`, `scheduler_advanced`, `update_published` 다섯 개로 고정한다. `scheduler_advanced`를 두 번 호출하는 mutation, rank 하나만 overflow인 mutation, 마지막 microbatch 뒤 process kill을 주입한다. 첫 변형은 LR trace에서, 둘째는 rank별 commit vote에서, 셋째는 `U0042` 부재와 `U0041` durable parent에서 검출돼야 한다. 복구 뒤 첫 update가 같은 batch·denominator·LR·parameter delta를 내는지는 [단일 GPU golden run](../labs/28-single-gpu-golden-lab.md)으로, 실제 mixture의 commit 질량은 [source-to-commit 실습](../labs/06-source-to-commit-golden-lab.md)으로 검산한다. NaN/overflow 증상은 [NaN 플레이북](../playbooks/01-nan.md), 분산 합의가 멈추면 [rank hang 플레이북](../playbooks/06-rank-hang.md)으로 넘긴다.
+
+15장으로 넘기는 것은 LR 그래프가 아니다. `GR-001/U0042`, parameter와 optimizer slot의 논리 ID, 전역 shape, denominator, applied LR, finite vote와 scheduler generation을 넘긴다. 다음 장은 이 하나의 update가 어느 rank와 mesh에 놓였고 어떤 collective가 commit 전제였는지 증명한다.

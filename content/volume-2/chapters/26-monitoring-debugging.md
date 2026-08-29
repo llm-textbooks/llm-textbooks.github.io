@@ -1,5 +1,58 @@
 # 26장 모니터링과 디버깅: 숫자를 원인으로 바꾸는 법
 
+25장의 `SafetyDecision-025`는 출시 허가가 아니다. 그 판정이 production과 같은 경로에서 지속되는지 볼 수 있어야 27장의 promotion 심사로 넘어간다. 이 장은 GR-001의 학습·평가·안전 신호를 공통 `RunID/UpdateID/CaseID/IncidentID`로 결합하고, 경보를 재현 가능한 회귀 fixture로 닫는다.
+
+## 26.0 GR-001 관측 계약: 한 metric을 원인과 복구까지 운반한다
+
+```mermaid
+flowchart LR
+  R[GR-001 process] --> M[metric event]
+  R --> L[structured log]
+  R --> T[trace span]
+  M --> A[AlertID]
+  L --> C[Correlation<br/>Run·Update·Case]
+  T --> C
+  A --> C
+  C --> I[IncidentID<br/>INC-026]
+  I --> H[hypothesis ledger]
+  H --> F[fault injection]
+  F --> X[first divergence]
+  X --> P[patch + regression fixture]
+  P --> E[EvidenceBundle-026<br/>to release gate]
+```
+
+|event/state|실제 값|metric label 여부|보존 위치와 이유|
+|---|---|---|---|
+|`RunID`|`GR-001`|예, 저카디널리티|모든 telemetry의 실행 경계|
+|`UpdateID`|`u000008`|metric에는 아니오|exemplar/trace·structured log에서 정밀 상관|
+|rank|`3`|예, world size가 제한될 때|straggler·collective owner 식별|
+|loss numerator/denominator|`1842.6 / 4096 tokens`|값 자체가 sample|평균을 재계산하고 mask 오류 탐지|
+|safety family|`indirect-injection`|예, bounded enum|25장의 risk budget과 연결|
+|`IncidentID`|`INC-026-02`|metric에는 아니오|alert→가설→조치→회귀 시험의 parent|
+
+valid-token loss가 rank $r$에서 $(N_r,D_r)$로 관측되면 global loss는
+
+$$L={\sum_r N_r\over\sum_r D_r}$$
+
+이다. $\frac1R\sum_r(N_r/D_r)$와 같지 않다. throughput도 $T=\sum_r tokens_r/\Delta t$인지, 최저 rank의 step rate인지 먼저 정의한다.
+
+|기호|instrumentation 객체|source/aggregation|
+|---|---|---|
+|$N_r$|`train_loss_numerator_total` delta|worker가 mask 뒤 loss 합을 counter로 기록|
+|$D_r$|`train_valid_tokens_total` delta|유효 label token만 counter 증가|
+|$\Delta t$|동일 update window|Prometheus scrape interval이 아니라 UpdateID 경계|
+|GPU util|`DCGM_FI_DEV_GPU_UTIL`|[DCGM exporter 기본 counter 정의](https://github.com/NVIDIA/dcgm-exporter/blob/181290c399d46a9b905e083d0204348be63cb436/etc/default-counters.csv#L23-L48)|
+|histogram|step duration buckets|[Prometheus Python histogram 구현](https://github.com/prometheus/client_python/blob/209834673397d48340e3b3bde6dfd4383087a359/prometheus_client/metrics.py#L577-L655)|
+|trace|CPU/CUDA activity span|[PyTorch profiler schedule 경계](https://github.com/pytorch/pytorch/blob/3691693263d2b66a68867e39b7449876844e06cf/torch/profiler/profiler.py#L768-L810)|
+
+PromQL 예시는 목적을 드러내야 한다. `sum(rate(train_loss_numerator_total[5m])) / sum(rate(train_valid_tokens_total[5m]))`는 token-weighted loss다. `max by(run_id) (step_seconds) / quantile(0.5, step_seconds)`처럼 raw gauge에 존재하지 않는 quantile을 꾸며내지 않는다. histogram이면 `histogram_quantile`과 bucket을, rank gauge면 `max/avg`와 관측 시점을 명시한다.
+
+### 반증 실험과 27장 인계
+
+`OBS-026-M1`은 rank 3 exporter만 멈추되 학습 process는 살려 둔다. 값 0이 아니라 `up=0`과 stale timestamp로 감시자 실패를 검출해야 한다. `M2`는 긴 sample을 한 rank에 몰아 GPU util은 높지만 collective 대기를 늘린다. trace의 collective span과 rank step skew가 최초 차이를 가리켜야 한다. `M3`는 `SampleID`를 metric label로 넣어 cardinality budget gate가 배포 전에 거부해야 한다. `M4`는 W&B alias를 재지정한다. immutable artifact digest 비교가 같은 run이라는 오판을 막아야 한다([W&B resume 시스템 시험](https://github.com/wandb/wandb/blob/367110d0f2df864e881251f678bf8c6ed649075d/tests/system_tests/test_core/test_resume.py#L15-L37)).
+
+재현 절차는 [NaN](../playbooks/01-nan.md), [OOM](../playbooks/05-oom.md), [rank hang](../playbooks/06-rank-hang.md) 플레이북을 사용한다. 27장에는 `{EvidenceBundle-026, metric-schema revision, alert rules digest, closed IncidentID set, unresolved risk set}`을 넘긴다. 아래의 Prometheus·DCGM·W&B·profiler 심화 절은 모두 이 schema와 IncidentID를 확장하며 독립된 대시보드 설명으로 읽지 않는다.
+
 대시보드의 수가 늘어도 원인을 좁힐 수 없다면 시스템은 관측 가능하지 않다. loss의 token 분모가 바뀌면 같은 모델도 다른 곡선을 만들고, nominal throughput은 padding 증가를 성능 향상처럼 보이게 할 수 있으며, GPU 평균은 한 rank의 지연을 숨긴다. 따라서 metric마다 먼저 분자·분모와 집계 범위를 복원하고, 그 값이 만들어진 tensor와 rank로 내려가야 숫자를 진단 근거로 쓸 수 있다.
 
 관측성의 목적은 “현재 GPU 사용률이 몇 퍼센트인가”에 답하는 데 있지 않다. 더 중요한 질문은 **어느 학습 상태 전이가 처음 달라졌고, 그 차이가 어떤 artifact까지 전파됐으며, 어디까지 되돌려야 다시 안전한 update를 만들 수 있는가**이다. 이 질문에 답하려면 학습 loop를 단순한 반복문이 아니라 다음 사건 원장으로 읽어야 한다.
@@ -2179,171 +2232,26 @@ certificate의 report cell은 RunID, UpdateID, metric schema, exact query, time 
 
 검증 결과와 미해결 공백은 다음 release certificate에 누적해 독립 검토자가 다시 확인한다.
 
-## 26.16 DCGM의 `0`과 오래된 `0`을 갈라 Xid 사건을 닫는다
+## 26.16 GR-001/Incident fork — signal에서 safe recovery까지
 
-GPU 사용률이 0이라는 표본은 두 가지 정반대 상태를 가릴 수 있다. 장치가 실제로 idle일 수도 있고, exporter가 과거의 정상 표본을 계속 내보내고 있을 수도 있다. 그래서 DCGM 경보의 입력은 값 하나가 아니라 `(field_id, value, field_status, device_timestamp, exporter_read_time, scrape_time, GPU UUID, collector generation)`이다. 값의 임계치보다 먼저 `sample_age`와 target health를 판정한다. 관측자가 멈춘 동안 Xid가 발생했다면, 녹색 dashboard는 정상의 증거가 아니라 결측을 정상으로 바꾼 결과다.
+DCGM, W&B, profiler/memory snapshot, NCCL timeout과 MLflow 증보는 `IncidentID` 실행 순서로 합친다. metric 값은 학습 상태가 아니며 producer freshness, collection path와 해당 UpdateID의 durable event를 join해야 한다.
 
-고정 dcgm-exporter 커밋 `181290c3…`의 `gpu_collector_test.go:780-831`은 이 침묵 실패를 좁은 fixture로 만든다. 첫 표본은 timestamp 10, value 0이다. stale threshold가 지난 두 번째 read도 timestamp 10이면 collector는 기존 watch cleanup, watch 재설치, `UpdateAllFields`, 재읽기를 순서대로 수행한다. 재읽기의 timestamp가 11일 때만 새 표본을 반환한다.
+```mermaid
+flowchart LR
+ S[producer metric/log/trace] --> C[collector + freshness]
+ C --> A[alert state machine]
+ A --> I[IncidentID evidence freeze]
+ I --> F[first divergent phase/rank/object]
+ F --> R[bounded recovery]
+ R --> V[golden update + new checkpoint]
+```
 
-이어지는 `TestDCGMCollectorRejectsSameTimestampAfterRepair`는 repair 뒤에도 timestamp 10이면 결과를 비워 둔다. 즉, 이 테스트가 증명하는 것은 “0이 맞다”가 아니라 “오래된 0을 fresh 0처럼 노출하지 않는다”는 freshness 계약이다. 실제 Xid 감지, 특정 GPU·driver에서의 복구, 경보 지연은 이 정적 fixture가 증명하지 않으므로 `RuntimeUnverified`다.
-
-이 계약 위에 Xid 폐루프를 얹는다. exporter에는 event counter와 last-event gauge를 구분해 노출하고, `increase(xid_errors_total[5m]) > 0` 같은 첫 신호는 exporter target·sample age가 정상일 때만 유효하게 한다. transient scrape miss 한 번으로 incident를 열지 않되, Xid처럼 손상 가능성이 큰 사건은 다수결로 희석하지 않는다. 예를 들어 `for: 2m`을 무조건 붙이면 한 번 발생하고 사라지는 Xid를 놓칠 수 있다. 대신 event counter 증가는 즉시 사건 후보를 만들고, target missing·stale은 별 alert로 연다. 온도·SM activity처럼 noisy envelope에는 지속 window와 진입·해제 임계치를 달리하는 hysteresis를 사용한다.
-
-사건 원장은 `signal → alert → incident → RCA → recovery → verification`을 다음처럼 닫는다.
-
-1. 신호: GPU UUID별 Xid code·event timestamp와 collector freshness를 동시에 보존한다.
-2. 경보: rule revision, exact query, evaluation timestamp, `for` state와 inhibition을 저장한다. Xid code 전체 문자열을 label로 넣지 않고 bounded code를 사용한다.
-3. 격리: 해당 process generation의 새 update와 checkpoint publication을 멈추고, rank↔GPU↔node↔NIC mapping을 고정한다.
-4. RCA: Xid를 원인명으로 쓰지 않고 driver log, ECC·NVLink·PCIe, workload phase와 최초 CUDA/NCCL 오류를 시간축에 맞춘다. 같은 workload를 다른 GPU에, 같은 GPU를 golden workload에 놓는 교환 실험은 장비와 workload 가설을 가른다.
-5. 복구: last committed checkpoint에서 새 world generation을 만들고 old process와 communicator를 fence한다.
-6. 검증: 동일 BatchID 또는 허용된 다음 cursor, 첫 successful optimizer update, loss·gradient invariant와 새 durable checkpoint commit을 확인한다. exporter가 다시 fresh하다는 사실만으로 사건을 닫지 않는다.
-
-정적 공개 fixture는 timestamp repair와 reject branch까지만 자동 검증한다. 실제 Xid 주입, 장비 reset, multi-node 재배치와 동일 workload 재검증은 GPU·driver·cluster별 hardware campaign이다. 실행하지 않은 조합은 `RuntimeUnverified`로 남기며, 이전 GPU의 PASS를 상속하지 않는다.
-
-## 26.17 W&B artifact alias를 provenance anchor로 착각하지 않는다
-
-W&B run의 chart와 artifact graph는 탐색에는 유용하지만, `latest` alias는 시간이 지나며 다른 version을 가리키는 mutable pointer다. 고정 SDK 커밋 `367110d0…`의 `wandb_run.py:3188-3400`에서 `log_artifact`는 alias를 받아 `_log_artifact`로 넘기고, `_log_artifact`는 alias·tag를 검증한 뒤 online에서는 `deliver_artifact`, offline에서는 `publish_artifact` 경로로 분기한다. `upsert_artifact`는 `finalize=False`와 shared `distributed_id`를 요구하고, `finish_artifact`가 같은 distributed artifact를 finalize한다. 따라서 함수가 반환됐다는 사실, alias가 보인다는 사실, 모든 shard가 finalize됐다는 사실은 서로 다른 상태다.
-
-학습 계보는 `DatasetManifest digest → Tokenizer/Template digest → Code/Config digest → RunID/AttemptID → Checkpoint generation digest → Evaluation digest → Release digest`로 고정한다. W&B artifact에는 이 digest들과 parent generation을 metadata로 넣되, 독립적인 checkpoint manifest의 complete marker를 진실의 기준으로 삼는다. alias 변경은 `(collection, alias, old digest, new digest, actor, timestamp)` 사건으로 별도 보존한다. `latest`에서 artifact를 내려받았다는 기록만으로는 나중에 같은 입력을 복원할 수 없다.
-
-공개 가능한 fixture는 두 version `A`, `B`를 만든다. run 1이 `A`를 output으로 기록하고 run 2가 `A`를 input으로 사용해 `B`를 만든다. 그 뒤 `latest`를 `B`로 옮겨도 run 2의 input digest는 계속 `A`여야 한다. 분산 upsert control은 두 contributor가 같은 `distributed_id`를 쓰고 finalize 전에는 release 후보가 되지 않으며, finalize 뒤 manifest에 기대 shard가 모두 있는지를 검사한다. offline queue를 process 종료 전에 sync하지 않은 주입군은 artifact를 `Published`로 승격해서는 안 된다.
-
-경보는 “W&B가 안 보인다”가 아니라 계보 상태의 불일치에 건다. checkpoint complete marker는 있는데 tracker output edge가 일정 window 뒤에도 없으면 telemetry incident다. tracker에는 artifact가 있지만 checkpoint marker가 없으면 그 artifact를 resume·release에서 격리한다. alias가 승인 digest와 다르면 promotion incident다. 복구 후에는 alias 화면이 아니라 exact digest download, manifest 검증, 첫 다음 batch·update와 새 checkpoint의 parent edge를 확인한다. 이 fixture는 SDK의 정적 분기와 우리가 정의한 manifest oracle을 검증할 뿐, hosted backend의 durability·동시 alias 갱신·network partition은 `RuntimeUnverified`다.
-
-## 26.18 profiler와 memory snapshot이 만든 교란을 control로 측정한다
-
-profiler는 원인을 보는 도구인 동시에 workload의 일부다. CPU stack, CUDA activity, tensor shape, memory history를 켜면 allocation metadata, synchronization, buffer flush와 trace serialization이 추가된다. 그래서 `profiled run이 느리다`는 관측만으로 production regression을 주장할 수 없다. 분석 단위는 같은 code·batch·seed·hardware에서 `(profiler off, schedule only, CPU activity, CUDA activity, stack/shape, allocator history)`를 분리한 paired control이다.
-
-PyTorch 고정 커밋 `36916932…`의 `torch/profiler/profiler.py:768-848`은 `wait → warmup → active → RECORD_AND_SAVE` 상태를 step 함수로 만든다. `test_profiler.py:1893-1930`은 `skip_first=3, wait=5, warmup=1, active=2, repeat=2, skip_first_wait=1`의 각 step action을 정확히 비교한다. 이 fixture는 capture window의 상태 전이를 증명하지만 overhead가 작다는 것은 증명하지 않는다. profile 결과에는 exact schedule과 `prof.step()` 호출 위치를 남긴다. gradient accumulation의 microstep마다 `step()`을 호출했는지 optimizer update마다 호출했는지가 다르면 capture 대상도 달라진다.
-
-allocator 조사도 같은 원칙을 쓴다. `torch/cuda/memory.py:897-1018`의 `_record_memory_history`는 `max_entries`의 ring buffer에 allocation/free history와 stack을 기록하며 오래 실행하면 새 entry가 옛 entry를 덮는다. `state`와 `all`, Python과 C++ stack, `skip_actions`, pinned host 기록은 비용과 보이는 사건을 바꾼다. `test_cuda.py:9200-9274`는 trace 포함·제외 snapshot을 각각 warm-up하고 시간을 재며, 두 경우 모두 segment 상태를 보존하는지를 별 테스트로 확인한다. 여기 적힌 출력 예시는 특정 장비의 일반 성능 수치가 아니다. 이 책에서는 실행하지 않았으므로 비용은 `RuntimeUnverified`다.
-
-폐루프는 다음과 같다. memory growth alert는 동일 phase·shape에서 active bytes와 reserved bytes의 지속 증가를 후보로 만들고, IncidentID가 짧은 allocator history capture를 켠다. snapshot 전에 history mode, max entries, wrap count, capture UpdateID와 process generation을 기록한다.
-
-snapshot에서 살아 있는 allocation의 allocation site와 reference owner를 좁힌 뒤 synthetic negative fixture에서 reference를 해제하면 active allocation이 사라지는지 확인한다. 수정 뒤 profiler와 history를 모두 끈 paired run에서 동일 BatchID의 loss·gradient·parameter delta, step latency와 peak memory를 비교하고 새 checkpoint를 commit한다.
-
-경보가 해제됐지만 ring buffer가 최초 allocation을 덮어썼다면 RCA는 미완료다. snapshot을 얻었지만 profiler-on에서만 leak이 나타났다면 관측 교란 가능성을 우선한다. 반대로 profiler-off에서도 같은 owner와 증가 기울기가 재현되고 reference 제거 control에서 사라질 때 code-level 원인으로 좁힐 수 있다. 공개 source와 upstream test는 schedule·snapshot schema와 branch를 고정한다. GPU별 overhead, Nsight와 Kineto의 동시 수집 효과, production allocator timing은 별 hardware campaign 없이는 주장하지 않는다.
-
-## 26.19 NCCL timeout에서 범인 rank와 멈춘 감시자를 분리한다
-
-collective timeout은 원인명이 아니라 “이 process group의 work가 deadline 안에 완료되지 않았다”는 판정이다. 호출 순서 불일치, 한 rank의 늦은 진입, CUDA kernel 정지, transport failure, watchdog 자체의 정지가 모두 비슷한 마지막 로그를 만들 수 있다. 따라서 timeout 문자열을 검색한 뒤 network ticket을 여는 대신, `collective work → watchdog → desync report → flight recorder → monitor`의 서로 다른 상태 기계를 분리한다.
-
-PyTorch 고정 리비전 `3691693263d2b66a68867e39b7449876844e06cf`의 `ProcessGroupNCCL.cpp:974–1010`은 시작부터 중요한 결합을 드러낸다. `TORCH_NCCL_BLOCKING_WAIT`가 켜지면 watchdog thread를 만들지 않고, desync debug는 timing event를 켜며, async error handling이 완전히 꺼진 조합에서는 이를 `SkipCleanUp` 모드로 올린다. requested environment와 effective runtime mode가 다를 수 있다는 뜻이다. incident bundle에는 환경 변수 문자열뿐 아니라 startup log의 effective `blockingWait`, `asyncErrorHandling`, `desyncDebug`, `enableTiming`, trace-buffer size를 저장한다.
-
-같은 파일 `:2355–2404`에서 watchdog은 queued work의 exception과 timeout을 확인한다. timeout이면 process-group error를 `TIMEOUT`으로 만들고 `desyncDebugger_.run()`을 호출한 뒤, 마지막 enqueued·started·completed sequence를 기록한다. 여기서 세 수를 한 줄로 읽어야 한다. 모든 rank에서 last-enqueued가 다르면 호출 경로나 조건 branch가 갈렸을 가능성이 크다. enqueued는 같고 한 rank의 started가 뒤처지면 CUDA stream dependency나 late arrival를 본다. started도 같고 completed만 멈추면 kernel·transport·peer failure를 본다. 이것은 원인 확정 규칙이 아니라 다음 증거를 고르는 분기 규칙이다.
-
-`DesyncDebugger::run()`은 `:2554–2607`에서 store를 통해 rank들의 trace start/end를 모아 보고서를 만든다. 그러므로 store가 불통이거나 일부 rank가 이미 종료됐다면 report 수집 자체가 실패할 수 있다. “desync report 없음”을 “desync 없음”으로 해석하지 않는다. report status, store 접근 실패, 참여 rank 수와 누락 rank를 별 field로 둔다. 반대로 culprit rank 후보가 나와도 그 rank가 논리 호출을 빠뜨렸는지, 직전 kernel 때문에 늦었는지 flight recorder와 application event를 맞춘다.
-
-flight recorder는 최근 event의 ring buffer다. `TORCH_NCCL_TRACE_BUFFER_SIZE=0`이면 꺼지고, 너무 작으면 장시간 지연 뒤 최초 divergence가 덮어써진다. 너무 크게 하고 C++ stack·timing을 상시 켜면 메모리와 계측 비용이 늘 수 있다. buffer 크기는 `collectives/update × 보존하려는 updates × start/end 사건 수 × process groups`로 먼저 산정하고 실제 event byte를 canary에서 측정한다. `TORCH_NCCL_DUMP_ON_TIMEOUT`은 trace buffer가 0보다 커야 의미가 있다는 공식 문서 계약도 startup validator로 검사한다.
-
-watchdog과 monitor도 같은 생존 신호가 아니다. 소스의 watchdog heartbeat는 work metadata를 처리하면서 증가한다. monitoring thread는 이 heartbeat가 `TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC` 동안 멈췄을 때 process를 종료할 수 있다. 따라서 다음 네 clock을 분리한다.
-
-| clock | 마지막 전진이 뜻하는 것 | 멈췄을 때 우선 가설 |
+| signal | 필수 좌표 | 흔한 오판 |
 |---|---|---|
-| application update | optimizer commit 완료 | data·forward·backward·collective·optimizer 전체 |
-| collective sequence | PG work enqueue/start/complete | rank 순서, stream dependency, transport |
-| watchdog heartbeat | watchdog loop가 work metadata 처리 | CUDA/NCCL API hang, host thread 정지 |
-| external worker heartbeat | process/node agent가 관측됨 | process death, node/network partition, agent failure |
+| DCGM/Xid | GPU UUID, field status, timestamp·age | stale/missing `0`을 정상 0으로 봄 |
+| W&B/MLflow | RunID, UpdateID, artifact digest, finalize | alias·chart 존재를 commit으로 봄 |
+| profiler | schedule/window, `prof.step` owner, overhead control | 관측 run을 baseline 성능으로 봄 |
+| memory snapshot | allocator generation, ring coverage, stack | reserved-allocated를 usable free로 봄 |
+| NCCL | PG generation, ordinal/op/count/dtype, rank phase | timeout rank를 원인 rank로 단정 |
 
-긴 CUDA kernel이나 checkpoint phase가 정상인데 application clock만 멈춘 경우를 watchdog death로 오인하지 않는다. 반대로 host heartbeat가 살아 있어도 GPU와 collective가 전진한다는 뜻은 아니다. timeout budget은 정상 phase의 p99와 capture overhead를 근거로 정하고, debug dump가 완성될 시간을 별도로 준다. 무한 대기를 피하면서도 증거가 생기기 전에 모든 rank를 동시에 죽이지 않는 순서가 필요하다.
-
-최소 회귀 campaign은 네 가지다. (1) rank 하나가 collective 호출을 건너뛴다. (2) 모든 rank가 같은 ordinal을 호출하지만 한 rank의 진입만 늦춘다. (3) 시작 뒤 peer process를 종료한다. (4) watchdog의 CUDA API progress를 모사해 monitor heartbeat timeout을 유도한다. 각 시험에서 expected first signal, last-enqueued/started/completed vector, desync report completeness, flight-recorder 보존 범위, dump 완료와 abort owner를 기록한다. 하나의 timeout 시험으로 네 failure family를 덮었다고 쓰지 않는다.
-
-운영 runbook은 먼저 새 collective를 중단하고 immutable incident directory를 만든다. 각 rank의 process generation, PG UID, collective sequence·op·count·dtype·caller, CUDA stream, flight-recorder dump와 monotonic timestamp를 모은다. 이어 rank별 application phase와 input-ready를 맞추고, 15장의 `(mesh group → tensor ObjectID → expected ordinal)` 원장으로 호출 의미를 복원한다. transport가 후보일 때만 HCA·switch counter와 `NCCL_DEBUG` 표본을 붙인다. 마지막으로 17장의 마지막 committed checkpoint를 선택해 old communicator를 fencing한 뒤 재시작한다.
-
-수정의 완료 조건은 timeout이 사라진 것이 아니다. 의도한 negative fixture에서 detector가 최초 divergence rank와 phase를 다시 찾고, 정상 장기 실행에서 계측 overhead·trace overwrite·false abort가 허용 범위인지 확인해야 한다. framework·NCCL·CUDA revision이나 process-group 생성 순서가 바뀌면 collective signature baseline과 buffer 산정을 stale 처리한다. 이렇게 해야 “NCCL 오류”라는 막다른 문장이 source 좌표, 상태 전이, 재현 가능한 실패와 안전한 복구로 바뀐다.
-
-## 26.20 MLflow run을 대시보드 행이 아니라 상태·계보 원장으로 쓴다
-
-MLflow의 `start_run()`을 context manager 문법으로만 기억하면 실패 시 가장 필요한 정보를 잃는다. 고정 커밋 `f2c83c13…`의 구현은 기존 `run_id`를 받으면 해당 run을 `RUNNING`으로 되돌리고, 새 run에서는 parent ID를 system tag로 넣는다. 활성 run이 있는데 `nested=False`로 또 시작하면 예외를 낸다. context 내부 예외는 테스트에서 run 상태를 `FAILED`로 남긴다. 이 세 동작은 서로 다른 질문에 답한다. resume은 같은 실행 identity를 이어 쓰는가, nested run은 sweep·retry·stage의 부모-자식 관계를 표현하는가, FAILED는 계산 실패가 관측 원장에 닫혔는가를 말한다.
-
-Ray attempt와 MLflow run을 기계적으로 1:1로 묶으면 곤란하다. 인프라 preemption 뒤 같은 실험 run을 resume할 수도 있고, 감사 요구상 각 attempt를 child run으로 분리할 수도 있다. 어느 쪽이든 정책을 먼저 고정해야 한다. 권장 구조는 logical training job을 parent run, 각 Ray attempt를 child run으로 두고 parent에 immutable config·dataset·code identity를, child에 node topology·failure kind·checkpoint input/output generation을 남기는 것이다. 최종 model candidate는 어느 child의 어느 checkpoint에서 왔는지를 tag가 아니라 digest-bearing artifact relation으로 연결한다.
-
-`MlflowClient.log_batch()`는 metrics·params·tags를 한 API 호출로 보낼 수 있고 `synchronous=False`면 future를 돌려준다. 비동기는 hot path 지연을 줄이지만 “호출했다”와 “tracking store에 durable하게 들어갔다”를 분리한다. process가 죽기 전에 future를 drain하지 않으면 마지막 metric window가 사라질 수 있다. 더욱이 param은 문자열로 변환되며, 공식 테스트는 중복 param key, 잘못된 metric 이름, 비수치 metric 값과 timestamp를 거절한다. 따라서 raw resolved config 전체를 param 평면에 억지로 펼치지 말고 canonical JSON artifact와 SHA-256을 저장한 뒤 검색에 필요한 소수의 scalar만 param/tag로 승격한다.
-
-PyTorch autolog 옵션도 비용과 의미를 바꾼다. `log_every_n_step=1`은 step마다 로깅해 성능 영향을 줄 수 있고, 여러 optimizer가 있으면 모두가 매 training step에 갱신된다는 가정을 둔다. `checkpoint_save_weights_only=True`는 optimizer와 scheduler 상태를 빼므로 serving 후보에는 쓸 수 있어도 exact resume artifact가 아니다. `checkpoint_monitor`, `checkpoint_mode`, `checkpoint_save_best_only`는 model selection 정책이지 장애 복구 commit 정책이 아니다. 이 둘을 같은 “checkpoint”라는 이름으로 합치지 않는다.
-
-디버깅할 때는 그래프를 다음 순서로 걷는다.
-
-1. MLflow parent run에서 code·data·resolved-config digest를 확인한다.
-2. 실패한 child의 Ray attempt와 node/rank topology를 찾는다.
-3. 마지막 `report_ordinal`과 MLflow metric step의 경계가 일치하는지 본다.
-4. asynchronous logging future가 완료됐는지, 아니면 telemetry tail loss인지 구분한다.
-5. checkpoint generation에서 next batch와 next update를 재생한다.
-
-이때 “MLflow 그래프에 점이 없다”는 사실은 loss가 계산되지 않았다는 증거가 아니다. report barrier 이전 worker crash, 비동기 전송 유실, 잘못된 active run, metric validation 거절을 각각 반증해야 한다. 반대로 점이 존재한다고 checkpoint가 complete하거나 해당 step의 optimizer update가 commit됐다는 뜻도 아니다. 관측 record와 학습 state 사이에는 명시적 generation edge가 필요하다.
-
-따라서 dashboard에서 시작한 조사는 반드시 실행 가능한 조치로 끝난다. 누락이 telemetry tail loss라면 logger의 flush·barrier와 실패 fixture를 고치고 학습 결과 자체는 별도 evidence로 판정한다. optimizer commit이 없었다면 그 UpdateID를 성공 표본과 처리량 분모에서 제외하고 durable parent에서 복구한다. metric과 durable event가 모두 있는데 값이 갈렸다면 같은 BatchID의 tensor boundary로 내려간다. 이 세 갈래를 구분해야 “그래프가 이상하다”가 logger 수정, run 중단 또는 model/data 조사 가운데 정확한 한 행동으로 바뀐다.
-
-**고정 fixture로 MLflow 기록 실패와 학습 실패를 갈라낸다**
-
-질문은 “metric이 저장됐는가”와 “update가 계산됐는가”를 일부러 분리하는 것이다. 입력은 한 run, metric 한 건, param 두 건이면 된다. 정상 control에서는 서로 다른 param key를 보내고, 주입군에서는 같은 key를 한 batch에 두 번 넣는다. 호출 경로는 `MlflowClient.log_batch → tracking service client → store.log_batch → validation/write`다. 이때 상태 shape는 단순 성공 여부가 아니라 `(run_id, batch request, store rows, client exception, UpdateID commit)` 다섯 칸이다.
-
-고정 revision의 `tests/store/tracking/test_file_store.py:2287`에 있는 `test_log_batch_with_duplicate_params_errors_no_partial_write`는 이름만 비슷한 smoke test가 아니다. 중복 param batch가 오류를 내고 일부 행도 쓰지 않는다는 원자성 경계를 직접 검사한다. 별도로 `tests/tracking/test_tracking.py:179-196`의 context-manager test는 내부 예외 뒤 run 상태가 `FAILED`인지 확인한다. 첫 oracle은 tracking batch의 부분 쓰기 방지이고, 둘째 oracle은 run lifecycle 기록이다. 어느 것도 optimizer update의 실패나 checkpoint rollback을 증명하지 않는다.
-
-원인 분리 절차는 다음 순서를 따른다.
-
-1. `UpdateID`의 durable commit이 있는지 먼저 본다. 없으면 학습 상태 실패이며 metric 유무로 되살리지 않는다.
-2. client가 batch validation exception을 냈는지 확인한다. 중복 param이면 config flattening 또는 retry 조립을 고친다.
-3. store에 같은 request의 일부 metric·tag가 남았는지 확인한다. 남았다면 원자성 계약 위반이다.
-4. run 상태가 `FAILED`인지와 실패 reason이 원 exception을 가리키는지 확인한다.
-5. update는 commit됐지만 store row만 없다면 telemetry tail loss로 분류하고 checkpoint를 롤백하지 않는다.
-6. metric row와 update가 모두 있는데 값이 다르면 동일 BatchID의 loss numerator·denominator와 logging 시점을 비교한다.
-
-이 fixture의 수치 oracle은 간단하다. 정상군은 param 두 행, 주입군은 exception 한 건과 신규 param 행 0개여야 한다. 기존 행 수가 `N`이면 실패 뒤에도 `N`이어야 한다. 다만 file store test를 SQL backend·remote tracking server·비동기 future의 durability 보증으로 넓히지 않는다. backend별 transaction test, process-kill fixture와 future drain 검사가 따로 필요하다. 체크리스트의 목적은 제품 이름을 나열하는 데 있지 않다. 최초로 갈라진 칸이 validation이면 logger 소유자에게, UpdateID면 trainer 소유자에게, store atomicity면 backend 소유자에게 사건을 정확히 넘기는 데 있다.
-
-## 26.21 숫자 하나를 운영 결정까지 추적하는 여섯 칸
-
-관측 스택을 검수할 때 대시보드부터 보지 않는다. 한 metric을 골라 `producer → temporality → aggregation → alert state → incident action → recovery oracle`의 여섯 칸을 채운다. 예컨대 XID에는 “마지막으로 본 오류 번호”, “최근 5분의 오류 수”, “exporter process가 시작한 뒤 누적 오류 수”가 있다. 세 값은 이름이 비슷해도 각각 gauge, 유한 window count, process-lifetime counter다. exporter 재시작 뒤 마지막 값과 누적값의 의미가 달라지므로 같은 PromQL과 같은 복구 정책을 공유할 수 없다.
-
-고정한 dcgm-exporter 구현에서 `appendDCGMXIDErrorsDependency`는 window count나 total을 요청했을 때 원천 `DCGM_FI_DEV_XID_ERRORS` field를 watch 목록에 보충한다. integration test는 window 크기가 metric label로 노출되고 관측된 사건 수가 기대값과 같은지 확인한다. 이 연결은 “metric 이름이 설정 파일에 있다”보다 강하다. 원천 field가 collector에 들어가 파생 metric으로 나오는 경로와 최소 oracle을 함께 고정하기 때문이다. 다만 이 시험은 실제 GPU에서 XID를 발생시키거나 특정 XID가 job abort·GPU quarantine을 요구한다는 정책까지 증명하지 않는다.
-
-Prometheus label도 단순 문자열 장식이 아니다. Python client의 `labels()`는 label value tuple별 child metric을 내부 map에 보존한다. `sample_id`, exception 전문, checkpoint path처럼 계속 새 값이 들어오면 매 scrape의 표본 수만 늘어나는 것이 아니라 producer process의 child 집합과 backend의 series 집합이 함께 커진다. 따라서 cardinality worksheet에는 label별 최대 집합 크기뿐 아니라 job 수, replica 수, restart generation, retention과 remote-write 복제 계수를 곱한 상한을 적는다. 이 상한을 실제 backend에서 부하시험하지 않았다면 `NotExecuted`다.
-
-profiler는 상시 metric과 다른 시간 의미를 갖는다. TorchTitan의 profiler builder는 `wait = profile_freq - warmup - active`를 계산하여 반복 schedule을 만들고, 장치 가용성에 따라 CPU와 CUDA 또는 XPU activity를 고른다. trace에 보이는 한 active window를 전체 run의 평균처럼 읽어서는 안 된다. compile·allocator 성장·data cache cold start가 warmup에 있었는지, 이상 step이 wait 구간에 빠졌는지, trace export가 만든 동기화와 I/O 비용이 얼마인지 별도 manifest에 남긴다.
-
-메모리 snapshot 역시 완전한 과거 기록이 아니다. `MemoryProfiler`는 Python stack을 택하고 `max_entries`로 allocation/free history를 제한한다. 오래 실행하면 가장 오래된 사건은 ring에서 사라질 수 있다. 주기 snapshot은 증가시킨 step 번호로 저장하지만 OOM exit dump는 실패한 iteration을 표현하도록 한 step을 되돌린 이름을 쓴다. 그러므로 파일명만 보고 optimizer commit step이라 단정하지 말고 allocator event의 step, trainer UpdateID와 checkpoint generation을 join해야 한다.
-
-W&B의 `resume="must"`는 또 다른 상태 축이다. 공개 system test는 없는 run ID를 거부하고 기존 run의 history와 runtime을 이어 붙이며 offline에서는 resume가 무시됨을 보여 준다. 이것은 관측 history identity의 계약이다. model parameter, optimizer moment, scheduler, sampler cursor와 RNG가 같은 generation으로 복원됐다는 증거는 checkpoint manifest와 재개 직후 oracle에서 따로 얻는다. UI 곡선이 이어졌는데 next sample이 달라졌다면 복구 성공이 아니라 관측상 연속된 다른 계산이다.
-
-마지막으로 alert는 action과 recovery oracle이 없으면 완성되지 않는다. XID alert라면 영향 GPU와 workload generation을 고정하고, 새 allocation을 막을지 job 전체를 중단할지, 어느 durable checkpoint를 선택할지 정한다. 복구 뒤에는 exporter가 다시 scrape된다는 사실보다 다음 sample, loss numerator·denominator, optimizer update와 scheduler step이 기준 실행과 맞는지 본다. 실제 fleet에서 detection latency, false page, cardinality 폭발, profiler overhead와 XID 복구를 실행하지 않았다면 공개 코드의 단위 시험을 SLO 결과로 바꾸어 쓰지 않는다.
-
-## 26.22 공통 IncidentID로 관측 신호를 복구 증명까지 운반한다
-
-GPU 경보와 학습 실패를 시간만으로 붙이면 재시작 경계에서 거의 반드시 틀린다. 사건 레코드는 `IncidentID → GPU UUID/device → Xid·ECC 표본 시각 → node/local rank/global rank → RunID/attempt → UpdateID/global step → DataCursor digest → trace digest → checkpoint generation → restore oracle` 순서로 채운다. 시각은 검색 힌트일 뿐 기본 키가 아니다. exporter 재시작, elastic rank 재번호 부여, gradient accumulation 때문에 같은 벽시계 구간에 서로 다른 세대가 겹치기 때문이다.
-
-cardinality 예산도 이 설계를 따른다. IncidentID와 sample ID를 Prometheus label로 넣지 않고 exemplar·로그·artifact metadata로 보낸다. label별 유한 집합의 곱에 replica와 retention을 곱해 상한을 계산하고, recording rule은 고비용 조인을 낮은 차원의 안정된 시계열로 줄인다. alert의 `for`와 해제 조건은 별도 상태 기계다. 한 번의 scrape 누락과 짧은 spike를 억제하는 값이지, 원인 규명의 대체물이 아니다.
-
-profiler capture는 paired control 없이는 성능 증거가 아니다. 같은 seed, batch, DataCursor, update 범위를 profiler-off와 on으로 실행해 step time과 peak memory뿐 아니라 loss·gradient invariant도 비교해야 한다. 공개 PyTorch 시험은 schedule 전이와 snapshot option을 고정하지만 특정 GPU에서 무교란임을 증명하지 않는다. Nsight도 tool version, capture flag, clock 상태, trace digest를 manifest에 넣고 같은 원칙으로 다룬다.
-
-마지막 복구 승인은 “대시보드가 정상”이 아니라 checkpoint manifest의 generation과 DataCursor가 맞고, 재개 첫 update의 checksum·loss denominator·scheduler step이 oracle을 통과했을 때 내린다. Xid와 ECC가 없었다고 silent data corruption이 배제되는 것도 아니다. replica checksum, deterministic replay, activation·gradient invariant 또는 별도 hardware diagnostic이 없다면 SDC는 미검출 가능성으로 남긴다.
-
-## 26.23 label 예산과 alert 상태 기계를 같은 표에서 검산한다
-
-GPU metric의 유용한 label을 모두 곱하면 운영 불가능한 series가 된다. 상시 label은 cluster, job, GPU UUID 또는 MIG identity, stable worker role처럼 유한 집합으로 제한한다. elastic rank는 attempt마다 다시 배치되므로 rank 단독 identity가 아니다. RunID, attempt, UpdateID, IncidentID와 checkpoint generation은 exemplar·로그·artifact ledger에서 join하고 metric label에는 모두 싣지 않는다.
-
-예산표는 `metric 수 × GPU/MIG 수 × 동시 job 수 × bounded label 조합 × replica`의 최악 상한으로 시작한다. 평균으로 계산하면 장애 때 pod·attempt가 늘면서 바로 한도를 넘는다. producer child map, Prometheus head series와 WAL, remote-write queue·receiver retention의 예산을 각각 둔다.
-
-recording rule은 원시 rank/device series를 안정된 job·attempt 단위로 축약한다. alert의 `for`는 조건이 참인 채 머물러야 하는 진입 시간이고 `keep_firing_for`는 조건이 사라진 뒤 firing을 유지하는 해제 hysteresis다. Prometheus의 고정 rule schema가 recording rule에서 두 상태 필드를 거부하므로 집계와 경보 상태를 한 규칙처럼 설명하면 안 된다.
-
-값 없음도 네 갈래로 나눈다. 대상 자체가 사라진 absent, staleness marker, scrape 실패, exporter가 예전 timestamp를 반복하는 frozen sample은 서로 다른 사건이다. remote-write queue drop이나 lag가 있으면 중앙 backend의 부재는 GPU 값 0이 아니다. alert에는 원 신호와 함께 scrape freshness, queue backlog/drop, 마지막 성공 timestamp를 붙인다.
-
-SLO는 코드에서 나오지 않는다. `for=5m` 예제는 운영 정답이 아니라 상태 기계 사용례다. 정상 baseline 기간과 fault fixture에서 detection latency, false page, missed incident를 측정해 workload·cluster별로 보정하지 않았다면 threshold와 지속 시간은 `NeedsReview`다.
-
-## 26.24 profiler가 관측한 실행이 같은 학습인지 먼저 증명한다
-
-trace를 열기 전에 profiler-off/on paired run을 만든다. checkpoint, input bytes, seed, batch와 update 범위를 고정하고 loss, 선택 gradient와 parameter-update digest를 비교한다. profiler가 synchronization, allocator timing, compilation이나 memory pressure를 바꿔 update가 달라졌다면 on-run의 timeline은 원래 실행의 투명한 관측이 아니다. 차이 자체를 capture overhead와 observer effect로 보고한다.
-
-`torch.profiler.schedule`은 step을 wait, warmup, active, save 상태로 바꾸는 상태 기계다. canonical test는 `skip_first`, wait·warmup·active·repeat 조합의 step별 `ProfilerAction`을 직접 확인한다. run manifest에는 요청한 schedule뿐 아니라 실제 step→action 열을 쓴다. warmup step을 성능 평균에 섞거나 마지막 save 이전 crash의 빈 trace를 정상 capture로 세지 않는다.
-
-CUPTI activity buffer는 무한하지 않다. PyTorch wrapper의 `activity_get_num_dropped_records`는 subscriber/context/stream별 누락 record를 조회한다. event 수가 많다는 이유로 trace가 완전하다고 가정하지 않는다. buffer size, flush 정책, forced flush 여부, dropped count와 capture window를 trace checksum 옆에 둔다. dropped count가 0이 아니면 kernel-duration 합과 overlap 비율은 lower-bound 성격을 가진다.
-
-시간축도 하나가 아니다. CUPTI native nanosecond clock, CPU monotonic clock, Unix epoch, GPU device timestamp와 여러 host clock을 구분한다. 같은 clock 안의 duration과 변환 anchor를 통한 cross-domain ordering을 분리한다. host 간 NTP/PTP 오차보다 작은 순서 차이를 causal order로 읽지 않는다. Nsight Systems의 timeline과 framework metric을 join할 때 NVTX/CorrelationID, rank, process, device와 clock-conversion metadata를 함께 보존한다.
-
-allocator snapshot은 OOM의 해설서이지 device memory 전체 census가 아니다. `torch.cuda.memory._snapshot`은 allocator segment·block·allocation/free/OOM trace를 제공하고 canonical CUDA test가 상태 구조를 확인한다. reserved-active 차이와 inactive split block은 fragmentation 후보를 보여 주지만, CUDA context, NCCL·cuBLAS workspace와 extension의 직접 `cudaMalloc`까지 모두 설명하지 않는다. `device total-used`와 allocator reserved 사이의 차이를 별도 unattributed memory로 남긴다.
-
-OOM fixture는 같은 tensor 생명주기에서 allocation 크기·stream·stack을 고정하고 snapshot 전후를 비교한다. 단순히 “free memory가 부족했다”고 끝내지 않고 largest free block, reserved/active/inactive bytes, segment count, retry와 OOM event를 본다. snapshot capture 자체의 memory·latency overhead도 off/on 비교에 포함한다. snapshot이 성공한 run만 남기면 OOM 직전 가장 중요한 상태가 선택적으로 빠질 수 있다.
-
-Nsight Systems와 Compute는 실제 trace를 실행하지 않은 상태에서 성능 결론을 제공하지 않는다. tool version, CUDA/driver, target GPU, capture flags, replay pass, metric set, clock lock과 trace file digest가 있어야 동일 artifact다. Compute counter replay는 kernel을 여러 번 실행할 수 있으므로 end-to-end wall time과 같은 관측이 아니다. Systems timeline, Compute kernel counter, PyTorch trace와 DCGM health metric은 서로 다른 측정기를 IncidentID로 join한다.
-
-최종 fixture는 off/on의 input·loss·gradient·update digest, schedule action, dropped event, clock anchors, trace checksum, allocator snapshot digest, wall time과 peak memory를 한 행에 둔다. parity가 맞고 dropped event가 허용 범위 안이며 trace checksum을 재현할 수 있을 때만 병목 결론을 낸다. 실제 Nsight trace나 CUDA counter를 수집하지 않았다면 코드 경로가 존재해도 `RuntimeUnverified`다.
+telemetry loss와 실제 update 실패를 동시에 주입해 둘을 분리한다. duplicate param batch는 partial write가 없어야 하고, profiler/history off paired control은 동일 B117의 loss·gradient·delta를 보존해야 한다. label cardinality budget과 alert `for`/inhibition 상태도 revisioned policy다. triage는 [rank hang](../playbooks/06-rank-hang.md), [OOM](../playbooks/05-oom.md), [NaN](../playbooks/01-nan.md)으로 분기하며, 27장에는 실제 loaded component·collector revision을, 29장에는 detector/failure injection point를 넘긴다.

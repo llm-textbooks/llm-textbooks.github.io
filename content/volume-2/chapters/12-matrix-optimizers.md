@@ -458,31 +458,13 @@ release 이후 새 matrix role이 추가되면 allowlist에 자동 포함하지 
 
 **검증 체크포인트.** group 누락·중복 없음, tied parameter 단일 소유, resume 뒤 Newton–Schulz 입력과 step counter 동일.
 
-## 12.10 도입 실험과 선택 회의를 재현 가능한 절차로 만든다
+## 12.10 optimizer 도입 판단을 한 표로 압축한다
 
-baseline, grouping, memory, 수치 parity, scale-out와 rollback을 차례로 통과해야 새로운 optimizer를 승인한다.
+| 입력 | 수치 oracle | 소유 상태 | 분산·복구 조건 | 판정 |
+|---|---|---|---|---|
+| 같은 logical parameter와 gradient replay | FP64 소형 행렬과 독립 residual | moment·preconditioner·cadence·workspace | stable ID, collective owner, resume 첫 delta | correctness·memory·time을 따로 승인 |
 
-첫 단계는 후보를 고르는 일이 아니라 logical parameter inventory를 만드는 일이다. 각 행에 stable parameter ID, module role, global/local shape, dtype, sparsity, tied alias, sharding axis, gradient owner를 기록한다. `ndim==2`만으로 Muon 또는 Shampoo group을 만들면 embedding table, expert router, vocab head까지 숨어 들어간다. 이 tensor들은 외형은 행렬이어도 dense hidden transform과 gradient 통계가 다르다. 왜 role을 먼저 고정하는가. optimizer를 바꾼 뒤 생긴 개선과 grouping 변경 효과를 분리해야 하기 때문이다.
-
-둘째 단계는 gradient replay corpus다. 초기·warmup 종료·중간·decay 구간에서 logical gradient를 수집하고 zero·rank-one·ill-conditioned·tall·wide synthetic matrix를 더한다. replay는 model forward를 다시 돌리지 않고 optimizer 수치 경로만 비교하므로 optimizer 차이를 data order와 dropout noise에서 격리한다. 실험 단위는 loss curve가 아니라 입력 parameter/state/gradient에서 출력 delta/state로 가는 순수 전이다.
-
-셋째 단계는 수학 oracle이다. 작은 matrix는 FP64 SVD/eigendecomposition으로 polar factor와 inverse root를 계산한다. Muon에는 `||X^TX-I||`, singular-value spread와 scale equivariance를, Shampoo에는 root residual과 symmetry를, Lion에는 sign transition을, Sophia에는 clipping 전후 좌표를 기록한다. oracle이 production kernel과 같은 algorithm이어서는 안 된다. 같은 버그를 공유할 수 있기 때문이다.
-
-넷째는 state와 peak byte 회계다. persistent state, cached preconditioner, root workspace, foreach list, collective staging buffer를 구분한다. `[m,n]` weight의 full Shampoo Gram은 대략 `m²+n²` 원소지만 block partition, padding, root 복제 정책에 따라 실제 byte가 달라진다. Muon momentum은 parameter 크기와 비례하지만 Newton–Schulz intermediate가 peak를 만든다. 평균 memory만 보면 순간 root workspace OOM을 놓친다.
-
-다섯째는 분산 owner 계약이다. logical matrix가 FSDP axis로 잘렸을 때 local shard만 직교화하면 full matrix polar update와 다른 algorithm이다. all-gather 후 계산할지, 2D mesh에서 distributed matmul을 할지, block을 rank에 배정할지 명시한다. optimizer collective와 reducer가 gradient를 중복 reduce하지 않는지도 확인한다. collective sequence ID와 owner group을 trace에 넣으면 hang과 수치 불일치를 구분할 수 있다.
-
-여섯째는 checkpoint commit이다. parameter group 규칙, transpose 여부, block partition, optimizer family/version, backend, iteration coefficient, state dtype, root cadence와 counter를 저장한다. key는 Python iteration order가 아니라 stable ID로 만든다. 저장 도중 rank가 죽으면 모든 shard가 같은 OptimizerStepID를 가리키는 checkpoint만 publish한다. resume 뒤 첫 replay가 uninterrupted branch와 같은 logical delta를 만드는 것이 종료 조건이다.
-
-### Muon 고정 소스의 함수 경계를 추적한다
-
-정의와 실험 조건은 [Muon 원 논문](https://arxiv.org/abs/2502.16982), PyTorch 공식 recipe는 [Muon optimizer recipe](https://docs.pytorch.org/tutorials/recipes/recipes/muon_optimizer.html)에서 확인한다. NVIDIA 고정 구현 [`NeMo-Run`](https://github.com/NVIDIA/NeMo-Run/tree/83537ba67cb4c998251567f78a534776fecb1965)와 `emerging_optimizers/orthogonalized_optimizers/muon.py:38`은 coefficient, backend, fallback을 읽는 출발점이다. 논문의 수식과 library의 scaling convention이 같다고 가정하지 말고 input normalization, transpose, iteration count, post-scale을 순서대로 펼친다.
-
-Newton–Schulz 한 반복은 matmul을 여러 번 수행한다. 입력 norm이 안정 영역 밖이면 반복 횟수를 늘릴수록 좋아진다는 직관이 깨진다. 실험은 `ns_steps=0..k`, FP32/BF16, aspect ratio와 condition number를 교차한다. 관측 열은 residual, delta RMS, maximum absolute value, kernel time, temporary bytes다. 결과가 나쁘면 lr 전에 normalization과 coefficient family가 실제 선택되었는지 확인한다.
-
-wide matrix를 transpose해 tall 경로로 계산하는 구현은 반환 transpose와 scale convention을 함께 검증한다. `[2,8]`와 그 transpose fixture가 transpose 관계의 delta를 내는지 본다. rank-deficient matrix에서는 polar factor의 null-space 선택이 유일하지 않을 수 있어 원소 equality 대신 row/column space action과 residual을 비교한다. zero matrix는 NaN 없이 정의된 fallback을 내야 한다.
-
-분산 Muon이 parameter를 stack해 collective로 묶는다면 stack order가 checkpoint state다. rank마다 dict order가 다르면 같은 byte 수로 다른 tensor를 reduce하는 silent corruption도 가능하다. stable ID sort, shape vector, concatenation offset digest를 collective 전에 all-rank 비교한다. 디버깅은 collective 이전 gradient digest, 이후 full update digest, unstack 뒤 delta digest 순서로 최초 불일치를 찾는다.
+Muon의 정의와 실험 범위는 [원 논문](https://arxiv.org/abs/2502.16982), 공개 구현 절차는 [PyTorch 공식 recipe](https://docs.pytorch.org/tutorials/recipes/recipes/muon_optimizer.html), 고정 구현은 [NeMo-Run commit `83537ba…`](https://github.com/NVIDIA/NeMo-Run/tree/83537ba67cb4c998251567f78a534776fecb1965)에서 확인한다. 논문·recipe·채택 구현의 scaling convention을 자동으로 같다고 두지 않는다.
 
 ## 12.11 optimizer family를 state machine과 결정 트리로 비교한다
 
@@ -2428,3 +2410,33 @@ Lion은 momentum state 하나와 sign update를, Adafactor는 matrix의 second m
 matrix fixture는 rank-deficient와 condition number가 큰 gradient covariance를 만들고 inverse-root residual을 FP64 eigendecomposition/SVD reference와 비교한다. BF16 statistic, 작은 eigenvalue와 damping을 바꿔 NaN·방향 폭주를 검사한다. grafting은 preconditioned direction과 SGD/Adam 계열 update의 어떤 norm을 결합하는지 분리한다. 방향과 크기를 모두 원본 optimizer에서 가져왔다고 쓰면 grafting의 의미를 잃는다.
 
 distributed Shampoo는 factor·inverse-root owner와 parameter global range, 통신 뒤 replica equality를 checkpoint manifest에 기록한다. accumulation partition과 world size를 바꾼 restore에서 첫 update를 비교한다. flatten order나 parameter group이 달라졌는데 canonical parameter ID와 명시적 adapter가 없으면 migration을 거부한다. 논문의 scale benchmark와 hardware throughput은 별 RuntimeUnverified 실험이며 작은 수치 fixture의 통과로 대신하지 않는다.
+
+## 12.17 GR-001 규범 trace — AdamW 대안을 같은 update 좌표에서 비교한다
+
+optimizer 비교의 입력을 서로 다른 run의 최종 점수로 두지 않는다. 11장의 동일한 `(ParameterID, θ_{41}, g_{42})`를 AdamW와 Muon branch에 복제하고, direction·scale·state bytes·checkpoint schema가 처음 갈라지는 곳을 기록한다.
+
+```mermaid
+flowchart LR
+    G[GR-001/A0042<br/>same θ and gradient G] --> A[AdamW reference]
+    G --> N[Muon momentum]
+    N --> F[Frobenius normalize]
+    F --> NS[Newton-Schulz iterations]
+    NS --> Q[orthogonalized update]
+    A --> P[paired delta ledger]
+    Q --> P
+    P --> S[13장 schedule/commit clock]
+```
+
+OLMo-core 고정 revision의 [`Muon`](https://github.com/allenai/OLMo-core/blob/b7e9671d7ea48af94838c4f124703c3ae36f0c70/src/olmo_core/optim/muon.py#L1-L300)은 2D parameter selection, momentum과 Newton–Schulz 경로의 실제 owner다. PyTorch의 고정 [`Adafactor.step`](https://github.com/pytorch/pytorch/blob/3691693263d2b66a68867e39b7449876844e06cf/torch/optim/_adafactor.py#L80-L190)은 row/column factored second moment라는 다른 state reduction을 제공한다. 이름이 다른 두 optimizer를 같은 “메모리 절감” 문장에 합치지 않는다.
+
+Muon mapping은 `B_t=μB_{t-1}+(1-μ)G_t`, `X_0=B_t/max(||B_t||_F,ε)`, `X_{i+1}=aX_i+bX_iX_i^TX_i+cX_i(X_i^TX_i)^2`, `θ_t=decay(θ_{t-1})-ηs(shape)X_n`이다. 코드에서는 momentum buffer, dtype cast/norm, 반복 polynomial, shape scaling과 parameter mutation을 차례로 찾는다. `X_n`을 정확한 SVD라고 부르지 않고 `||X_nX_n^T-I||` residual로 근사를 평가한다.
+
+| branch state | shape·dtype | persistent bytes | 비교 oracle |
+|---|---|---:|---|
+| Muon momentum | `[8192,4096]` fp32 또는 구현 dtype | 최대 128 MiB | recurrence digest |
+| NS work tensor | 같은 2D, 보통 저정밀 | 구현별 temporary | orthogonality residual |
+| Adafactor row state | `[8192]` fp32 | 32 KiB | row mean-square |
+| Adafactor col state | `[4096]` fp32 | 16 KiB | column mean-square |
+| output delta | parameter shape | ephemeral | cosine·norm·finite |
+
+zero/rank-1/ill-conditioned gradient, transposed shape, 1D parameter 오분류와 momentum checkpoint 누락을 mutation으로 넣는다. 최초 차이가 selection이면 group policy, norm이면 epsilon/dtype, NS 반복이면 coefficient/order, 최종 크기면 LR·shape scale 문제다. 13장에는 optimizer kind와 state schema digest, U0042 candidate delta, effective LR multiplier와 미실행 hardware cell을 넘긴다.

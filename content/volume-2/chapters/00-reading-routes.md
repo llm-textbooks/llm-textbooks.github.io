@@ -2,6 +2,29 @@
 
 처음부터 마지막 장까지 읽는 길만 있는 책은 실무에서 오래 살아남기 어렵다. 지금 손에 잡힌 문제가 loss인지, 데이터인지, 분산 hang인지에 따라 출발점이 달라야 한다. 다만 어느 길을 택해도 실제 산출물의 연결은 끊지 않는다.
 
+## 먼저 GR-001을 북마크한다
+
+어느 경로를 고르든 장 첫머리의 `GR-001` 수직 추적을 먼저 읽는다. 그곳에는 최소 입력, 호출 그래프, tensor shape·dtype·device, loss 분모, 쓰이는 state, 고정 원전과 반증 실험이 모여 있다. 본문에서 낯선 옵션을 만나면 정의를 외우기 전에 GR 표에서 어느 행을 바꾸는지 찾는다.
+
+| 읽는 순서 | 목적 | 반드시 왕복할 곳 | 완료 증거 |
+|---|---|---|---|
+| 1–3 → 28 | 첫 학습 step 이해 | [단일 GPU 실습](../labs/28-single-gpu-golden-lab.md), [NaN](../playbooks/01-nan.md) | token→loss→grad→step→resume ledger |
+| 5–6 → 18 → 19 → 20 → 30 | 파인튜닝·정렬 종단 | [실습 색인](../labs/index.md), [stale rollout](../playbooks/08-stale-rollout.md) | `GR-001 → SFT-001 → DPO-001 → RL-001` |
+| 14–17 → 26 → 29 | 멀티 GPU·장애 | [멀티노드 실습](../labs/29-multinode-failure-lab.md), [rank hang](../playbooks/06-rank-hang.md) | rank별 collective·checkpoint·복구 trace |
+| 8–14 → 21–23 | 논문·새 아키텍처 | 각 절의 arXiv/공식 코드, 장의 negative fixture | 수식 전제→symbol→tensor→반례 매핑 |
+| 24–27 → 30 | 평가·안전·출판 | [평가 실습](../labs/24-eval-contamination-uncertainty-lab.md), [contamination](../playbooks/10-contamination.md) | EvalID·불확실성·계보가 있는 release 판단 |
+
+### 한 절을 읽는 여섯 번의 왕복
+
+1. `GR-001`에서 현재 artifact와 부모 ID를 찾는다.
+2. 링크된 논문이나 공식 문서에서 주장 범위와 전제를 읽는다.
+3. commit이 고정된 코드의 symbol과 caller를 따라 tensor/state 변화를 적는다.
+4. 본문 수식의 축·mask·분모를 실제 shape에 대입한다.
+5. 연결된 lab의 작은 fixture로 정상값과 mutation을 비교한다.
+6. 실패하면 증상에 맞는 playbook에서 최초 divergence와 복구 판정을 남긴다.
+
+이 여섯 단계 뒤에도 결과를 설명할 수 없다면 다음 장으로 넘어가지 않는다. 최종 metric을 먼저 보고 원인을 추측하는 대신 가장 앞에서 달라진 artifact를 찾는다.
+
 ## 처음 학습 코드를 읽는 독자
 
 ### 계산의 최소 폐회로
@@ -65,12 +88,4 @@ token ID와 label, 유효 loss 토큰 수, 주요 activation shape, gradient nor
 
 15장의 GPipe는 [원 논문(arXiv:1811.06965)](https://arxiv.org/abs/1811.06965)의 micro-batch flush pipeline에서 시작한다. bubble 식을 읽고 activation rematerialization과 batch semantics를 분리한 뒤 현재 Megatron schedule의 1F1B·interleaving·virtual stage 상태로 내려간다. 둘은 역사적으로 연결되지만 같은 scheduler가 아니다. microbatch 수가 pipeline stage 수보다 작을 때, uneven sequence가 들어올 때, 마지막 partial batch가 생길 때의 bubble·denominator fixture가 구현 차이를 드러낸다.
 
-역연결이 없다는 기록도 정보다. 현재 30books graph에는 paper-like entry 27개와 concept 164개가 있지만 arXiv ID가 없는 entry가 9개이고, 원문 전체를 사용할 수 없다고 표시된 entry도 1개다. 이 경우 제목 유사도나 concept label만으로 `exactMatch`를 만들지 않는다. 독자는 링크 수보다 chunk hash, 문자 좌표, 관계 종류와 “무엇을 증명하지 않는가”를 먼저 확인해야 한다.
-
-### 164개 개념의 두 번째 감사표를 읽는 법
-
-기존 역색인에는 164개 중 17개 concept가 한 번 이상 연결되어 있었다. 두 번째 감사에서는 그 링크를 자동 승인하지 않고 원문 chunk의 hash·문자 offset·발췌문과 2권의 수식·코드·실패 계약을 다시 맞췄다. 이 엄격한 기준에서 독립 승인한 항목은 scaled dot-product attention, GPipe pipeline parallelism, micro-batch 세 개다. 나머지 161개는 삭제한 것이 아니라 `검토필요`로 남겼다.
-
-표의 `mappingBasis`는 두 노드가 공유하는 정확한 명제를 말한다. `confidence`는 그 명제 연결의 확신이지 현대 구현 전체가 원 논문과 같다는 확률이 아니다. `boundary`는 반드시 반례처럼 읽는다. 예를 들어 GPipe의 micro-batch가 현재 1F1B scheduler의 선행 개념이라는 사실은 두 상태 기계가 동일하다는 뜻이 아니다.
-
-미연결 reason taxonomy의 0도 의미가 있다. 자동 감사로 원문없음·동명이의·범위밖·현재 엔티티없음을 확정할 근거가 없으면 억지로 분류하지 않고 `검토필요`에 둔다. 독자는 먼저 exact chunk를 읽고, 로컬 수식의 변수와 전제를 대조하고, 코드 symbol이 그 수식을 어느 조건에서 구현하는지 확인한 다음, 실패 계약이 현대적 차이를 막고 있는지 검토한다.
+원전 연결이 없거나 적용 범위를 확정하지 못한 항목은 억지로 확정하지 않는다. 독자는 링크 개수보다 원문의 실제 명제, 현재 symbol이 소비하는 조건, 그리고 “무엇을 증명하지 않는가”를 먼저 확인한다. 원 논문이 현대 구현의 선행 개념이라는 사실은 두 상태 기계가 같다는 뜻이 아니다.

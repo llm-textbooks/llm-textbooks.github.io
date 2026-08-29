@@ -1090,61 +1090,9 @@ automatic fallback은 편리하지만 손상을 숨길 수 있다. 최신 genera
 
 operator override는 가능하되 immutable audit와 dry-run plan을 요구한다. revoked checkpoint 강제 사용, strictness 완화, missing optimizer reset은 새 branch를 만들고 release 제한을 표시한다. 긴급 상황이라는 이유로 기존 manifest를 고치지 않는다.
 
-## 17.12 test pyramid·비용·복구 후 건강을 함께 판정한다
+## 17.12 복구 인수의 단일 규범
 
-unit roundtrip부터 fresh-process, topology change와 disaster drill까지 시험 범위를 넓히고 저장 비용과 신뢰성의 교환을 측정한다.
-
-가장 아래에는 serialization unit test가 있다. dtype·shape·empty tensor·alias·nested state를 round trip하고 corrupt metadata를 거부한다. 그 위 planner test는 index-coded tensor로 old/new world size의 coverage와 replica 선택을 검증한다. storage test는 partial write, retry, checksum, commit ordering을 검증한다.
-
-그 위 distributed integration test는 여러 rank의 model·optimizer·RNG·sampler를 save/load하고 첫 update를 비교한다. process를 실제 crash point에서 종료해 coordinator와 orphan 처리도 시험한다. 작은 CPU/GPU fixture로 자주 실행하되 production backend와 parallel wrapper의 실제 code path를 지나야 한다.
-
-system rehearsal은 scheduler가 worker를 재배치하고 object store에서 읽으며 tracker/catalog까지 이어진다. world-size 변경, node loss, credential expiry, storage throttle, retention race를 포함한다. model 규모가 작더라도 protocol topology를 보존한다. 대규모 throughput과 tail 주장은 별도 scale test가 필요하다.
-
-마지막 disaster rehearsal은 primary cluster나 region을 사용할 수 없다는 가정에서 destination replica로 복구한다. 사람의 승인과 credential 획득 시간도 RTO에 포함한다. runbook에 적힌 연락처와 권한이 실제로 작동하는지 확인한다.
-
-각 test는 통과 화면보다 불변식과 negative control을 가진다. checksum test는 byte를 실제로 바꾸고, world-size test는 index permutation을 탐지하며, RNG test는 state를 하나 빼면 실패해야 한다. detector가 없는 시험은 녹색이어도 증명력이 약하다.
-
-### 비용·신뢰성 공동 최적화
-
-checkpoint 간격을 `T`, 저장 pause를 `C`, failure rate를 `λ`, 평균 rollback을 대략 `T/2`로 놓으면 너무 잦은 저장의 비용과 너무 드문 저장의 기대 손실 사이 tradeoff를 볼 수 있다. 실제로는 async overlap, persist tail, correlated failure, restart 시간과 학습 phase별 throughput을 포함해야 한다. 고전적인 근사식은 초기값이지 운영값의 증명이 아니다.
-
-모델과 optimizer byte가 커지는 후반에도 checkpoint 비용이 같은지 확인한다. sparse optimizer state가 점차 materialize되거나 sequence/curriculum이 바뀌어 compute 대비 I/O 비율이 변할 수 있다. phase별 capture/persist 분포로 interval을 조정하되 RPO 계약을 넘지 않는다.
-
-저장 tier를 나눌 수 있다. 빠른 local checkpoint는 node/rack failure에는 약하지만 짧은 RTO를 주고, durable object-store checkpoint는 넓은 failure domain을 견딘다. 두 tier의 generation과 promotion 상태를 catalog에 연결한다. local만 성공한 generation을 region 복구 후보로 표시하지 않는다.
-
-checkpoint compression, incremental chain, replica 수를 줄이는 절약은 restore와 corruption blast radius를 바꾼다. 월 저장 비용만 보지 않고 정기 restore compute, egress, 실패 시 잃는 GPU-hour, 규제 retention을 합친다. release milestone과 위험한 migration 전에는 평소보다 강한 snapshot을 둘 수 있다.
-
-### 복구 후 학습의 건강을 판정한다
-
-첫 update parity가 통과해도 이후 수백 step을 관찰한다. loss와 gradient norm, update norm, learning rate, scaler overflow, sample/source mixture, routing load, tokens/s를 pre-failure envelope와 비교한다. topology 변경으로 kernel과 reduction order가 달라졌다면 bitwise가 아니라 statistical envelope를 사용하되 drift 방향을 본다.
-
-rollback 때문에 같은 sample을 다시 학습하는 것은 checkpoint contract상 의도일 수 있다. tracker에는 logical trajectory step과 attempt-local executed step, total processed token을 구분한다. 비용 회계는 다시 처리한 token도 포함하고 quality graph는 optimizer effect 기준을 사용한다.
-
-성능이 복구 전보다 느리면 checkpoint corruption보다 placement, cache cold start, compiler/autotune, reshard layout을 먼저 분리한다. cache가 데워질 때까지의 transient와 지속 회귀를 나눈다. 새 topology가 parallel plan의 가정을 깨뜨렸다면 기능 동일성은 맞아도 scheduler 재배치가 필요하다.
-
-health window가 끝나기 전에 새 checkpoint를 commit할지 정책을 정한다. 잘못 복구된 state가 정상 generation으로 퍼지는 것을 막으려면 quarantine generation을 두고 oracle 통과 뒤 승격할 수 있다. 반대로 너무 긴 quarantine은 RPO를 악화한다. 최소 first-step gate와 extended health gate를 분리한다.
-
-### 운영 인계를 위한 복구 문답
-
-“어떤 state가 빠지면 load는 되지만 trajectory가 달라지는가?”에는 optimizer moment/step, scheduler, scaler, RNG, sampler/prefetch, mixture state가 나와야 한다. “왜 latest를 믿지 않는가?”에는 commit closure와 pointer race가 나와야 한다. “world size가 바뀌면 무엇을 검산하는가?”에는 global offsets, replica, optimizer mapping, batch/data semantics가 나와야 한다.
-
-“async save가 반환됐다는 뜻은 무엇인가?”에는 capture 완료와 durable commit의 구분이 나와야 한다. “object store에서 원자성을 어떻게 만드는가?”에는 immutable shard와 마지막 commit object, reader의 manifest 기반 discovery가 나와야 한다. “restore 성공은 언제인가?”에는 검증된 첫 optimizer effect와 요구 동일성 등급이 나와야 한다.
-
-“corrupt latest를 만나면 어떻게 하는가?”에는 자동 fallback, 높은 severity incident, artifact 격리와 catalog 기록이 나와야 한다. “optimizer를 바꿔 이어가면 resume인가?”에는 새 branch와 reset state가 나와야 한다. “data 삭제는 checkpoint와 무슨 관계인가?”에는 dataset-to-generation lineage와 governance 판정이 나와야 한다.
-
-운영자는 이 답을 runbook에서 찾고, framework 개발자는 selected source와 test에서 증명하며, 연구자는 optimization/data 의미를 승인한다. 세 답이 같은 manifest field와 event를 가리켜야 한다. checkpoint를 파일 형식으로만 소유하면 이 세 책임이 만나지 않는다.
-
-**복구 시스템의 완성 조건**
-
-완성된 시스템은 저장 성공률이 높다는 말보다 구체적이다. 모든 generation은 immutable identity와 parent, logical state inventory, shard closure, checksum, schema와 commit status를 가진다. reader는 listing이나 파일명 추측 없이 catalog와 commit을 통해 후보를 고른다. 미완료·revoked·incompatible generation은 이유와 함께 제외된다.
-
-capture는 optimizer/data의 consistent cut에서 일어나고 async stage/persist는 명시적 ownership과 backpressure를 가진다. topology 변경은 global tensor와 optimizer semantics를 index-coded fixture와 first-step oracle로 검증한다. RNG·sampler·mixture state는 선언한 동일성 등급만큼 복원된다.
-
-장애는 crash point별로 주입되며 detector, selector, scheduler, restore, health gate가 하나의 causal timeline에 남는다. Prometheus는 SLO와 backlog를 보여주고 event log는 generation transaction을 재구성하며 tracker는 rollback attempt를 분리한다. corruption과 보안 실패도 정상 retry와 구분된다.
-
-정기 restore와 disaster rehearsal이 최신 artifact를 실제로 읽는다. RPO와 RTO는 요청 시각이 아니라 마지막 durable effect와 검증된 첫 재개 effect 사이에서 측정한다. 비용은 write byte뿐 아니라 pause, memory, restore, egress, rollback GPU-hour를 포함한다.
-
-마지막으로 다른 운영자가 담당자의 기억 없이 같은 generation을 선택하고 같은 equality 판정을 내릴 수 있어야 한다. 실패했을 때 원본과 audit를 덮어쓰지 않고 새 branch와 repair event를 만든다. 이 조건을 충족하면 checkpoint는 학습의 부산물이 아니라, 대규모 최적화 상태를 시간과 장애를 건너 운반하는 검증 가능한 protocol이 된다.
+복구 완료는 파일 open이 아니라 `saved → durable generation → restored → derived/rebuilt → rejected` 상태의 일치다. model·optimizer·scheduler·precision·RNG·sampler·accumulation·queue 가운데 요구 등급에 필요한 항목을 선언하고, kill-before/after-commit 두 fixture에서 다음 sample과 다음 delta를 비교한다.
 
 ## 17.13 숨은 복구 버그와 운영 첫 달의 oracle을 설계한다
 
@@ -2137,3 +2085,45 @@ failure fixture는 accumulation window 중간과 optimizer step 직후에 proces
 microstep마다 process kill을 넣고 fresh process의 다음 SampleID·SpanID, accumulation phase와 첫 optimizer delta를 uninterrupted baseline과 비교한다. load success나 비슷한 loss는 충분하지 않다. world-size와 shard topology 변화가 schema에 명시되지 않았다면 parameter materialization과 데이터 소비 전에 fail closed한다.
 
 [SourceRow에서 committed UpdateID까지](../labs/06-source-to-commit-golden-lab.md)는 checkpoint가 parameter만이 아니라 committed UpdateID, source cursor, next PackID·UpdateID, dedup state와 tokenizer revision을 함께 소유해야 함을 여섯 문자열로 검산한다. fresh process의 첫 row가 `row-f`가 아니면 load API가 성공했어도 의미 재개는 실패다.
+
+## 17.22 GR-001 — collective commit을 durable generation과 다음 update로 닫는다
+
+`GR-001/U0042`는 13장에서 scheduler clock을 얻고, 15장에서 rank별 shard와 collective 합의를 거쳐, 16장에서 물리 placement와 communicator 세대를 얻었다. checkpoint는 이 상태를 파일로 “복사”하는 마지막 단계가 아니다. 동일한 UpdateID의 논리 상태가 모두 포착됐음을 검증해 다음 process가 소비할 수 있게 공개하는 별 transaction이다.
+
+```mermaid
+flowchart LR
+    U[U0042 committed<br/>all ranks] --> S[snapshot cut<br/>CUDA event + CPU lock]
+    S --> LP[rank local save plans]
+    LP --> W[immutable shard writes]
+    W --> M[global manifest<br/>coverage + checksum]
+    M --> C[CheckpointID=CK43<br/>commit record]
+    C --> R[restore on RG4/CG13]
+    R --> N[next BatchID B118<br/>candidate U0043]
+    N --> O[next-update equality oracle]
+```
+
+### save·publish·load의 concrete call path
+
+PyTorch revision `3691693263d2b66a68867e39b7449876844e06cf`에서 [`get_state_dict`](https://github.com/pytorch/pytorch/blob/3691693263d2b66a68867e39b7449876844e06cf/torch/distributed/checkpoint/state_dict.py#L1271-L1397)는 parameter·optimizer state를 canonical FQN에 연결한다. [`save`](https://github.com/pytorch/pytorch/blob/3691693263d2b66a68867e39b7449876844e06cf/torch/distributed/checkpoint/state_dict_saver.py#L89-L219)는 local/global plan과 storage writer를 조정하며, 내부 [`_save_state_dict`](https://github.com/pytorch/pytorch/blob/3691693263d2b66a68867e39b7449876844e06cf/torch/distributed/checkpoint/state_dict_saver.py#L493-L517)는 write future가 끝난 뒤 coordinator finish로 들어간다. [`FileSystemWriter.finish`](https://github.com/pytorch/pytorch/blob/3691693263d2b66a68867e39b7449876844e06cf/torch/distributed/checkpoint/filesystem.py#L762-L798)는 write 결과를 metadata에 묶어 공개한다. 복원은 [`load`](https://github.com/pytorch/pytorch/blob/3691693263d2b66a68867e39b7449876844e06cf/torch/distributed/checkpoint/state_dict_loader.py#L60-L175)와 [`set_state_dict`](https://github.com/pytorch/pytorch/blob/3691693263d2b66a68867e39b7449876844e06cf/torch/distributed/checkpoint/state_dict.py#L1481-L1550)를 거친다.
+
+이 경로의 입력은 “모델”이 아니라 `(U0042, canonical state dict, optimizer slots, scheduler CG7, scaler, RNG namespaces, data cursor=B118, source mesh RG3/CG12)`다. mutation은 staging object, manifest candidate와 catalog commit을 순서대로 만든다. 출력은 immutable manifest digest를 가진 `CK43(COMMITTED)`이다. load API의 성공은 마지막 출력이 아니다. target `RG4/CG13`에서 B118을 읽어 uninterrupted reference와 같은 U0043 delta를 내야 의미 재개가 닫힌다.
+
+### logical shape·byte·generation 원장
+
+| logical item | global shape·단위 | CK43 저장 표현 | 복원 판정 |
+|---|---|---|---|
+| q_proj weight | `[8192,4096]` bf16, 64 MiB | canonical FQN + shard global offsets | gap/overlap/duplicate 0 |
+| Adam `m`,`v` | 각각 같은 shape fp32, 각각 128 MiB global | parameter FQN에 결합한 slot | step counter와 U0042 일치 |
+| scheduler | group별 scalar + `CG7,last_epoch` | structured state | U0043의 next LR 동일 |
+| scaler | scale·growth tracker | scalar state | overflow decision 동일 |
+| RNG | namespace별 byte state | CPU/CUDA/rank-independent ID | B118 dropout sample 동일 |
+| data | next BatchID `B118`, sample/token cursor | committed cursor | duplicate/missing 0 |
+| topology | source RG3/CG12, target RG4/CG13 | manifest metadata | global interval 재계획 |
+
+byte 합이 맞아도 논리 closure가 맞는 것은 아니다. manifest는 required ObjectID 전부와 global interval coverage를 검증한다. 새 world size에서는 저장 rank 번호가 아니라 source/target global interval의 교집합으로 읽는다. scheduler·RNG·cursor는 tensor planner가 자동 해석하지 않으므로 별 schema와 verifier가 필요하다.
+
+장애 주입은 snapshot 뒤 rank 5 종료, shard 한 개 truncation, manifest publish 직전 coordinator 종료, catalog가 incomplete generation을 가리키는 변형, resume 뒤 scheduler를 한 step 앞당기는 변형을 둔다. 앞 네 변형에서 `CK43`은 보이지 않거나 거부되고 이전 complete generation으로 fallback해야 한다. 마지막 변형은 B118 forward가 같아도 U0043 LR 또는 parameter delta에서 반드시 실패해야 한다. upstream [`test_save_error_handling`](https://github.com/pytorch/pytorch/blob/3691693263d2b66a68867e39b7449876844e06cf/test/distributed/checkpoint/test_checkpoint.py#L325-L357)은 writer/finish 예외 전파를 검증하지만 실제 storage crash consistency나 next-update equality까지 증명하지 않으므로 로컬 fixture를 대체하지 않는다.
+
+실행 검산은 [멀티노드 장애 실습](../labs/29-multinode-failure-lab.md)의 worker kill과 [end-to-end 실습](../labs/30-sft-rl-deploy-golden-lab.md)의 artifact DAG를 결합한다. partial publish는 [partial checkpoint 플레이북](../playbooks/09-partial-checkpoint.md), resume 뒤 NaN은 [NaN 플레이북](../playbooks/01-nan.md), 같은 sample 반복은 [sample repeat 플레이북](../playbooks/03-sample-repeat.md)으로 분기한다.
+
+`GR-001`의 종료 조건은 재시작 process가 살아 있는 것이 아니다. `CK43`의 object closure가 검증되고, target topology에서 B118이 정확히 한 번 소비되며, U0043의 loss·gradient·optimizer moment·LR·parameter delta가 uninterrupted oracle과 허용오차 안에서 같고, 그 결과로 새 complete checkpoint를 다시 commit해야 한다. 이 한 수직 사슬이 scheduler, rank ownership, cluster collective와 checkpoint를 서로 떨어진 기능이 아니라 하나의 학습 transaction으로 만든다.

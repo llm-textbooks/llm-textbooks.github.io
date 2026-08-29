@@ -1,5 +1,59 @@
 # 27장 공급망과 재현성: 같은 이름의 다른 모델을 막는다
 
+27장은 파일을 예쁘게 포장하는 장이 아니라 23–26장의 증거를 하나의 원자적 promotion으로 묶는 장이다. GR-001 후보는 편집 계보, 평가 원자료, red-team feedback, 관측 schema 가운데 하나라도 다른 parent를 가리키면 출시되지 않는다.
+
+## 27.0 GR-001 출시 트랜잭션: 증거 묶음에서 실제 digest까지
+
+```mermaid
+flowchart LR
+  C[CKPT-023 + DELTA-023] --> B[ReleaseBundle-027]
+  E[EVR-024 + row ledger] --> B
+  S[SafetyDecision-025<br/>feedback digest] --> B
+  O[EvidenceBundle-026<br/>metric schema] --> B
+  B --> V[structural + signature<br/>+ behavioral verifier]
+  V -->|deny| Q[quarantine<br/>first divergence]
+  V -->|allow| P[atomic alias promotion]
+  P --> F[fleet loaded digest]
+  F --> K[canary + rollback watch]
+  K --> D[ReleaseDecision-027]
+```
+
+|bundle row|GR-001 subject|검증 단계|실패 시 조치|
+|---|---|---|---|
+|model weights|`sha256:model…e31`|safetensors bounds→tensor schema→digest|parser 전에 격리, alias 불변|
+|tokenizer/template|`sha256:tok…402`|special ID·template hash·golden token trace|model과 따로 교체 금지|
+|change ledger|`CHG-023 / DELTA-023`|parent·descendant closure|구 adapter/cache generation 폐기|
+|evaluation|`EVR-024 / rows sha256:…`|row set·oracle·denominator·CI|점수 JSON만 제출하면 거부|
+|safety|`SafetyDecision-025`|holdout lineage·risk budget|feedback/holdout overlap이면 재평가|
+|observability|`schema-026 / alerts sha256:…`|필수 metric·label budget·runbook|canary 관측 불가면 promotion 중단|
+|runtime|image·CUDA·driver·loaded model digest|admission과 replica heartbeat 비교|desired≠actual이면 traffic 격리|
+
+출시 판정을 논리곱으로 쓰면 기준이 선명해진다.
+
+$$
+Allow = I_{identity}\land I_{lineage}\land I_{behavior}\land
+I_{safety}\land I_{observability}\land I_{rollback}.
+$$
+
+|기호|실제 verifier 출력|의미|
+|---|---|---|
+|$I_{identity}$|subject digest match|서명한 bytes와 적재할 bytes가 동일|
+|$I_{lineage}$|all parent edges resolved|source→run→change→evaluation의 공백이 없음|
+|$I_{behavior}$|EVR-024 decision pass|고정 row·분모·oracle을 통과|
+|$I_{safety}$|risk budget pass|25장의 독립 holdout 결과|
+|$I_{observability}$|canary signal complete|침묵을 정상으로 해석하지 않음|
+|$I_{rollback}$|previous BundleID load-tested|되돌릴 이름이 아니라 실제 digest가 존재|
+
+형식과 적재 경계는 [safetensors header·tensor validation](https://github.com/huggingface/safetensors/blob/6eb4dc9a28ebce297606e0f4836bbf28839cacef/safetensors/src/tensor.rs#L390-L425), Python loader의 권한 경계는 [Transformers dynamic module loader](https://github.com/huggingface/transformers/blob/550d7b3834670483a4df436541272c055dc364bf/src/transformers/dynamic_module_utils.py#L712-L794), provenance statement의 원전은 [in-toto Attestation v1](https://github.com/in-toto/attestation/tree/051624ce466deaed4c5a66e66877f69b471fccbe/spec/v1)에서 확인한다. 서명이 맞다는 사실은 behavioral·safety gate를 대신하지 않는다.
+
+### 실패 우선 반증과 다음 권 인계
+
+`REL-027-M1`은 evaluation JSON은 유지한 채 row ledger digest를 바꾼다. lineage gate가 signature 이전 또는 함께 정확한 subject mismatch를 보고해야 한다. `M2`는 registry alias만 새 bundle로 옮기고 replica 하나에 이전 loaded digest를 남긴다. fleet convergence gate가 promotion을 완료 처리하지 않아야 한다. `M3`는 유효하게 서명된 checkpoint의 tokenizer만 다른 유효 artifact로 치환한다. 개별 서명 성공이 아니라 bundle compatibility가 거부해야 한다. `M4`는 관측 exporter를 끈 canary를 정상 응답하게 둔다. observability invariant가 이를 실패로 판정해야 한다.
+
+검증은 빈 cache에서 [단일 GPU golden lab](../labs/28-single-gpu-golden-lab.md)을 재생하고, 규모를 키울 때는 [멀티노드 장애 주입 lab](../labs/29-multinode-failure-lab.md), 최종 SFT→RL→배포 연결은 [종합 lab](../labs/30-sft-rl-deploy-golden-lab.md)로 닫는다. 이 장의 출력 `ReleaseDecision-027`에는 허용/거부, first-divergence edge, verifier revision, 실제 loaded digest, rollback target과 남은 위험이 들어간다. 이는 28–30장의 재현 입력이자, 이후 3권의 에이전트가 선택할 모델·도구 artifact의 admission 계약이다.
+
+아래의 provenance·loader·서명·SBOM·권리·삭제 증보는 이 release 트랜잭션의 각 verifier를 상세화한다. 동일한 identity나 gate를 새 이름으로 중복 정의하지 않는다.
+
 재현성은 seed 하나를 적는 것으로 끝나지 않는다. 데이터셋과 코드가 같아 보여도 wheel, CUDA 라이브러리, 컨테이너가 달라지면 다른 커널과 변환 경로가 선택된다. 같은 `checkpoint-final`이라는 이름 아래 shard가 교체될 수도 있다. 공격자는 바로 이 틈, 즉 사람이 같은 것이라고 믿지만 기계가 동일성을 증명하지 못하는 연결을 노린다.
 
 따라서 이 장의 질문은 “파일을 어디에서 받았는가”가 아니다. **어떤 원본과 정책에서 출발한 바이트가, 어느 빌더와 실행 환경을 거쳐, 어떤 학습 상태와 변환을 품은 산출물이 되었으며, 지금 이 배포에서 왜 사용해도 되는가**이다. 답은 설명문 하나가 아니라 검산 가능한 상태 사슬이어야 한다.
@@ -2085,59 +2139,20 @@ rollback event는 target current verification, fleet convergence와 canary evide
 release 후에도 질문은 끝나지 않는다. runtime actual identity, revocation freshness, vulnerability/license update, evidence readability와 reproducibility drill을 감시한다. 새 incident와 삭제 요청은 DAG·decision ledger·golden suite를 갱신한다. 신뢰는 한 번의 승인 상태가 아니라 계속 검증되고 필요할 때 안전하게 철회되는 상태다.
 
 최종 운영 지표에는 미검증 parent, stale signature·policy, unknown runtime component, expired exception, revocation fleet lag, deletion pending과 cold-reproduction failure가 포함된다. 단순 artifact 수보다 위험한 열린 edge의 age와 channel을 본다. 경보는 exact BundleID, owner, 안전한 격리·rollback과 재승인 acceptance를 제공해야 한다. 이 지표까지 artifact graph와 연결될 때 감사 결과가 실제 운영 행동으로 이어진다.
-## 27.15 Ray와 MLflow 자체도 재현 대상에 넣는다
+## 27.15 GR-001/Supply fork — material에서 실행 identity와 revocation까지
 
-`ray==x`, `mlflow==y`만 기록해서는 실행을 복원할 수 없다. Ray Train의 v1/v2 API 경계, deprecated checkpoint 옵션, report upload mode와 controller 실패 정책은 revision에 따라 달라진다. MLflow의 active-run 해석, asynchronous logging 기본값과 autolog 지원 범위도 바뀐다. 그래서 release manifest에는 package version과 함께 source commit, Python lockfile, container digest, 활성 feature flag·환경 변수와 실제로 소비된 resolved config를 넣는다.
+Ray·MLflow, 서명, 데이터 권리·삭제와 parser admission 증보는 하나의 supply trace로 합친다. 선언 dependency와 실제 실행 component, artifact authenticity와 model semantics, 삭제 요청과 descendant verification을 서로 대신 쓰지 않는다.
 
-특히 환경 변수는 숨은 입력이다. MLflow는 `MLFLOW_RUN_ID`로 resume 대상을, `MLFLOW_ENABLE_ASYNC_LOGGING`으로 동기성을, system-metric 환경 변수로 monitor 시작 여부를 바꿀 수 있다. Ray는 runtime environment와 shared storage URI가 worker와 controller의 관측 가능한 파일계를 바꾼다. secret 값 자체를 기록할 필요는 없지만 변수 존재 여부, 비밀 참조 ID와 의미를 바꾸는 non-secret resolved value는 manifest에 남긴다.
+```mermaid
+flowchart LR
+ M[resolved materials + rights] --> B[hermetic builder]
+ B --> A[subject digest + provenance/SBOM]
+ A --> V[signature + format/schema verifier]
+ V --> L[actual loader/runtime inventory]
+ L --> R[run/checkpoint/release descendants]
+ R --> X[revoke/delete/clean rebuild]
+```
 
-재현성 검사는 API 호출 모양이 아니라 소비 지점까지 내려간다. Ray `RunConfig.storage_path`가 실제 공유 filesystem으로 resolve됐는지, `FailureConfig`의 preemption·ordinary failure budget이 무엇이었는지, MLflow `log_batch`가 synchronous로 끝났는지 확인한다. 원본 source span과 공식 실패 테스트를 함께 붙이면 문서 설명이 다음 버전에서 stale해졌을 때 diff가 드러난다.
+검증 순서는 digest→signature/authorization→format→tensor/model schema→remote-code policy→golden next-step→runtime-loaded inventory다. signature가 맞아도 malformed tensor나 철회된 signer면 거부하고, safetensors parsing 성공이 올바른 model·tokenizer bundle을 보장한다고 확대하지 않는다. Ray worker와 MLflow store도 code/config revision·failure semantics를 가진 실행 material이다.
 
-## 27.16 서명된 artifact를 실제 training run identity까지 닫는다
-
-서명, SBOM, container digest, secret과 RBAC를 각각 확인해도 실행 신원은 닫히지 않을 수 있다. 검증한 image digest와 kubelet이 실제로 시작한 digest가 다르거나, 올바른 image가 과도한 ServiceAccount로 다른 checkpoint를 읽으면 서명은 참이지만 run claim은 거짓이다. 폐루프는 `SourceCommit → BuildInvocation → ImageDigest → AttestationSubject → VerifiedIdentity → AdmissionDecision → PodUID → RuntimeImageID → ServiceAccount → SecretReferenceVersion → Dataset/CheckpointDigest → RunID`를 모두 연결해야 한다.
-
-Cosign의 테스트가 경계를 구체화한다. `cmd/cosign/cli/attest/attest_blob_test.go:218-272`는 blob SHA-256을 계산하고 DSSE payload를 풀어 in-toto statement의 단일 subject digest와 predicate type을 확인한다. 즉 signature blob의 암호학적 성공만으로 subject가 기대 artifact라고 말하지 않는다. 같은 저장소의 `cmd/cosign/cli/attach.go:79-96`은 SBOM attach가 서명하지 않는다고 명시하고 attest 사용을 안내한다. “SBOM이 붙었다”와 “그 SBOM statement가 기대 subject에 대해 허용된 identity로 서명됐다”는 별도 주장이다.
-
-KubeRay chart도 name과 runtime identity의 틈을 보인다. `ray-cluster/templates/raycluster-cluster.yaml:76-80`, `:209-213`은 repository와 tag로 head·worker image를 렌더링하며, `:161-162`, `:294-295`는 설정된 ServiceAccount 이름을 pod spec에 넣는다. 이 좌표는 chart render 사실만 증명한다. registry tag가 어느 digest로 resolve됐는지, admission 뒤 mutation이 있었는지, node runtime이 어느 image ID를 시작했는지는 별도 관측이 필요하다. 사실과 추론을 섞지 않는다.
-
-**승인 전 체크리스트.** build material과 builder identity, attestation subject digest, signature trust root·policy revision, SBOM digest·format·생성기, vulnerability DB 시점, OCI manifest와 platform digest를 고정한다. admission에서는 tag를 digest로 resolve하거나 digest reference를 요구하고, verified subject와 admitted image를 비교한다. RBAC에는 실제 verb·resource·namespace를 저장하고 wildcard를 차단한다. secret 값은 로그에 쓰지 않되 secret object UID·resource version 또는 외부 secret version, mount 대상과 읽은 workload identity를 남긴다.
-
-**실행 중 체크리스트.** PodUID, node, container runtime image ID, init/sidecar까지의 digest, ServiceAccount UID, token audience·expiry, effective environment key 목록, volume/source digest와 network policy generation을 RunID에 묶는다. checkpoint와 dataset은 URI가 아니라 소비 시점의 content digest로 기록한다. CUDA driver, runtime, NCCL·native extension과 JIT cache digest도 SBOM의 기대 목록과 runtime inventory로 나란히 둔다. secret 원문, 장기 bearer token과 개인 식별자는 provenance가 아니라 보호 대상이다.
-
-**failure injection과 first divergence.** (1) 같은 tag가 다른 digest를 가리키게 하면 registry resolution에서, (2) attestation subject 한 nibble을 바꾸면 subject comparison에서, (3) 서명되지 않은 SBOM만 attach하면 evidence-policy에서, (4) worker ServiceAccount를 privileged account로 바꾸면 rendered pod/RBAC diff에서, (5) secret version을 회전하고 stale pod를 두면 consumed secret version에서, (6) sidecar image만 바꾸면 runtime inventory에서, (7) checkpoint URI 내용을 바꾸면 input digest에서 실패해야 한다. 마지막 loss가 같더라도 더 앞선 identity invariant가 깨지면 동일 run이 아니다.
-
-promotion gate는 이 graph를 입력으로 받아 허용 또는 거부와 정확한 first-divergence edge를 낸다. verifier 오류와 policy 거부를 구분하고, network failure를 signature invalid로 바꾸지 않는다. waiver에는 빠진 edge, 위험 소유자, 범위, 만료와 철회 조건을 넣으며 영구 성공으로 캐시하지 않는다. 법률·라이선스 적합성은 기술 manifest만으로 확정하지 않는다. manifest는 검토할 사실과 계보를 제공하고, 법적 판단은 관할·계약·데이터 조건을 아는 담당자가 별도로 남긴다.
-
-검토를 닫을 때에는 manifest의 첫 노드와 실제 실행의 마지막 노드를 서로 대조한다. 승인된 source·data·image digest에서 출발해 RunID와 checkpoint까지 정방향으로 걷고, 실행 중인 Pod의 image ID와 loaded checkpoint에서 다시 그 부모들까지 역방향으로 걷는다. 어느 방향에서든 tag·경로·사람의 기억으로만 건너뛰는 edge가 있으면 promotion을 보류한다. 그 빈칸을 채우는 resolver·attestation·runtime inventory가 이 장의 checklist가 요구하는 실제 조치다.
-## 27.17 데이터 권리도 revisioned event graph로 재현한다
-
-소스 commit과 container digest를 고정하면서 데이터 권리를 카드의 `license` 문자열로만 남기면 공급망은 절반만 닫힌다. 권리 판단은 원천별 주장, 수집 시점의 정책 관측, 조직의 허용 결정, 철회 요청과 파생물 적용 결과로 시간에 따라 변한다. 따라서 과거 문자열을 덮어쓰지 않고 `Assertion → Observation → Decision → Application` 이벤트를 append-only로 연결한다.
-
-각 event에는 subject의 안정 ID, policy revision, 관측 bytes digest, actor·workload identity, 시각, 결과와 이전 event를 둔다. 데이터 혼합과 dedup은 parent 집합을 잃지 않아야 한다. 행 단위 추적이 너무 비싸면 shard manifest에 parent ID set의 content-addressed index를 두되, 실제 tombstone fixture로 false negative가 없음을 검증한다. Bloom filter만으로 삭제 완료를 증명해서는 안 된다. false positive는 과잉 삭제를 만들고 normalization 변화는 누락을 만들 수 있기 때문이다.
-
-출시 관문는 `license-present`가 아니라 열린 권리 edge를 검사한다. robots 관측 없음, consent 범위 불명, request 인증 미완료, tombstone이 token shard까지 도달하지 않음, checkpoint 영향이 제거되지 않음은 서로 다른 상태다. 각각 owner와 만료·격리 정책을 갖게 해야 운영자가 “미상”을 “허용”으로 오독하지 않는다.
-
-기존 참고문헌을 역으로 연결할 때도 같은 원칙을 따른다. 정확한 arXiv ID 목록에 수집 동의·robots·삭제 계보를 직접 다루는 논문이 없다면 억지로 인용을 붙이지 않는다. 일반적인 표현학습이나 최적화 논문을 주제가 가깝다는 이유만으로 연결하면 참고문헌 수는 늘지만 주장의 근거는 오히려 약해진다. 논문 ID와 본문의 실제 명제 사이에 전제 관계가 확인될 때만 인용하고, 그렇지 않으면 “직접 대응 논문을 확인하지 못함”이라는 조사 결과를 남긴다.
-
-## 27.18 삭제 완료를 verification ledger의 양방향 탐색으로 증명한다
-
-삭제 ledger는 요청 접수, 대상 식별, tombstone 적용, 새 generation 발행, downstream 차단, 모델 영향 판정을 서로 다른 상태로 보존한다. 각 전이는 actor, policy revision, 입력·출력 digest와 이전 event를 가진다. 인증 실패·범위 불명·법적 검토 대기·rewrite 실패를 성공으로 덮어쓰지 않는다.
-
-검증은 양방향이다. RequestID에서 source·dedup cluster·packed token·shard·UpdateID·checkpoint까지 정방향으로 걷고, release 후보의 shard와 run manifest에서 parent source까지 역방향으로 걷는다. 두 탐색의 집합 차이가 0이어야 corpus 삭제가 닫힌다. Bloom filter는 후보 검색에는 쓸 수 있지만 삭제 완료의 단독 oracle은 아니다.
-
-tombstone join, all-derivative search, immutable generation, downstream consumer의 구 세대 거부를 실제 assertion한 시험만 `testedBy`다. filter·token writer·reshard 시험은 component 경계를 설명하지만 종단 삭제 시험은 아니다. 공개 구현에서 해당 시험을 찾지 못했으므로 합성 fixture와 `NeedsReview`를 유지한다.
-
-기술 ledger는 법률 의견서가 아니다. license와 robots snapshot을 보존해도 consent와 관할별 적합성이 자동 결정되지 않으며, 법적 승인만으로 파생 shard가 정리되지도 않는다. release는 법적 판단과 기술 집행 event를 모두 요구하고, 이미 학습한 parameter 영향은 재학습·unlearning 검증 없이 제거 완료로 승격하지 않는다.
-
-## 27.19 서명 검증과 파일 파싱을 학습 admission의 한 경로로 묶는다
-
-학습 공급망은 “서명이 맞다”에서 끝나지 않는다. 먼저 승인 manifest가 checkpoint·config·tokenizer·dataset shard·container·dependency lock의 digest를 하나의 RunID에 묶는다. verifier는 in-toto statement의 subject SHA-256이 지금 읽으려는 산출물 digest와 같은지 확인하고, transparency-log inclusion proof의 필수 필드·body type·trusted key를 검증한다. 그 뒤에야 파일 parser를 호출한다. 순서를 뒤집으면 신뢰하지 않은 거대 header나 잘못된 offset을 signature 결과보다 먼저 처리하게 된다.
-
-safetensors의 고정 구현은 이 두 번째 경계를 구체적으로 보여 준다. 8-byte header length를 읽은 뒤 최대 크기와 정수 덧셈 overflow를 검사하고, 범위 안의 bytes만 UTF-8과 JSON으로 해석한다. metadata validation은 tensor offset이 앞 tensor의 끝에서 정확히 이어지는지, shape 원소 수와 dtype bit 수의 곱이 overflow하지 않는지, 선언 byte 수와 실제 slice가 같은지 검사한다. canonical negative test는 oversized·non-UTF8 header, trailing polyglot bytes, truncated payload, overlapping offsets와 거대 shape를 각각 거부한다. “안전한 포맷”이라는 형용사가 아니라 어느 분기에서 어떤 입력이 실패하는지가 admission 계약이다.
-
-운영 순서는 `resolve digest → verify signature/identity → compare provenance subject → verify transparency evidence → parse bounded header → validate tensor layout → compare config/tokenizer/dataset digests → stage → train`이다. 각 단계는 독립된 failure code와 관측값을 남긴다. digest mismatch를 parser error로, registry timeout을 invalid signature로 합치면 최초 차이를 잃는다. dependency lock도 resolver 입력일 뿐이다. compiler, CUDA·driver, wheel ABI와 실제 loaded shared library까지 environment manifest로 관측하지 않으면 같은 lock에서 다른 실행이 생길 수 있다.
-
-서명은 bytes의 출처와 변경 여부를 말하지만 내용의 진실성을 말하지 않는다. 서명된 dataset도 오염·권리 침해·중복을 포함할 수 있고, 서명된 checkpoint도 backdoor나 성능 퇴행을 품을 수 있다. SBOM signature 역시 제시된 SBOM이 바뀌지 않았음을 보일 뿐 누락 dependency가 없음을 증명하지 않는다. 따라서 content-quality, license, red-team, behavioral eval과 SBOM completeness oracle은 별도 gate로 둔다. 이 구분이 없으면 암호학적 성공을 의미적 승인으로 오독한다.
-
-failure injection은 subject digest 한 nibble, null subject, 빠진 inclusion-proof field, non-string log body, header length overflow, invalid UTF-8, tensor offset overlap, truncated payload를 한 번에 하나씩 바꾼다. 기대 결과는 모두 “학습 시작 전 거부”지만 최초 실패 단계와 오류 유형은 달라야 한다. 실제 registry signing ceremony와 GPU run을 실행하지 않은 정적·canonical-test 근거는 runtime 검증으로 승격하지 않는다. production gate는 동일 mutation corpus를 실제 admission controller와 worker startup path에 통과시켜 process가 model bytes를 map하기 전에 멈추는지 확인해야 닫힌다.
+rights event는 SourceFamilyID, license/consent purpose·jurisdiction·expiry와 affected descendants를 가진다. 삭제 완료는 원문 제거가 아니라 dataset→run→checkpoint→adapter→merge/quant/export→deployment graph의 양방향 closure, quarantine과 clean rebuild 또는 명시적 exception으로 증명한다. tampered signature, valid JSON/invalid offsets, stale cache, hidden host library와 revoked data descendant를 주입한다. 28장에는 immutable fixture bundle과 resolved runtime을, 30장에는 subject/evidence-index digest와 revocation 상태를 넘긴다.

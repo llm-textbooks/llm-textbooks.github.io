@@ -4,6 +4,21 @@
 
 이 장에서는 원문 byte에서 token·logit·loss·gradient 직전까지를 한 줄로 추적한다. 여기서 고정한 token·logit·loss 분모는 2장의 gradient 소유권으로 넘어간다. 5장은 token ID를 byte·template까지 역추적하고, 24장은 같은 per-token loss가 실제 일반화를 측정하는지 다시 묻는다.
 
+책 전체의 기준 실행 `GR-001`에서 이 장이 맡는 일은 두 대화 행으로부터 첫 `LossID=L0`를 만드는 것이다. 아래 화살표마다 실제 값과 shape가 하나씩 바뀐다. `softmax`는 이 가운데 한 노드일 뿐이다.
+
+```mermaid
+flowchart LR
+  R[SourceRowID<br/>UTF-8 bytes] --> T[SampleID<br/>token IDs와 offsets]
+  T --> X["input/label shift<br/>x[:, :-1], x[:, 1:]"]
+  X --> Z[ForwardID<br/>logits B,T,V]
+  Z --> P[log-softmax<br/>target log-prob]
+  P --> M[loss mask<br/>유효 위치 선택]
+  M --> L[LossID L0<br/>loss_sum / valid_count]
+  L --> N[2장<br/>BackwardID]
+```
+
+그림을 읽을 때는 `B`·`T`·`V`를 추상 기호로만 두지 않는다. `GR-001` manifest에서 실제 두 행의 token ID, `labels[:,1:]!=-100`인 위치와 `valid_count`를 꺼내 손계산한 값이 framework loss와 맞아야 다음 화살표로 넘어간다. 한 위치라도 다르면 optimizer나 GPU kernel을 의심하기 전에 tokenizer·shift·mask 경계를 고친다.
+
 ## 1.1 byte를 token ID와 embedding 좌표로 바꾼다
 
 학습의 첫 입력은 화면에 보이는 문장이 아니라 revision이 고정된 byte와 변환 pipeline이다. normalization·template·tokenizer가 만든 ID를 embedding row까지 추적해야 같은 문자열처럼 보이는 두 run이 실제로 같은 함수를 계산하는지 판정할 수 있다.
@@ -2049,17 +2064,13 @@ test source도 읽는다. upstream test가 어떤 dtype, shape, ignore, smoothin
 
 이 계보가 닫히면 2장의 질문이 선명해진다. 이제 확인할 것은 올바르게 정의된 `p-q`가 autograd, mixed precision, accumulation과 optimizer를 지나 어떤 parameter update가 되는가이다. 1장의 LossEnvelope가 흔들리면 그 뒤의 정교한 최적화 분석도 출발점부터 틀린다.
 
-독립 검토자는 인수 표의 각 행에 주장, 필요한 증거, 실제 artifact, 허용 오차와 판정을 적는다. “shift가 맞다”에는 selected raw sequence, input/labels tensor와 실제 loss index가 필요하다. “분모가 맞다”에는 rank·microbatch별 numerator/count와 concatenated reference gradient가 필요하다. “CUDA path가 맞다”에는 selected dispatch, kernel/build revision과 numerical fixture가 필요하다. 설명문만으로 PASS를 주지 않는다.
-
-반대로 모든 원본 tensor를 무제한 보존할 필요도 없다. 재현에 필요한 작은 golden batch, selected positions, stable digest, aggregate statistics와 immutable parent를 고른다. 민감한 원문은 access-controlled artifact로 두고 본문에는 비식별 span ID를 쓴다. 정보량과 개인정보 보호를 함께 설계한다.
+인수 표는 앞서 정의한 LossEnvelope 하나를 사용한다. shift·분모·CUDA 주장은 각각 selected tensor, global numerator/count, 실제 dispatch와 numerical fixture를 가리키고, 민감한 원문은 비식별 span ID와 접근 통제된 parent digest로 대신한다.
 
 첫 번째 counterfactual은 공통 logit offset이다. 확률, pure CE와 `p-q`는 유지돼야 하지만 z-loss가 있다면 total loss는 달라질 수 있다. 두 번째는 ignored label 교체다. direct contribution은 유지돼야 하지만 input token까지 바꾸면 뒤 context가 달라질 수 있다. 세 번째는 rank repartition이다. global objective와 gradient는 유지돼야 하지만 reduction 순서에 따른 허용 수치 차이는 생길 수 있다. 기대 범위를 먼저 적는다.
 
 네 번째는 vocabulary permutation이다. tokenizer ID, embedding row, LM-head row와 target ID를 같은 permutation으로 옮기면 논리적 분포는 보존될 수 있다. 일부만 옮기면 shape와 loss는 finite하지만 의미가 깨진다. 다섯 번째는 template marker 추가다. marker가 context와 target에 들어가는 위치, valid count와 serving prefix가 모두 바뀐다. 이를 단순한 문자열 스타일 변경으로 승인하지 않는다.
 
 한 fixture가 통과했다고 전체 corpus를 보장하지 않는다. property test는 random length, Unicode, packing boundary, empty answer와 shard boundary를 넓히고, production monitoring은 실제 분포의 count·category drift를 본다. golden fixture, property test와 runtime observation은 서로 다른 실패를 잡는 세 층이다.
-
-지원 matrix에는 device, dtype, eager/compiled, loss implementation, vocabulary sharding, label policy와 distributed topology를 적는다. 실제 실행한 cell만 결과와 tolerance를 갖는다. 다른 GPU 또는 새 compiler에서 이름이 같은 op가 보인다는 이유로 결과를 상속하지 않는다. 새 cell은 작은 수학 oracle부터 다시 시작한다.
 
 오류를 고친 뒤에는 원 fixture만 재실행하지 않는다. 인접한 shift·mask·denominator fixture, full GoldenTokenRun과 첫 backward fixture까지 차례로 확인한다. double shift 수정이 EOS target을 빼거나, denominator 수정이 AMP scale을 바꾸는 식의 회귀가 있을 수 있다. 수정 diff와 새 evidence를 같은 incident ID에 묶는다.
 
@@ -2075,6 +2086,4 @@ test source도 읽는다. upstream test가 어떤 dtype, shape, ignore, smoothin
 
 마지막 artifact에는 성공 fixture뿐 아니라 의도적으로 실패한 double-shift, PAD leakage, vocab permutation, shard offset 사례를 포함한다. 새 구현이 실패 사례를 통과시켜 버리면 validation이 약해진 것이다.
 
-최종 재현자는 다른 seed의 row도 표본 검사한다. 같은 invariant가 특정 예제의 우연한 token 배열에만 의존하지 않아야 한다. 언어, 길이, special token, packed boundary가 다른 표본에서 target index, denominator, gradient 부호를 다시 확인한다. 결과와 source revision을 봉인 기록에 추가한다.
-
-봉인 뒤 checksum이 달라지면 이전 판정을 재사용하지 않는다. 원문 span에서 target index, denominator와 gradient 부호까지 다시 따라가 최초 차이를 찾는다. 이 왕복이 가능할 때 next-token objective는 문장 설명, 수학식, source 좌표, runtime tensor, 반례와 복구가 같은 좌표계에서 닫히며, 다음 장들이 의존할 검증 가능한 출발점이 된다.
+다른 seed·언어·길이·special token·packed boundary에서도 같은 oracle을 표본 검사한다. parent checksum이 달라지면 판정을 상속하지 않고 원문 span→target→denominator→gradient 왕복을 다시 실행한다.

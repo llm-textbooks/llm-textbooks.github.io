@@ -22,6 +22,40 @@ SFT는 어느 token을 정답으로 삼을지 직접 알려 준다. 선호학습
 
 이 장의 핵심 질문은 “어느 선호 목적함수가 최고인가”가 아니다. **같은 관측과 같은 상태에서 식·코드·분모·평가가 정말 같은 주장을 하고 있는가**다. 이 질문에 답할 수 있어야 DPO, KTO, SimPO, IPO, ORPO를 이름이 아니라 입력 계약과 실패 양상으로 선택할 수 있다.
 
+## GR-001 수직 추적: SFT 정책에서 한 번의 DPO update까지
+
+18장에서 만든 `GR-001` adapter를 current policy의 부모로 삼는다. 같은 prompt에 chosen과 rejected를 하나씩 붙인 `PairID=GR-001-P1`을 만들고, policy와 reference가 각각 두 sequence의 log-prob를 계산한다. 여기서는 DPO를 이름으로 설명하지 않고 **한 pair가 어느 축에서 두 배가 되고 어디서 한 scalar로 줄어드는지** 따라간다.
+
+```mermaid
+flowchart LR
+  P[GR-001-P1<br/>prompt/chosen/rejected] --> C[preference collator<br/>chosen then rejected]
+  C --> F[concatenated forward<br/>logits 2B×T×V]
+  F --> S[token log-prob<br/>mask + causal shift]
+  S --> R[sequence sums<br/>policy/reference]
+  R --> M[double log-ratio<br/>chosen - rejected]
+  M --> L[DPO loss<br/>pair denominator]
+  L --> B[backward + optimizer<br/>UpdateID DPO-001]
+  B --> E[paired eval + calibration]
+```
+
+고정 원전은 TRL commit `a7be897f…`다. [`DataCollatorForPreference` fixture](https://github.com/huggingface/trl/blob/a7be897f5c8d7b52161f9f8a47d8e6242456b898/tests/test_dpo_trainer.py#L44-L81)는 chosen을 먼저, rejected를 뒤에 놓는 배치 계약을 보여 준다. [`DPOTrainer._compute_loss`](https://github.com/huggingface/trl/blob/a7be897f5c8d7b52161f9f8a47d8e6242456b898/trl/trainer/dpo_trainer.py#L1372-L1590)와 [`compute_loss`](https://github.com/huggingface/trl/blob/a7be897f5c8d7b52161f9f8a47d8e6242456b898/trl/trainer/dpo_trainer.py#L1755)는 reduction과 trainer 경계를 잇는다. 비교 구현은 OpenRLHF commit `3c3be623…`의 [`DPOTrainer`](https://github.com/OpenRLHF/OpenRLHF/blob/3c3be6234e0cb353e76bb8019947db9dfe99fca7/openrlhf/trainer/dpo_trainer.py)와 [`loss.py`](https://github.com/OpenRLHF/OpenRLHF/blob/3c3be6234e0cb353e76bb8019947db9dfe99fca7/openrlhf/models/loss.py)로 고정하며 두 구현의 기본 reduction을 같다고 가정하지 않는다.
+
+| 경계 | tensor·shape | dtype·device | 분모·mask | 상태 전이와 관측값 |
+|---|---|---|---|---|
+| pair collator | chosen/rejected `input_ids[B,T]` | `int64`, CPU→GPU | completion mask, truncation | `PairID`, valid token 수 |
+| concatenation | `input_ids[2B,T]` | `int64`, CUDA | 앞 B chosen, 뒤 B rejected | 순서 checksum, padding side |
+| policy/reference | logits `[2B,T,V]` | BF16; log-softmax FP32 권장 | causal shift 뒤 completion만 | 네 sequence log-prob |
+| margin | `πc,πr,πrefc,πrefr`, 각각 `[B]` | FP32 | sequence sum/mean을 명시 | `Δ=(πc-πr)-(πrefc-πrefr)` |
+| DPO loss | `[B]→scalar` | FP32 | pair 수, weight·tie 정책 | numerator, denominator, `βΔ` |
+| backward/step | policy gradients | mixed precision, CUDA | reference는 frozen | delta hash, `DPO-001` |
+| evaluation | paired verdict·score | CPU artifact | tie·abstain 분모 | accuracy, Brier/ECE, length slice |
+
+기본 sigmoid DPO는 $L=-B^{-1}\sum_i\log\sigma(\beta\Delta_i)$다. 코드의 `chosen_logps-rejected_logps`가 첫 괄호를 만들고 reference의 같은 차를 뺀다. `beta`는 learning rate가 아니라 margin을 loss 곡률 좌표로 옮기는 scale이다. policy와 reference가 같으면 $\Delta=0$, loss는 $\log 2$이고, chosen/rejected를 바꾸면 부호가 뒤집혀야 한다.
+
+반증은 입력·수학·상태를 하나씩 깨뜨린다. pair 순서를 바꿔 margin 부호를 확인하고, chosen mask를 한 token 줄여 log-prob와 분모 변화를 확인한다. stale reference cache는 revision 검사에서 거부한다. commit 직전 kill 뒤 같은 `PairID`가 두 effect를 만들지 않아야 한다. [reward calibration·disagreement lab](../labs/19-reward-calibration-disagreement-lab.md)에서 tie·사람 불일치·길이 shortcut을, [종단 golden lab](../labs/30-sft-rl-deploy-golden-lab.md)에서 SFT→preference 계보를 검산한다.
+
+뒤의 Bradley–Terry, reward model, DPO/KTO/SimPO/IPO는 이 trace의 변형이다. 반복 정의를 새 시작점으로 읽지 말고 `GR-001-P1`에서 입력 단위, reference, reduction 분모, durable state 가운데 달라진 칸만 비교한다.
+
 ## 19.1 pairwise preference를 확률 측정으로 정의한다
 
 chosen/rejected pair는 정답표가 아니라 관측자와 protocol의 noise를 포함한 측정값이다. Bradley–Terry likelihood와 식별 조건에서 시작한다.
@@ -375,26 +409,6 @@ packing이나 dynamic batching은 pair가 서로 다른 rank로 갈라지지 않
 데이터에서 업데이트까지 잇기 위해 고정할 다음 상태는 ‘온라인 RL로 넘기는 계약’이다. 20장으로 넘길 handoff에는 `PolicyVersion`, `ReferenceID`, `RewardVersion`, reward normalization, tokenizer/template, 안전 verifier, sealed evaluation, known failure가 포함된다. reward가 어느 분포에서 calibration되었는지와 허용 가능한 score 범위를 적는다. 온라인 rollout이 이 범위를 벗어나면 자동 중단하거나 사람 검토로 전환한다.
 
 체크포인트만 넘겨서는 부족하다. reward model이 높은 점수를 주지만 사람이 싫어한 대표 반례, judge 간 불일치 표본, 길이·문체 shortcut 최소쌍도 함께 넘긴다. 온라인 RL은 이 약점을 더 세게 파고들 수 있기 때문이다. 이 인계가 19장과 20장을 잇는 안전 경계다.
-
-### 최종 실험·인수 체크리스트
-
-데이터에서 업데이트까지 잇기 위해 고정할 다음 상태는 ‘데이터와 수학’이다. 원시 관측과 파생 pair의 계보가 연결되는가. prompt family 단위 분할로 누출을 막았는가. 동률·기권·주석자 불일치를 숨기지 않았는가. Bradley–Terry의 절대 offset 비식별성을 보고서가 존중하는가. DPO의 두 로그비와 token mask를 손 계산했는가. beta, margin, length normalization의 단위를 설명할 수 있는가. 각 질문에 파일과 수치로 답하지 못하면 아직 인수할 수 없다.
-
-앞의 논의를 실제 판단으로 이어 주는 다음 항목은 ‘코드와 분산 상태’이다. 고정 commit과 line 좌표에서 selected 함수 경로를 추적했는가. collator 출력 shape, shift, response mask, 유효 token 분모가 검증되었는가. reference가 eval·no-grad 상태이며 policy와 tokenizer 계약이 같은가. rank별 sample 수가 달라도 global mean이 맞는가. resume 뒤 sampler와 optimizer effect가 중복되지 않는가. fused 또는 optimized path가 기준 구현과 허용오차 내 같은가.
-
-측정자의 오차까지 포함한 다음 판정 항목은 ‘평가와 운영’이다. 길이·위치·문체·생성기 shortcut 최소쌍을 통과하는가. 시간·도메인·prompt family holdout이 있는가. reward 상·하위 꼬리를 사람이 읽었는가. 독립 judge와 실행 verifier를 사용했는가. red-team 발견이 train과 sealed evaluation으로 분리되었는가. release 뒤 drift를 잡을 metric과 rollback `PolicyVersion`이 준비되었는가.
-
-최종 제출 묶음에는 데이터 카드, 주석 지침 revision, 골든 배치 worksheet, source 좌표, 설정 diff, 학습 곡선, calibration과 subgroup 표, 최소쌍 결과, checkpoint manifest, red-team 보고서, 온라인 RL handoff가 들어간다. 이 묶음은 결과를 장식하는 부록이 아니라 “왜 이 정책 변화를 믿어도 되는가”에 대한 반증 가능한 주장이다.
-
-### 수학적 직관: 선호 경계를 기하학으로 본다
-
-앞의 논의를 실제 판단으로 이어 주는 다음 항목은 ‘응답을 점이 아니라 방향으로 비교한다’이다. reward head가 선형이라면 hidden representation (h)를 방향 (w)에 투영한 값이 보상이다. 두 응답의 비교는 (w^T(h_a-h_b))의 부호로 정해진다. 따라서 pairwise 학습은 두 점의 절대 위치보다 차이 벡터가 어느 반공간에 놓이는지를 학습한다. 같은 prompt의 후보를 비교하는 이유도 여기서 보인다. prompt에서 공통으로 생긴 representation 성분은 차이에서 어느 정도 상쇄되고, 응답의 구별되는 성분이 남는다.
-
-하지만 transformer를 함께 미세조정하면 점 (h) 자체도 움직인다. head의 결정 경계와 representation 공간이 동시에 변하므로 정확도 향상이 어떤 변화에서 왔는지 알기 어렵다. 진단 실험으로 encoder를 고정한 head-only 기준선, 마지막 몇 층만 푼 기준선, 전체 학습을 비교한다. 동일 anchor 응답의 layer별 representation cosine과 reward margin을 기록하면 “새로운 분리 방향을 찾았는가”와 “공간 전체를 재배열했는가”를 구분할 수 있다.
-
-길이 shortcut도 기하학적으로 볼 수 있다. hidden space에 길이와 강하게 상관된 방향 (v_{len})이 있고 reward 방향 (w)가 그 방향과 정렬되면 내용이 같아도 긴 응답이 높은 projection을 얻는다. 길이를 선형 회귀해 잔차 reward를 보는 진단, 길이 매칭 pair, 의미 보존 장황화 대조군은 이 정렬을 측정한다. 다만 길이 방향을 무조건 제거하면 상세함이 실제 가치인 문제까지 훼손한다. 도메인별 조건부 효과를 봐야 하는 이유다.
-
-식과 숫자로 확인할 다음 검산 항목은 ‘DPO의 경계는 로그확률 비 공간에 있다’이다. 각 pair를 두 좌표로 놓자. 가로축은 chosen의 policy-reference 로그비, 세로축은 rejected의 policy-reference 로그비다. DPO는 가로축 값이 세로축보다 큰 영역을 선호한다. 결정 경계는 두 값이 같은 대각선이며, beta는 이 대각선에 수직인 거리의 scale을 바꾼다. 이 그림에서 chosen 확률만 올려서는 충분하지 않다는 점을 직관적으로 확인할 수 있다. 점이 오른쪽으로 갔어도 위로 더 많이 갔다면 경계의 잘못된 쪽에 남는다.
 
 학습 중 pair scatter를 그리면 세 가지 실패를 볼 수 있다. 두 좌표가 모두 크게 음수가 되면서 chosen이 덜 감소하는 경우는 정책이 두 응답을 모두 잊고 있을 수 있다. 두 좌표가 모두 크게 양수가 되면서 rejected도 강화되는 경우는 일반적인 응답 장황화나 template shortcut일 수 있다. chosen만 오른쪽으로 움직이는 이상적 그림도 외부 능력 회귀가 없다는 보장은 아니다. 별도 SFT·지식 benchmark를 함께 봐야 한다.
 

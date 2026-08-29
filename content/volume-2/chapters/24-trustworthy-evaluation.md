@@ -1,5 +1,56 @@
 # 24장 믿을 수 있는 평가: 점수의 분모를 복원한다
 
+23장이 넘긴 것은 “좋아진 모델”이 아니라 `EVP-024`와 변경 후보 `CKPT-023`이다. 이 장은 평가 행 하나하나를 contribution으로 환원해 `EvalRunID=EVR-024`를 만들고, 실패 행을 25장의 red-team seed로 넘긴다. 평균 점수표만 만들면 GR-001 계보는 여기서 끊긴다.
+
+## 24.0 GR-001 평가 실행: ChangeSet에서 실패 사례까지
+
+```mermaid
+flowchart LR
+  P[CKPT-020<br/>parent] --> R[paired evaluator]
+  C[CKPT-023<br/>candidate] --> R
+  E[EVP-024<br/>frozen rows] --> R
+  R --> O[RawResponseID]
+  O --> J[Oracle/Judge<br/>revision fixed]
+  J --> M[MetricContribution]
+  M --> A[EVR-024 aggregate<br/>CI + denominator]
+  A --> D{decision rule}
+  D -->|failure rows| F[CaseSeedSet-025]
+  D -->|provisional pass| Q[ReleaseEvidence-024]
+```
+
+|row/state|GR-001 값|계산에 들어가는가|보존 이유|
+|---|---|---|---|
+|`EvalRowID`|`locality/ko/017`|예|population·language·prompt family를 복원|
+|parent response|`RR-P-017`|paired delta|변경 전 대조군|
+|candidate response|`RR-C-017`|paired delta|temperature·seed·decode config 포함|
+|oracle result|`correct=0`, `reason=neighbor_fact_changed`|예|정답과 실패 유형을 분리|
+|padding duplicate|`PAD-rank3-04`|아니오|collective 길이 맞춤 행이 분모로 새는지 감사|
+|contribution|`c_i=-1`|예|aggregate를 원자료까지 역추적|
+
+paired row의 변화량을 $d_i=s_i^{cand}-s_i^{parent}$라 하면
+
+$$
+\hat\Delta={1\over n}\sum_{i=1}^{n}d_i,\qquad
+SE(\hat\Delta)={s_d\over\sqrt n}.
+$$
+
+|수학 기호|코드·원장 객체|단위·shape|금지되는 혼동|
+|---|---|---|---|
+|$n$|유효한 고유 `EvalRowID` 수|row count|request 수·rank padding 수와 혼동|
+|$s_i$|oracle의 row score|scalar 또는 명시된 vector|judge raw logit과 최종 score 혼동|
+|$d_i$|동일 row의 candidate-parent 차이|paired scalar|서로 다른 prompt revision을 pairing|
+|$s_d$|row 차이의 표본 표준편차|score unit|seed 간 변동과 row 간 변동을 무단 합침|
+
+프레임워크의 실제 요청·집계 경계는 [lm-evaluation-harness 원 저장소](https://github.com/EleutherAI/lm-evaluation-harness)에서 확인하고, 코드 생성의 `pass@k` 추정량은 [HumanEval 원 논문](https://arxiv.org/abs/2107.03374)과 구현을 함께 대조한다. 원전 링크는 일반적 메커니즘을 뒷받침한다. GR-001의 `EVR-024` 결과 자체는 raw response와 실행 manifest만이 증거다.
+
+### 분산·관측·반증 계약
+
+각 rank는 `EvalRowID`로 행을 소유하고, gather 뒤 ID로 deduplicate한다. `eval_rows_total{run,split}`, `eval_rows_valid_total{run,split}`, `eval_failures_total{family,reason}`, `eval_latency_seconds`를 기록하되 개별 prompt나 사용자 ID를 label에 넣지 않는다. 첫 세 값으로 `valid/assigned`를 계산하고, aggregate가 참조한 row ID set digest를 보존한다.
+
+반증 `EVR-024-M1`은 rank padding 행의 `is_padding`을 지운다. aggregate가 그대로면 분모 검사가 실패한 것이다. `M2`는 candidate와 parent의 prompt template revision을 다르게 한다. paired gate는 score 계산 전에 거부해야 한다. `M3`는 contamination canary 하나를 training lineage에 주입한다. 문자열 검출률만 보고 결론내리지 말고 exposure edge에서 최초 실패해야 한다. 실행 절차는 [평가·오염·불확실성 실습](../labs/24-eval-contamination-uncertainty-lab.md)과 [contamination 플레이북](../playbooks/10-contamination.md)에 연결한다.
+
+이 장의 출력은 `EVR-024`, row contribution ledger, uncertainty interval, decision record와 `CaseSeedSet-025`다. 아래의 sampling·judge·multilingual·distributed 평가 증보는 이 네 산출물의 세부 구현을 보강하며 별도 평가 세계를 만들지 않는다.
+
 평가 점수는 모델에 붙어 있는 고정 속성이 아니다. 데이터셋의 한 행을 프롬프트로 렌더링하고, 모델 출력을 디코딩한 뒤, 답을 정규화해 분자와 분모에 넣는 전 과정이 점수를 만든다. 어느 단계에서든 규칙이 바뀌면 가중치가 같아도 `accuracy`가 달라진다. 따라서 `accuracy=0.72`만 남겨서는 회귀를 조사할 수 없다. 어떤 행이 들어왔고, 무엇으로 변환됐으며, 어느 집계 규칙을 거쳐 0.72가 됐는지를 복원할 수 있어야 한다.
 
 이 장의 진단 순서는 일관된다. 먼저 측정하려는 모집단과 행 집합을 고정한다. 이어 각 행의 기여값과 분모를 확인하고, 그 기여값을 합치는 가중치와 불확실성 계산을 검산한다. 마지막으로 judge 편향과 오염처럼 측정기 바깥에서 들어온 교란을 분리한다. 점수가 이상할 때 이 순서를 거꾸로 건너뛰어 모델 가중치부터 의심하면, 평가 배관의 오류를 모델 능력 변화로 오진하기 쉽다.
@@ -1860,184 +1911,27 @@ reviewer는 change 작성자가 고른 item 외에 무작위 item과 high-risk s
 
 모든 승인과 철회는 append-only decision ledger에 기록한다. 새 evidence가 과거 결론을 바꾸면 원 기록을 수정하지 않고 successor decision과 이유, 영향 BundleID, 재평가 범위와 사용자 보호 조치를 연결한다. 평가 체계는 틀리지 않는 척하는 장치가 아니라 오류를 발견하고 정확히 수정하는 장치다.
 
-## 24.16 사람 판정을 원자료에서 추정량까지 닫는다
+## 24.16 GR-001/Eval fork — raw response에서 release statistic까지
 
-사람 평가의 최종 승률만 남기면 가장 중요한 질문을 잃는다. 누가 어떤 항목을 어떤 순서로 보았는지, 모델 이름과 답 순서가 가려졌는지, 스킵과 무효 판정이 어느 분모에 들어갔는지 알 수 없기 때문이다. 최소 원장은 `AssignmentID → TaskID → AnnotatorID(pseudonym) → RubricRevision → PresentationOrder → RawRating → AdjudicationID → ContributionID → EstimateID`를 보존한다. AnnotatorID를 공개하라는 뜻은 아니다. 접근 통제된 대응표와 분석용 가명을 분리하고, 분석 자료에는 필요한 군집 식별자만 남긴다.
+사람 판정, lm-eval aggregation, distributed padding, judge·reward calibration과 contamination 증보는 하나의 `EvalID` trace로 묶는다. 평가의 subject는 alias가 아니라 model/export digest이며, 한 점수 행은 `ItemID→request→response→parser/scorer/judge→item record→group aggregation→uncertainty→DecisionEvent`로 재생 가능해야 한다.
 
-Label Studio의 실제 task 선택 경계는 이 구분이 UI 장식이 아님을 보여 준다. `projects/functions/next_task.py:192-221`은 low-agreement 조건, distinct annotator 수, overlap과 추가 배정 용량으로 후보 집합을 다시 만든다. `:240-279`는 ground-truth를 overlap 수에서 제외하고 이미 정원을 채운 항목을 배제한다. 따라서 관측된 불일치율은 annotator 특성뿐 아니라 어떤 항목을 중복 배정했는지의 함수다. disagreement가 큰 항목만 추가 판정에 보내면 raw 전체와 adjudication subset의 모집단이 달라진다.
+```mermaid
+flowchart LR
+ I[ItemID + subject digest] --> R[request/render/decode]
+ R --> O[raw response/logprob]
+ O --> S[parser/scorer/judge]
+ S --> A[item record + disposition]
+ A --> G[group estimator + uncertainty]
+ G --> D[release decision]
+```
 
-OpenAI의 `lm-human-preferences`는 downstream 경계를 더 선명하게 만든다. `label_types.py:33-55`의 `PickBest`는 정수 `best`를 sparse softmax loss로 바꾸고, `:58-83`의 `ScalarRating`은 float score를 MSE와 상관계수로 읽으며, `:86-109`의 `ScalarComparison`은 두 reward의 차이를 사람 difference와 맞춘다. 이 셋은 같은 “human label”이 아니다. 원자료가 pairwise choice인데 export 과정에서 임의의 연속 점수로 바뀌었다면 loss가 정상 감소해도 estimand가 바뀐 것이다. `train_reward.py:64-96`은 JSON 행을 schema key로 배열화하고 앞 `total_labels`개만 취한다. 그러므로 원천 행 order와 split digest도 run identity의 일부다.
-
-### 배정·판정·재심·추정을 서로 다른 표로 둔다
-
-`assignments`에는 후보 집합, sampling probability, blind condition, 응답 순서와 배정 시각을 둔다. `ratings`에는 원 클릭·점수·tie·abstain·invalid, rubric 질문별 하위 판정과 수정 이력을 append-only로 둔다. `adjudications`에는 어떤 raw rating들을 보았는지, 합의인지 독립 전문가 판정인지, 바뀐 이유와 적용 범위를 둔다. `estimates`에는 raw 또는 adjudicated 중 어느 열을 소비했는지, cluster·weight·missingness와 interval 계산을 둔다. 재심 결과로 원 클릭을 덮어쓰면 annotator agreement도, 재심 효과도 다시 계산할 수 없다.
-
-agreement는 품질의 충분조건이 아니다. 모든 annotator가 같은 shortcut을 쓰면 일치하면서 틀릴 수 있고, 열린 질문에서 서로 다른 정당한 표현은 불일치할 수 있다. nominal choice에는 우연 일치를 보정한 계수를 고려하되 prevalence와 annotator별 marginal을 함께 보고, ordinal rating에는 거리 구조를 보존하는 통계를 쓴다. 단일 IRR 숫자로 rubric 타당성이나 제품 모집단 일반화를 주장하지 않는다. 여기서 “특정 계수가 높으므로 label이 참이다”는 사실이 아니라 과도한 추론이다.
-
-### 작은 failure injection으로 최초 불일치를 고정한다
-
-여섯 항목, 세 annotator의 손 fixture를 만든다. 첫 실행은 모든 항목을 두 명에게 균형 배정하고, 일부는 세 번째 판정으로 넘긴다. 대조군 estimate는 raw majority와 adjudicated verdict를 각각 계산한다. 그 뒤 (1) 답 A/B 위치를 한 annotator에게만 뒤집고 orientation metadata를 그대로 둔다, (2) tie를 B 승리로 강제한다, (3) 스킵 행을 삭제한다, (4) low-agreement 재배정 한 건을 중복 표본처럼 센다, (5) adjudication이 raw 행을 덮어쓰게 한다, (6) annotator 군집을 무시한 bootstrap을 실행한다.
-
-각 주입의 first divergence는 다르다. (1)은 rendered presentation과 raw choice 사이, (2)는 rating normalization, (3)은 missingness denominator, (4)는 assignment inclusion weight, (5)는 provenance cardinality, (6)은 estimator resampling unit에서 처음 달라져야 한다. 최종 승률이 우연히 같아도 이 최초 상태가 다르면 검사는 실패다. 체크리스트에는 assignment coverage, position balance, duplicate exposure, rubric revision, raw immutability, adjudication parent, annotator·item cluster, subgroup IRR, abstention·invalid 분모와 access audit를 둔다.
-
-사람 평가에서 dropout도 두 종류로 구분한다. annotator dropout은 배정받고 끝내지 않은 missing outcome이고, reward model의 dropout은 같은 label로도 stochastic prediction을 만드는 학습 연산이다. 전자는 응답 확률과 selection bias를, 후자는 seed·train/eval mode와 uncertainty를 추적한다. 둘을 “dropout 10%” 한 열로 합치면 데이터 수집 실패와 모델 regularization을 구분할 수 없다. 보상 점수의 차이가 label 구성, reward normalization, model dropout 중 어디에서 시작됐는지 frozen-label 재계산으로 좁힌다.
-
-코드 워크스루: PyRIT 판정 상태를 평가 분모로 옮기기 전에 멈춘다. 여기서 질문은 “공격이 성공했는가”보다 한 단계 앞선다. **응답·scorer·score 가운데 무엇이 없을 때 어느 상태가 만들어지는가?** 고정 revision의 `PromptSendingAttack._determine_attack_outcome`(`pyrit/executor/attack/single_turn/prompt_sending.py:243-273`)은 응답과 scorer가 모두 있는 정상 경로만 처리하는 함수가 아니다. 응답이 없거나 scorer가 없거나 score가 없는 경우를 `FAILURE`와 `UNDETERMINED`로 갈라 놓는다. 이 상태를 먼저 보존하지 않으면 평가 집계기가 관측 실패를 모델 실패나 안전 성공으로 바꾼다.
-
-고정 입력은 네 행이면 충분하다. `(response, scorer, score)`를 각각 `(있음, 있음, true)`, `(있음, 있음, false)`, `(없음, 있음, 없음)`, `(있음, 없음, 없음)`으로 둔다. 호출 경로는 `PromptSendingAttack._perform_async → _determine_attack_outcome → AttackExecutorResult → contribution ledger`다. 첫 함수의 출력 shape는 scalar label 하나가 아니라 `(outcome, reason)` 쌍이다. 기대 상태는 차례로 `SUCCESS`, `FAILURE`, `FAILURE`, `UNDETERMINED`다. 마지막 두 행을 하나의 0점으로 합치면 유효 평가 분모가 두 건에서 네 건으로 부풀고, scorer coverage 결함이 모델 성능처럼 보인다.
-
-이 계약에는 직접 oracle이 있다. `tests/unit/executor/attack/single_turn/test_prompt_sending.py:867-907`의 네 test는 성공, 점수 기반 실패, 무응답, scorer 부재를 각각 호출하고 outcome과 reason 문자열을 함께 assert한다. 따라서 디버깅 순서는 다음처럼 고정한다.
-
-1. raw response가 존재하는지 확인한다. 없으면 target·network·filter 경계에서 멈춘다.
-2. objective scorer가 구성됐는지 확인한다. 없으면 평가 설정 결손이며 model failure로 세지 않는다.
-3. score가 반환됐는지와 parser가 유효했는지 확인한다.
-4. `(outcome, reason)`을 원자료 그대로 ledger에 쓴 뒤에만 valid denominator를 계산한다.
-5. 집계 결과가 다르면 frozen 네 행으로 state mapping을 재생한다. raw response까지 달라졌다면 metric 문제가 아니다.
-
-이 테스트가 증명하는 범위는 상태 변환뿐이다. scorer의 정책 타당성, 공격 coverage, 사람 판정과의 calibration, 비동기 executor의 누락 없는 전달, 최종 출시 관문는 증명하지 않는다. 특히 `FAILURE`는 안전하다는 보증이 아니며, `UNDETERMINED`를 성공·실패 어느 쪽에도 자동 편입하지 않는다. 이렇게 질문·입력·호출 경로·상태·분모·oracle·경계를 한 묶음으로 두면 “점수가 떨어졌다”는 보고가 target 장애, scorer 결손, parser 오류와 실제 모델 변화 가운데 하나로 좁혀진다.
-
-## 24.17 lm-eval의 점수 한 칸을 실행 단계로 다시 펼친다
-
-점수 한 칸은 곧바로 집계식으로 가지 않는다. 먼저 분산 rank가 실제·padding request를 어떻게 실행하는지 확인한 뒤, raw response에서 filter·sample contribution·aggregate로 이어지는 변환을 따라가야 한다. 다음 두 절은 이 실행 경계와 통계 경계를 차례로 분리한다.
-
-## 24.18 분산 평가의 padding request가 점수 행으로 새지 않는지 증명한다
-
-고정한 lm-evaluation-harness revision `64f3d092…`의 `evaluate`는 task별 request를 만든 뒤 rank마다 instance 수를 `all_gather`한다. 가장 많은 rank와의 차이 `numpad`를 계산하고, FSDP/DDP가 같은 횟수의 forward를 수행하도록 마지막 request를 복제한다. 실행 뒤에는 `task.instances`만 doc별로 다시 모아 `process_results`에 넘긴다. 따라서 의도된 경계는 **collective 횟수를 맞추는 가짜 실행**과 **점수에 들어갈 진짜 instance**의 분리다.
-
-여기서 중요한 것은 코드에 적힌 한계까지 읽는 일이다. 해당 revision은 multiple-choice를 `loglikelihood`로 정규화하지만, 여러 request type을 내는 task에서는 padding 계산이 충분하지 않을 수 있다는 TODO를 583행에 남긴다. 이는 “현재 반드시 오답이다”라는 증거가 아니라, 구현자가 명시한 **검증되지 않은 경계**다. 더구나 padding loop가 그 request type 순회의 마지막 `req` 객체를 재사용하므로, pseudo 실행의 response도 같은 객체의 `resps`에 append된다. 정상 metric 경로가 필요한 반복 수만 소비하는지는 task·filter 구현에 달려 있다. 따라서 단일 GPU 점수 일치만으로 multi-rank 무오염을 일반화할 수 없다.
-
-세 rank의 최소 fixture로 실행 정렬과 통계 정렬을 나눈다. fixture는 두 종류의 request를 내는 synthetic task, rank별 실제 문서 수 `[3, 2, 1]`, request별 `repeats` 1과 2를 사용한다. model stub은 `(rank, request_type, doc_id, call_index)`를 response에 심는다. 다음 불변식을 각각 검사한다.
-
-- 모든 rank가 request type별로 같은 collective 호출 횟수를 가진다.
-- padding response의 doc ID가 `logged_samples`와 `raw_metrics`에 나타나지 않는다.
-- rank 0에 gather된 실제 `doc_id` multiset이 원래 shard union과 정확히 같다.
-- 단일 rank와 3-rank의 per-document metric, aggregate, sample count가 같다.
-- filter가 `resps`의 첫 값·마지막 값·전체 목록을 각각 소비할 때 pseudo response가 실제 request의 선택 결과를 바꾸지 않는다.
-
-마지막 항목이 실패하면 단순히 평균을 보정해서는 안 된다. padding용 독립 instance를 만들거나, model 호출 결과를 metric 대상 객체에 append하기 전에 실제 clone 수로 잘라야 한다. 수정 후에는 multiple-choice뿐 아니라 복수 request type task를 회귀 fixture에 넣는다.
-
-운영 체크리스트: 점수 차이를 모델 변화로 오인하지 않는다. 분산도를 바꿔 점수가 움직였을 때 첫 질문은 GPU 수가 아니라 실행 장부다. task revision, limit/sample index, shard별 doc ID, request type별 real/padded count, repeats, filter key, sample hash를 저장한다. `world_size=1,2,3`의 동일 sample set을 비교하고, 점수뿐 아니라 per-doc response hash와 metric을 diff한다. `log_samples=False`로 메모리를 아꼈다면 적어도 golden subset에는 raw response와 doc/prompt/target hash를 남긴다.
-
-이 검사는 16장의 collective 대칭성, 17장의 재개 cursor, 21장의 multimodal capability gate와 직접 이어진다. 분산 padding은 처리량을 위한 내부 세부사항이지만, 그 response가 실제 instance state를 오염시키는 순간 평가 추정량의 표본이 바뀐다. “같은 benchmark”라는 이름보다 실제 doc multiset과 request lifecycle이 더 강한 동일성 조건이다.
-
-## 24.19 raw response에서 aggregate까지 첫 차이를 찾는다
-
-lm-evaluation-harness의 고정 revision `64f3d09`에서 `evaluate`(`lm_eval/evaluator.py:541-704`)는 요청을 실행한 뒤 response filter를 적용하고 sample metric을 만든다. `_compute_task_aggregations`(`lm_eval/evaluator_utils.py:176-217`)는 그 sample들을 task metric으로 집계하고 stderr 계산 경계를 잇는다. 따라서 report의 `accuracy=0.7`은 모델 호출 하나의 직접 출력이 아니다. request, raw response, filter key, sample contribution, aggregation function과 stderr 절차를 통과한 파생값이다.
-
-첫 차이 검사는 raw response부터 시작한다. 같은 rendered request의 raw response가 다르면 model·runtime·decoding을 조사한다. raw가 같고 filtered response가 다르면 filter revision과 선택 key를 본다. sample contribution까지 같고 aggregate만 다르면 invalid row 포함 규칙, weight와 aggregation을 본다. stderr만 다르면 resampling unit, seed와 effective sample count를 확인한다. 이 순서를 거꾸로 밟으면 aggregation 문제를 model regression으로 오진한다.
-
-손 fixture에는 정상 두 행, invalid 한 행, filter가 두 출력을 만드는 한 행을 둔다. 각 단계의 row count와 contribution을 고정하고, invalid 포함 여부 하나만 바꿔 aggregate와 stderr의 최초 차이를 확인한다. 기존 코드 span은 실행·filter·aggregation 단계가 존재한다는 사실을 직접 뒷받침하지만, 저장소의 이름 참조나 부분 assertion만으로 이 전체 lifecycle을 검증했다고 볼 수는 없다. 그러므로 원고의 출시 관문는 frozen request→raw→filtered→sample→aggregate를 잇는 별도 종단 fixture를 요구한다.
-
-## 24.20 같은 task 점수도 group 평균의 모집단을 먼저 묻는다
-
-벤치마크 표의 `average`는 중립적인 연산 이름이 아니다. 고정 lm-evaluation-harness revision `64f3d092…`의 `Group.aggregate`(`lm_eval/api/group.py:183-281`)는 leaf task별 metric과 `sample_len`을 모은 뒤 `weight_by_size`에 따라 `aggregate_subtask_metrics`를 호출한다. task A가 2문서에서 1.0, task B가 4문서에서 0.25라면 size-weighted 값은 `(2×1+4×0.25)/6=0.5`, task-equal 값은 `(1+0.25)/2=0.625`다. 숫자의 차이는 반올림이 아니라 **문서를 같은 질량으로 볼지 task를 같은 질량으로 볼지**라는 estimand 차이다.
-
-`tests/test_aggregation_pipeline.py:112-175`는 raw sample에서 task mean과 group mean으로 이어지는 두 경우를 직접 고정한다. 이어 `:177-245`는 `sample_len`이 모든 leaf task의 총 문서 수이고, `sample_count[metric,filter]`는 실제로 그 metric/filter에 기여한 문서 수임을 분리한다. 어떤 task에 `f1`이 없거나 특정 filter가 없을 때 headline의 `sample_len`을 그 metric의 분모로 쓰면 coverage를 과장하게 된다.
-
-평가 원장에는 적어도 다음을 함께 저장한다.
-
-| 필드 | 답하는 질문 | 잘못 합쳤을 때 생기는 오류 |
+| 경계 | 분자·분모/shape | 실패 oracle |
 |---|---|---|
-| `task_metric` | 각 task 내부 sample을 어떻게 집계했는가 | micro와 macro 평균 혼동 |
-| `task_sample_len` | leaf task가 가진 평가 문서는 몇 개인가 | 큰 task의 질량 소실 |
-| `metric_filter_sample_count` | 해당 metric/filter에 실제 기여한 문서는 몇 개인가 | 결측 metric을 0점처럼 취급 |
-| `weight_by_size` | 문서와 task 중 무엇이 동일 질량인가 | 서로 다른 estimand를 같은 benchmark로 비교 |
-| `stderr_method/unit` | 불확실성을 어느 단위로 재표집했는가 | cluster 상관을 독립 표본으로 계산 |
+| loglikelihood | token logprobs `[L]`, valid count | tokenizer·normalization·rolling window |
+| distributed gather | real ItemID set, padding sentinel | duplicate/missing/padding leakage |
+| group metric | micro/macro, group weights | 모집단이 다른 평균 혼합 |
+| pairwise judge | A/B/동률/무효 counts | order/position bias·judge drift |
+| reward calibration | logits→probability, bins | ECE/Brier·distribution shift |
+| contamination | item family+derivation graph | exact match 밖 paraphrase·translation |
 
-회귀 fixture는 위의 2문서·4문서 예제를 그대로 두고 네 변형을 추가한다. B에서 metric을 제거해 warning과 `sample_count`를 확인하고, filter 하나를 A에만 추가하고, task 순서를 바꾸고, nested group을 한 층 더 둔다. 기대 불변식은 입력 순서에 무관한 값, metric별 정확한 기여 문서 수, 명시한 weight 정책에 따른 0.5/0.625 분기다. nested group에서는 child를 다시 한 표본처럼 평균내지 않고 leaf task 정의가 유지되는지도 확인한다.
-
-이 canonical test가 모든 평가 타당성을 증명하는 것은 아니다. `sample_len`은 문서 수이지 유효 token·질문 난이도·언어·모달리티 시간량이 아니다. 서로 상관된 video clip, 같은 화자의 여러 음성, 한 원이미지의 여러 crop을 독립 문서로 세면 size weighting이 오히려 가짜 정밀도를 키운다. 사람 판정이 항목당 여러 annotator를 가지면 row 수가 곧 독립 표본 수도 아니다. 그래서 보고서에는 group headline 옆에 task별 값, cluster ID, 결측 이유, 가장 작은 중요 slice와 두 weighting 정책의 민감도 차이를 함께 둔다.
-
-멀티모달 benchmark에서는 이 구분이 특히 중요하다. 이미지 task 1,000개와 긴 video task 100개를 문서 수로 가중하면 전자가 열 배 질량을 갖지만 decode FLOP이나 관측 시간은 반대일 수 있다. 그렇다고 compute로 자동 가중할 수도 없다. 제품 위험, 사용자 빈도, task 동등성, 문서 동등성은 서로 다른 목표다. 먼저 배포 의사결정이 요구하는 모집단을 쓰고, 그 모집단에서 sampling probability와 cluster를 정의한 뒤 group aggregate를 선택한다. 평균 함수는 마지막 단계이지 모집단을 대신 정하는 장치가 아니다.
-
-## 24.21 pairwise judge의 판정에서 순위와 불확실성까지 닫는다
-
-두 응답을 judge에게 보여 주고 승자를 세는 일은 단순해 보인다. 그러나 `A 승`, `B 승`, `동률`, `파싱 실패` 네 상태를 latent strength와 신뢰구간으로 바꾸는 순간 측정모형이 개입한다. 이 절에서는 Arena-Hard-Auto와 AlpacaEval의 고정 소스를 따라가며, 한 판정이 순위표 한 칸이 되기까지 어느 가정이 추가되는지 펼친다. 핵심 질문은 “누가 이겼는가”가 아니라 **무엇을 독립 관측으로 셌고, 어떤 tie 모형과 사람 기준을 거쳐, 어느 불확실성을 순위까지 운반했는가**다.
-
-### 24.21.1 판정 원장을 먼저 고정한다
-
-원장의 최소 행은 `(prompt_id, prompt_family, user_or_conversation_cluster, model_a_revision, model_b_revision, orientation, judge_revision, rubric_hash, raw_verdict, parsed_outcome, valid)`다. 같은 답쌍을 A/B와 B/A로 두 번 판정했으면 두 raw 행을 남긴다. 둘이 불일치한다고 즉시 `tie` 한 행으로 덮어쓰면 진짜 내용 동률, 위치 편향, judge sampling 변동을 다시 분리할 수 없다. FastChat의 `play_a_match_pair`가 두 orientation을 호출하고 Arena-Hard-Auto의 `pairwise_judgment`가 두 game을 만드는 이유도 이 관측층을 남기는 데 있다.
-
-파싱 실패도 동률이 아니다. 동률은 judge가 두 답의 효용이 구별되지 않는다고 관측한 값이고, invalid는 측정값이 없는 상태다. 유효 판정만으로 계산한 조건부 승률과 전체 시도 대비 invalid 비율을 함께 낸다. timeout이나 content filter가 특정 모델의 긴 답에서 더 자주 일어나면 complete-case 승률 자체가 선택 편향을 가진다. `orientation × model × length slice`별 missingness를 먼저 보고, 실패를 패배로 간주한 보수적 경계와 제외한 조건부 추정값을 나란히 둔다.
-
-### 24.21.2 tie를 0.5로 넣는 것과 tie를 모델링하는 것은 다르다
-
-Arena-Hard-Auto의 `bt_loss`(`utils/math_utils.py`)는 모델 잠재 강도 차이 `d = xᵀθ`에 binary cross entropy를 적용한다. 승패만 있을 때 Bradley–Terry 확률은 다음과 같다.
-
-\[
-P(A\succ B)=\sigma(d),\qquad d=\theta_A-\theta_B.
-\]
-
-tie를 outcome `0.5`로 넣으면 손실은 `-0.5 log σ(d)-0.5 log(1-σ(d))`가 된다. 이는 `d=0`을 선호하도록 만드는 soft target이지, “동률이 발생할 별도 확률질량”을 정의한 모형은 아니다. 반면 같은 저장소의 `rk_loss`는 학습되는 tie 문턱 `η`를 두고
-
-\[
-P_W=\sigma(d-\eta),\quad P_L=\sigma(-d-\eta),\quad P_T=1-P_W-P_L
-\]
-
-로 나눈다. 구현은 `outcome == 0.5`만 tie로 취급한다. 따라서 upstream이 tie를 문자열, 0, NaN 가운데 무엇으로 정규화했는지는 사소한 포맷이 아니라 likelihood를 바꾸는 계약이다.
-
-손 fixture는 네 모델보다 세 모델이면 충분하다. A–B는 A승 8·tie 2, B–C는 B승 8·tie 2로 두고 A–C edge를 제거한다. 먼저 BT soft-tie와 Rao–Kupper를 각각 적합해 `θ`, `η`, pairwise probability를 저장한다. 그 뒤 tie를 B승으로 바꾸고, 강한 선호 한 건을 단순히 세 행으로 복제하고, A–C edge를 추가한다. 순위가 바뀌면 “데이터가 같지만 알고리즘이 흔들렸다”가 아니다. tie 의미, 관측 weight, 비교 graph라는 서로 다른 입력을 바꾼 것이다.
-
-### 24.21.3 optimizer가 수렴해도 순위가 식별됐다는 뜻은 아니다
-
-`fit_pairwise_model`은 model별 column을 가진 설계행렬과 outcome을 받아 LBFGS closure에서 계수를 적합한다. 이 함수가 유한한 tensor를 반환해도 전역 순위의 의미가 자동으로 생기지는 않는다. 비교 graph가 두 component로 끊기면 서로 만나지 않은 집단의 offset을 데이터가 정하지 못한다. 한 모델이 모든 상대를 이기는 완전분리에서는 strength가 사실상 무한대로 밀릴 수 있다. opponent mixture가 달라지면 transitivity 위반이 있는 현실 판정에서 rating도 달라진다.
-
-그러므로 순위표에는 모델별 battle 수만 쓰지 않는다. graph component, degree, 상대 모델 구성, orientation balance, tie·invalid 비율을 함께 낸다. anchor model을 고정했다면 그 revision과 anchor 선택 민감도를 쓴다. leave-one-opponent-out 재적합으로 특정 상대 하나가 순위를 떠받치는지 확인한다. graph가 분리됐으면 component 내부 순위만 보고하고 component 간 서열은 미식별로 남긴다.
-
-### 24.21.4 bootstrap의 행은 독립 단위가 아닐 수 있다
-
-Arena-Hard-Auto의 `bootstrap_pairwise_model`은 battle 행 수만큼 index를 IID 복원추출하고 매 반복마다 모형을 다시 적합한다. 이 구현은 계산 가능한 bootstrap을 제공하지만, 같은 prompt에서 여러 모델쌍을 만들거나 같은 사용자의 연속 대화를 여러 행으로 만든 경우의 상관을 보존하지 않는다. 행 수가 10만이어도 독립 prompt family가 500개라면 10만 IID 표본처럼 만든 구간은 지나치게 좁을 수 있다.
-
-목표 모집단에 맞춰 resampling unit을 고른다. 새 prompt에 대한 일반화가 목표면 `prompt_id` 또는 중복·변형을 묶은 `prompt_family`를 통째로 뽑는다. 사용자 경험이 목표면 user나 conversation을 cluster로 뽑는다. 동일 prompt의 A/B swap과 여러 judge 반복은 부모 cluster와 함께 이동한다. bootstrap 반복마다 raw 판정에서 tie 정규화, feature matrix 생성, model fit, anchor 변환, 순위 계산까지 전 pipeline을 다시 수행해야 한다. 이미 계산된 모델별 평균만 재표집하면 covariance와 graph 변화를 잃는다.
-
-순위 불확실성은 각 모델의 marginal 5·95 분위수만으로 끝나지 않는다. release 질문이 “후보가 baseline보다 낫나”라면 각 bootstrap draw에서 `Δ=θ_candidate-θ_baseline` 또는 대응 win probability를 계산한다. `P(Δ>0)`, practical margin을 넘는 비율, rank distribution과 top-k 포함 확률을 함께 낸다. judge 보정치를 사용했다면 보정 parameter도 같은 draw에서 human-gold cluster를 재표집해 다시 추정한다. point calibration을 고정한 채 battle만 bootstrap하면 측정기 불확실성이 최종 구간에서 사라진다.
-
-### 24.21.5 human-gold는 정답표가 아니라 두 번째 표본이다
-
-AlpacaEval의 `Analyzer.agreement_of_annotations`와 `tests/test_analyze.py::test_agreement_of_annotations`는 동일 항목의 cross-annotation에서 majority vote 수를 바꾸며 score, sample SEM, annotator SEM을 직접 고정한다. 시험 fixture에서 annotator 수와 scoring rule을 바꾸면 agreement와 두 종류의 SEM이 어떻게 달라지는지 명시적으로 assert한다. 이 직접 oracle이 증명하는 것은 집계 계약이다. 실제 annotator 모집의 대표성, 운영 judge revision의 calibration 유지, 언어·안전 slice의 충분한 표본까지 증명하지는 않는다.
-
-human-gold calibration 표에는 최소한 confusion matrix를 둔다. pairwise 세 상태를 유지한다면 win/tie/loss 3×3이고 invalid와 abstain은 별도 열이다. 전체 accuracy 하나로 줄이지 말고 orientation, 답 길이 차, 언어, 안전 범주, judge와 candidate 계보 유사성별로 본다. gold 자체도 annotator disagreement를 가지므로 adjudicated label만 남기지 않고 raw votes, assignment, majority rule, adjudication parent를 보존한다.
-
-새 judge revision을 old judge와 비교할 때는 같은 immutable answer pair를 둘 다 판정하고 사람이 stratified subset을 본다. old/new의 오류가 같은 행에서 상관되므로 독립 두 비율의 표준오차를 쓰지 않는다. paired disagreement와 cluster bootstrap을 사용한다. threshold를 calibration slice에서 고른 뒤 같은 slice로 성능을 보고하면 낙관 편향이 생기므로 threshold fitting과 final audit slice를 분리하거나 nested resampling을 적용한다.
-
-### 24.21.6 코드·시험·운영 보증의 경계를 읽는다
-
-AlpacaEval의 `PairwiseAnnotator.annotate_head2head`에는 행 정렬 계약을 고정하는 직접 시험이 있다. `test_annotate_head2head`는 두 번째 frame의 순서를 뒤집고 `is_ordered=False`로 호출해 원래 annotation이 복원되는지 확인한다. 이는 행 misalignment를 막는 강한 지역 증거다. 반면 Arena-Hard-Auto의 BT/Rao–Kupper 적합과 row bootstrap에는 이 고정 revision에서 graph disconnection, perfect separation, cluster resampling을 직접 단언하는 canonical unit test를 찾지 못했다. 실행 예제나 leaderboard 생성 성공을 그 보증으로 승격하지 않는다.
-
-최종 인수 fixture는 다음 순서로 닫는다. frozen answer pair에 두 orientation과 세 judge 반복을 생성한다. raw win/loss/tie/invalid를 보존한다. human-gold subset에서 confusion과 abstention을 계산한다. IID와 prompt-cluster bootstrap을 각각 실행한다. BT soft-tie와 explicit-tie 모형을 각각 적합한다. 마지막으로 candidate-baseline 차이, rank distribution, graph component와 invalid 민감도를 한 카드에 표시한다. 하나의 합리적 선택만 바꿔도 출시 결론이 뒤집히면 더 예쁜 단일 순위를 고르는 대신 추가 표본과 미식별 경계를 보고한다.
-
-이 폐루프가 주는 실무적 이득은 명확하다. 위치를 뒤집은 뒤에만 승자가 달라지면 judge presentation 문제다. human-gold와 특정 언어에서만 어긋나면 calibration 문제다. IID 구간만 좁고 cluster 구간이 넓으면 표본 구조 문제다. tie 모형에 따라 순위가 바뀌면 관측 해석 문제다. 어느 경우도 즉시 모델 품질 차이라고 결론 내리지 않는다. 첫 불일치가 발생한 층으로 되돌아가야 다음 학습 recipe가 잘못된 평가 신호를 최적화하지 않는다.
-
-## 24.22 reward model을 확률 예측기로 교정한다
-
-pair accuracy 하나는 calibration을 말하지 않는다. score 차이를 선호 확률로 변환한 뒤 confidence bin별 예측 확률과 실제 선택률, Brier/log loss, tie·기권 coverage를 함께 낸다. annotator와 prompt cluster를 무시한 random split은 같은 사람·template가 train과 test에 걸쳐 낙관적 수치를 만들 수 있으므로 group split과 시간 split을 병행한다.
-
-tie 포함·제외 agreement는 서로 다른 조건부 통계다. 위치 반전에서 판정이 달라진 pair를 단순 tie로 압축하기 전에 두 raw judgment를 보존한다. 길이와 style slice별 calibration이 다르면 전역 temperature 하나로 숨기지 않는다. 공개 코드의 tie 집계 test는 계산 규칙을 고정하지만 production labeler population과 adjudication drift는 공개되어 있지 않다.
-
-## 24.23 평가 누출을 문자열 일치보다 넓은 관측 문제로 본다
-
-평가셋 원문이 pretraining corpus에 있는 경우만 찾으면 가장 쉬운 누출만 닫힌다. temporal leakage는 benchmark 공개 뒤 생긴 풀이·mirror·leaderboard 해설이 학습에 들어오는 사건이다. template leakage는 숫자와 이름만 바뀐 동일 생성 규칙이 train과 test에 걸치는 사건이다. semantic leakage는 번역·paraphrase·정답을 품은 교육 문서처럼 표면 n-gram이 달라도 답을 복원할 정보가 건너가는 사건이다. adaptive leakage는 사람이 benchmark 결과를 반복 관측해 data mixture, prompt, RL reward와 checkpoint 선택을 조정하는 동안 holdout이 사실상 training signal이 되는 사건이다.
-
-이 네 가지는 detector도 다르다. lexical exact/n-gram은 설명 가능하고 싸지만 번역과 paraphrase를 놓친다. MinHash는 근접 복사를 찾지만 의미가 같은 재서술을 놓친다. embedding detector는 recall을 넓히는 대신 같은 개념을 정당하게 설명하는 clean 문서를 과잉 제거한다. template detector는 변수 치환 뒤 AST·구조를 비교해야 하고, temporal 검사는 row의 최초 공개 시각과 모든 mirror의 수집 시각을 보아야 한다. adaptive leakage는 corpus scan이 아니라 누가 어느 score를 몇 번 관측해 어떤 결정을 바꿨는지 observation ledger로 잡는다.
-
-24.23.1 split은 파일명이 아니라 family와 시간의 계보다. 먼저 exact·near-duplicate component와 template family를 만든 뒤 split을 나눈다. 행을 먼저 무작위로 나누고 split 안에서 dedup하면 같은 family가 양쪽에 남을 수 있다. `ItemID → family/component → benchmark revision → split role → release date → prompt/template revision`을 고정하고, training data뿐 아니라 quality classifier의 학습 split, curriculum selection validation, reward/judge calibration과 final audit holdout 사이의 edge도 검사한다.
-
-시간 경계에는 불확실성이 있다. benchmark repository의 commit 시각은 공개 하한일 뿐, 사전 공유·논문 초안·mirror가 더 일찍 존재했을 수 있다. `known-before`, `known-after`, `unknown-window`를 구분한다. unknown을 clean으로 간주하지 않는다. 합성 문제도 generator template와 seed가 공개되면 무한한 새 숫자가 모두 독립 holdout인 것은 아니다.
-
-24.23.2 detector를 calibration하지 않으면 clean 점수도 왜곡된다. 평가 item마다 exact, n-gram, MinHash, template와 semantic score를 보존하고 사람 판정 표본에서 detector별 precision·recall을 추정한다. threshold를 같은 표본에서 고르고 성능까지 보고하면 낙관 편향이 생기므로 calibration과 audit 표본을 나눈다. 흔한 지시문 때문에 n-gram hit가 난 clean item, 번역돼 lexical detector가 놓친 contaminated item, 같은 수학 정리를 설명하지만 benchmark answer를 포함하지 않는 교육 문서를 hard negative로 넣는다.
-
-점수는 최소 세 분모로 낸다. 전체(`all`), detector가 clean으로 판정한 집합(`detector-clean`), 사람이 판정한 audit clean 집합이다. detector-clean 점수만 발표하면 false positive로 어려운 clean item이 제거돼 점수가 오를 수 있다. 제거율, 난이도·domain 질량과 detector uncertainty를 함께 표시한다. contamination flag가 붙은 item을 0점 처리하는 것과 분모에서 제외하는 것도 다른 estimand다.
-
-24.23.3 adaptive evaluation에는 관측 예산이 필요하다. public benchmark를 매 checkpoint마다 보고 그 결과로 학습 recipe를 바꾸면 item을 gradient에 직접 넣지 않아도 정보가 이동한다. 실행마다 `ObservationID`, 요청자, model/checkpoint, benchmark revision, 공개된 statistic의 해상도, 의사결정과 부모 관측을 기록한다. 전체 점수 하나와 item-level trace는 정보량이 다르다. 반복 횟수뿐 아니라 공개된 slice와 error example의 세밀함을 함께 제한한다.
-
-최종 holdout은 tuning loop 밖의 별도 권한과 시점에 둔다. holdout을 열어 실패를 고친 순간 그 집합은 development set으로 승격하고 새 final audit가 필요하다. benchmark suite를 바꾸는 것으로 충분하지 않다. 같은 template, 원문 문서, judge나 reward model이 새 suite와 연결됐는지 graph를 다시 검사한다.
-
-24.23.4 반사실 인수 시험으로 인과 주장의 상한을 정한다. 인수 fixture는 동일 정답을 가진 원문·paraphrase·번역, 같은 template의 변수 치환, 흔한 지시문만 공유하는 clean negative, 공개일 전후 mirror를 넣는다. detector별 TP·FP·FN과 clean/all metric을 낸다. 이어 contaminated family만 제외한 data rebuild와 token budget·mixture를 맞춘 control rebuild를 비교하는 설계를 적되, 실제 대규모 재학습을 수행하지 않았다면 `RuntimeUnverified`로 남긴다.
-
-코드 직접 시험은 지역 계약을 고정한다. lm-evaluation-harness의 `BaseTasks.test_should_decontaminate`는 decontamination을 켠 task가 query 함수를 제공하는지 확인한다. DataTrove와 NeMo Curator의 시험은 normalization, signature, component의 작은 oracle을 준다. 어느 시험도 semantic·temporal·adaptive leakage가 없거나 checkpoint 행동에 인과 효과가 없음을 보증하지 않는다. 이 음성 증거를 명시해야 “검출기를 실행했다”가 “평가가 깨끗하다”로 부풀려지지 않는다.
-**model-written eval의 생산성과 판정 독립성을 함께 관리한다.**
-
-모델이 행동 가설과 문항을 생성하면 coverage를 빠르게 넓힐 수 있지만 생성 모델, 피평가 모델과 judge가 공유하는 편향도 함께 들어온다. prompt generator revision과 seed, dedup family, judge revision, 사람 anchor를 분리하고 sealed split에서 재검증한다. 공식 논문의 reported result는 publication evidence이며 현재 모델에서 같은 confusion·coverage를 얻었다는 실행 증거가 아니다.
-paired difference, 층화 bootstrap, 다중 검정과 judge 기권의 계산 경계는 [평가·오염·불확실성 결정적 실습](../labs/24-eval-contamination-uncertainty-lab.md)의 열두 행 fixture로 다시 확인한다.
-
-soft vote frequency를 target으로 한 Brier score, reliability bin과 ECE, tie 분모와 길이-only baseline은 [reward calibration·tie·disagreement 실습](../labs/19-reward-calibration-disagreement-lab.md)의 expected table로 검산한다. 여섯 행 구현 oracle을 실제 calibration 성능 주장으로 확대하지 않는다.
+padding request가 aggregate로 새는 변형, parser failure를 0점으로 바꾸는 변형, judge A/B 순서 교환, stale cache와 train descendant를 주입한다. 평균 하나가 아니라 raw record difference와 disposition을 먼저 찾는다. 사람 평가는 annotator assignment, rubric revision, disagreement와 adjudication을 보존한다. contamination 불확실성 실습은 [평가 오염 실습](../labs/24-eval-contamination-uncertainty-lab.md)으로 고정한다. 25장에는 AttackID·policy category·counterfactual control을, 30장에는 exact subject의 EvalID와 hard-gate 결과만 넘긴다.

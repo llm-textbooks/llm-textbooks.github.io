@@ -31,6 +31,51 @@ softmax attention의 의미도 행렬 이름보다 상태로 보면 단순해진
 4. **수명:** forward에 저장하는 값, backward에서 재계산하는 값, request나 sequence 경계를 넘어 보존하는 값은 무엇인가.
 5. **증거:** source branch가 존재한다는 사실과 실제 dispatch·수치 parity·성능 측정을 무엇으로 구분했는가.
 
+## 8.0 GR-001 규범 trace: residual 좌표를 허용된 정보 흐름으로 바꾼다
+
+7장의 `FWD-007`을 첫 decoder layer의 GQA에 통과시켜 `AttentionSpanID=ATTN-008-L00`을 만든다. 이 trace의 핵심은 attention matrix를 그리는 일이 아니라 6장의 segment 경계가 Q/K edge, 7장의 position이 RoPE, 공유 KV head가 backward owner로 정확히 전달되는지 증명하는 것이다.
+
+```mermaid
+flowchart LR
+  H[normalized hidden<br/>2×16×896] --> Q[Q projection<br/>2×14×16×64]
+  H --> K[K projection<br/>2×2×16×64]
+  H --> V[V projection<br/>2×2×16×64]
+  P[RoPE + allowed edges] --> S[scaled score]
+  Q --> S
+  K --> S
+  S --> W[stable masked softmax]
+  V --> O[value aggregate<br/>2×14×16×64]
+  W --> O
+  O --> M[merge + o_proj<br/>2×16×896]
+  M -->|9장| R[residual + MLP/MoE]
+```
+
+|state|logical shape|physical owner·offset/mask|수명|
+|---|---|---|---|
+|Q|`[2,14,16,64] bf16`|query head owner; RoPE position from `POS-006`|forward 또는 backward recompute|
+|K,V|각 `[2,2,16,64] bf16`|KV head 2개를 query group 7개가 공유|training step 동안 보존|
+|allowed edge|논리 `[2,1,16,16] bool`|causal ∩ padding ∩ same-segment; materialize 여부 별도|kernel dispatch 입력|
+|score|논리 `[2,14,16,16]`|scale `1/sqrt(64)`; forbidden edge 질량 0|Flash 경로에서는 HBM 비물질화 가능|
+|row statistics|max·log-sum-exp `[2,14,16] fp32`|softmax reduction owner|backward 재현에 필요|
+|head output|`[2,14,16,64]` → `[2,16,896]`|transpose/contiguous stride 기록|`o_proj` 뒤 9장 인계|
+
+query head $h$가 KV head $g(h)=\lfloor h/(H_q/H_{kv})\rfloor$를 공유할 때
+
+$$A_{hts}=mask_{ts}+{q_{ht}^{\top}k_{g(h)s}\over\sqrt D},\quad
+O_{ht}=\sum_s softmax(A_{ht:})_s v_{g(h)s}.$$
+
+|기호|실제 객체|GR-001 값·검산|
+|---|---|---|
+|$H_q,H_{kv},D$|config의 head counts와 dimension|14, 2, 64; `14 % 2 == 0`|
+|$g(h)$|KV repeat/group mapping|query head 0–6→KV0, 7–13→KV1|
+|$mask_{ts}$|6장의 allowed-edge policy|다른 packed segment와 미래 위치는 $-\infty$ 의미|
+|row max/LSE|stable softmax state|모든 허용 행 finite, all-masked 행 없음|
+|$dK,dV$|공유 KV gradient|같은 group query head의 partial을 합산, 평균 아님|
+
+실제 Qwen2 attention의 projection·RoPE·KV repeat·backend dispatch는 [Transformers 고정 구현](https://github.com/huggingface/transformers/blob/550d7b3834670483a4df436541272c055dc364bf/src/transformers/models/qwen2/modeling_qwen2.py#L170-L310)에서 확인한다. 구현 링크는 branch 존재의 근거이며, GR-001에서 선택된 backend는 runtime dispatch trace로 별도 증명한다.
+
+**반증과 handoff.** `ATTN-008-M1`은 row0의 두 packed segment 사이 edge 하나를 연다. 미래 suffix가 첫 segment output을 바꾸는 metamorphic test가 실패해야 한다. `M2`는 GQA의 shared `dK`를 합이 아니라 평균으로 줄인다. forward parity는 통과하지만 reference backward에서 정확히 group size 배 차이가 나야 한다. `M3`는 all-masked padding row에 유한한 큰 음수만 넣어 dtype별 NaN/균등 확률을 검사한다. `M4`는 Flash 옵션만 켜고 eager fallback을 유도한다. 결과 parity와 별개로 dispatch assertion이 실패해야 한다. 출력 `{ATTN-008-L00, projected output[2,16,896], saved/recomputed state contract, backend trace, dQ/dK/dV oracle}`를 9장 residual·MLP/MoE 경로에 넘긴다.
+
 ### 최초 불일치로 원인을 가르는 지도
 
 | 관측 증상 | 먼저 고정할 좌표 | 가장 싼 분리 실험 | 판정 후보 |
@@ -2287,4 +2332,4 @@ A=\operatorname{softmax}_{fp32}(QK^\top/\sqrt d+M),\qquad O=AV.
 
 MLX-LM 변형은 같은 Q/K/V shape를 `scaled_dot_product_attention`에 넘긴다. cache가 있으면 RoPE offset을 `cache.offset`에서 받고 `update_and_fetch`한다. Transformers는 `past_key_values.update(...,layer_idx)`를 쓴다. 비교점은 함수 이름이 아니라 `(position offset, cache 전후 KV 길이, mask key 길이)`다. full-sequence 학습에서 cache state는 꺼야 한다.
 
-negative fixture는 세 개다. `H_q%H_kv!=0`은 admission에서 실패해야 한다. causal mask를 한 칸 밀면 첫 미래 경계의 `QT2-10`에서 갈라져야 한다. non-contiguous Q/K를 잘못 `.view`하면 layout 경계에서 실패하거나 값 순서가 바뀌어야 한다. 출력은 [10장의 MLP·loss 원장](10-real-model-autopsy.md#1021-qwen2-trace-ledger-forward-backward)으로 이어진다.
+이 절의 head-divisibility·mask off-by-one·non-contiguous view 반례는 8.0의 `ATTN-008-M1/M2`와 같은 failure ledger에 넣는다. 출력 `QT2-12/13`은 9장의 GR-001 residual trace로 넘긴다.

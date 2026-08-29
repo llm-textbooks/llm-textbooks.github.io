@@ -26,6 +26,7 @@ npx serve _site
 4. Pagefind 한국어 검색 색인을 생성합니다.
 5. 모든 내부 링크, heading ID, 표 wrapper, 필수 자산과 권별 문서 수를 검사합니다.
 6. 논문·코드·모델 카드·공식 문서 링크를 분류하고 mutable GitHub branch 링크를 차단합니다.
+7. 2권의 모든 본문 장에 실행 지도, 상태표, Golden Run 인계와 반증 절차가 있는지 편집 품질 게이트로 검사합니다.
 
 각 장 끝의 **이 장의 원전 바로가기** 패널은 본문에 인용된 링크를 논문, 코드, 모델·데이터, 공식 문서로 자동 분류합니다. 코드 근거는 가능하면 `repository + 40자리 commit + file + #Lx-Ly`, 논문은 arXiv/DOI/공식 출판 페이지, 모델은 revision이 고정된 모델 카드를 사용합니다.
 
@@ -48,6 +49,7 @@ public/downloads/              # EPUB
 site-src/                      # 독서 UI의 CSS와 JavaScript
 scripts/build.mjs              # 정적 사이트 생성기
 scripts/verify.mjs             # fail-closed 산출물 검사
+scripts/audit-volume2-editorial.mjs # 2권 실행 중심 편집 감사
 ```
 
 URL은 제목이 아니라 파일 slug를 기반으로 생성합니다. 제목을 고쳐도 장 주소가 바뀌지 않습니다. 각 절의 anchor에는 장 slug와 문서 안 순번을 함께 넣어 같은 제목이 반복되어도 충돌하지 않게 했습니다.

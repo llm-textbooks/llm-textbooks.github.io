@@ -214,119 +214,13 @@ CUDA release note는 toolkit component와 제거·변경 사항, compatibility g
 
 CUDA 12.x minor끼리도 bundled library와 compiler가 다를 수 있고 CUDA 13.x에서는 deprecated/removed API와 new architecture support가 변할 수 있다. 정확한 `12.x.y`, `13.x.y`와 component version을 적는다. 최신이라는 표현 대신 검증한 조합을 쓴다.
 
-## 14.3 extension·ABI·shape 경계를 release 전에 검증한다
+## 14.3 precision·kernel 변경의 단일 release 표
 
-수치 fixture가 통과해도 extension이 다른 shared library를 읽거나 shape별 fallback이 달라지면 배포 결과는 갈린다. build provenance, ABI, kernel shape와 복구 종료 조건을 release gate 앞에서 함께 검증한다.
+| build/ABI | dispatch | numerics | distributed | resume | performance |
+|---|---|---|---|---|---|
+| compiler·SM·binary digest | 실제 kernel·fallback | FP32 oracle·saturation·scale | collective dtype·accumulator | logical state·amax·scaler | 고정 shape의 latency·workspace |
 
-### 14.3.1 extension build audit
-
-build log에서 include/library path, compiler, C++ ABI flag, `-gencode`, PTX/SASS target을 추출한다. wheel의 shared objects를 검사해 필요한 symbol과 arch가 들어 있는지 확인한다. runtime JIT가 발생하면 cache path와 cold latency를 기록한다.
-
-source conditional compile이 CUDA version macro나 compute capability로 다른 kernel을 선택하는지 본다. 새 toolkit에서 compile됐지만 feature gate가 old path를 탔다면 CUDA 13 전용 성능을 검증한 것이 아니다.
-
-**distributed precision.**
-
-gradient/parameter collective dtype와 reduction accumulator를 기록한다. BF16 reduce와 FP32 reduce는 bytes와 error가 다르다. FP8 communication은 scale metadata와 collective 지원을 요구한다. rank별 scale이 다르면 quantized value를 그대로 합할 수 없다.
-
-single-rank reference와 N-rank logical gradient를 비교하고 world size 증가에 따른 error를 본다. reduction order 차이를 tolerance에 포함하되 systematic scale 오류를 rounding으로 넘기지 않는다.
-
-**checkpoint portability.**
-
-BF16 model checkpoint는 CUDA toolkit과 독립적일 수 있지만 fused optimizer opaque state, FP8 amax history, compiled graph cache는 portability가 다르다. portable logical state와 rebuildable cache, hardware-specific binary를 분리 저장한다.
-
-CUDA 12 환경 checkpoint를 CUDA 13 환경에서 load할 때는 eager BF16 reference부터 복원한다. 그다음 FP8 state, fused optimizer, compile을 단계적으로 켠다. 처음부터 full optimized path로 load하면 incompatibility 위치를 알기 어렵다.
-
-### 14.3.2 release failure table
-
-`build`, `load`, `dispatch`, `numerics`, `distributed`, `resume`, `performance` 일곱 gate를 둔다. build가 통과해도 unsupported fallback이면 dispatch fail, logits가 맞아도 target throughput 미달이면 performance fail이다. 각 gate의 log와 artifact hash를 연결한다.
-
-rollback은 옛 container만 띄우는 것이 아니라 compatible driver와 model/checkpoint state를 확인한다. 새 run이 쓴 hardware-specific optimizer state를 옛 binary가 읽을 수 있는지 검증한다.
-
-**FP8 block scaling 수치 예.**
-
-한 block 값이 `[0.01,0.02,1,100]`이면 큰 outlier가 공통 scale을 지배해 작은 값의 유효 정밀도를 잃게 한다. block을 둘로 나누면 작은 값 block은 더 적합한 scale을 쓸 수 있지만 scale metadata와 kernel indexing이 늘어난다. per-tensor, block-128, block-32의 saturation·zero 비율을 비교한다.
-
-amax history가 outlier를 여러 step 기억하면 이후 정상 batch에서도 scale이 보수적일 수 있다. history length와 margin을 바꾼 실험에서 즉시 saturation과 장기 under-utilization을 함께 본다. resume 때 history reset negative test가 민감한지 확인한다.
-
-**PTX와 cubin inspection.**
-
-binary inspection 도구로 extension의 target SM과 PTX section을 확인한다. build log의 `-gencode`와 실제 artifact가 맞는지 비교한다. target GPU용 cubin이 있으면 direct load, PTX만 있으면 driver JIT 가능성과 cache를 확인한다. 어느 것도 없으면 `no kernel image`가 정상 실패다.
-
-새 architecture에서 JIT 성공만으로 performance support를 선언하지 않는다. architecture-specific instruction과 tuning이 없는 generic PTX일 수 있다. actual kernel trace, instruction mix, benchmark를 별 gate로 둔다.
-
-### 14.3.3 ABI·shared-library 반례
-
-같은 CUDA major라도 cuBLAS/cuDNN/NCCL와 C++ ABI 조합이 달라 symbol resolution이 실패할 수 있다. `ldd`/loader trace로 process가 실제 읽은 library path를 저장한다. host에 설치된 toolkit library와 wheel bundled library가 섞이지 않는지 본다.
-
-import가 성공해도 lazy-loaded kernel library가 첫 op에서 실패할 수 있다. smoke test는 import, device init, 대표 op, backward, collective까지 단계화한다. 실패 단계별 error를 release report에 남긴다.
-
-**CUDA 12 checkpoint를 13에서 복구한다.**
-
-portable model tensor와 tokenizer부터 CUDA 13 eager BF16에서 load해 fixed-token logits를 비교한다. 그다음 optimizer logical state, GradScaler, FP8 history를 load한다. fused extension과 compiled graph cache는 재빌드한다. 각 단계마다 다음 update를 reference와 비교한다.
-
-opaque backend state가 version migration을 지원하지 않으면 parameter-only branch로 시작하고 optimizer reset을 선언한다. 파일이 deserialize된다는 이유로 state semantics가 같다고 보지 않는다. rollback을 위해 CUDA 12 compatible checkpoint parent를 보존한다.
-
-**compiler optimization 반례.**
-
-fast-math, reduced-precision reduction, TF32 flag를 한 번에 켜지 않고 각각 비교한다. 작은 toy에서 algebraically equivalent expression이 rounding과 overflow 순서 때문에 달라질 수 있다. compiler가 re-association한 reduction은 bitwise reference와 다를 수 있으나 사전 tolerance와 invariant를 만족해야 한다.
-
-graph fusion이 dropout RNG 소비 순서를 바꾸는지 seed fixture로 본다. checkpoint recompute와 fused dropout이 같은 mask 계약을 쓰지 않으면 backward가 달라진다. RNG offset을 kernel state로 관찰한다.
-
-**kernel shape boundary test**
-
-head dimension 64/128 같은 fast path뿐 아니라 80, sequence 1, very long sequence, non-multiple tile, GQA ratio, noncontiguous stride를 넣는다. supported guard가 fallback 또는 명확한 error를 내야 한다. 잘못된 specialized kernel로 들어가 silent corruption이 나면 가장 위험하다.
-
-fused optimizer는 empty gradient group, sparse `None`, odd tensor count, large step counter를 시험한다. CE는 vocab shard 경계와 ignore index, attention은 zero-length K와 causal offset을 시험한다.
-
-**multi-GPU precision recovery.**
-
-rank별 scaler found-inf와 FP8 amax가 global policy에 맞게 합쳐지는지 확인한다. rank 하나의 scale history를 손상시키고 layer output hash가 달라지는지, publication 전에 fail-fast하는지 본다. collective dtype mismatch는 hang 또는 corruption 전에 metadata assertion으로 잡는다.
-
-resume topology가 바뀌면 replicated amax history가 같은지, sharded weight scale이 새 shard와 맞는지 mapping report를 만든다. scale tensor shape가 맞는 것만으로 logical weight slice 대응을 증명하지 못한다.
-
-**공식 문서 좌표를 보고서에 남긴다.**
-
-compatibility guide의 표, toolkit release note의 component version, programming guide의 architecture/precision 절, framework 공식 install matrix를 각각 URL·문서 version·접근일로 기록한다. 블로그 benchmark를 support contract로 사용하지 않는다.
-
-source claim은 고정 commit의 build guard와 dispatch 함수, test claim은 test name과 assertion을 쓴다. 실제 GPU execution은 별 실행 record다. 세 근거를 한 문장에 섞지 않으면 “코드에 branch가 있음”과 “이 환경에서 검증됨”을 구분할 수 있다.
-
-**migration 복구 리허설**
-
-rehearsal은 CUDA 12 baseline의 GoldenBatchID, checkpoint, kernel trace를 고정한다. CUDA 13 candidate를 build하고 BF16 eager→fused→FP8→compiled ladder를 순서대로 통과한다. 각 rung failure에서 이전 rung은 유지해 원인을 격리한다.
-
-장애로 old driver, missing cubin, stale compile cache, reset FP8 history, partial optimizer state를 넣는다. release gate가 각각 build/load/dispatch/numerics/resume에서 정확히 닫히는지 본다. 모든 gate 통과 뒤에만 throughput을 비교한다.
-
-**handoff의 byte 계산.**
-
-15장에 parameter·gradient·optimizer·scale state의 dtype과 bytes를 넘긴다. collective payload가 BF16인지 FP32인지, FP8이면 scale metadata가 누가 소유하는지 명시한다. FSDP shard와 TP weight slice가 quantization block 경계를 자르는지도 검사한다.
-
-17장 checkpoint에는 GradScaler, amax history, quantization metadata, portable tensor와 rebuildable binary/cache 구분을 넘긴다. 이 계약이 있어야 topology 또는 CUDA version 변경 후 어떤 state를 복원하고 무엇을 재생성할지 결정할 수 있다.
-
-**승인용 허용오차 원장**
-
-각 rung은 tensor 이름, reference/candidate dtype, max·RMS error, cosine, threshold, 판정을 남긴다. threshold는 FP32→BF16, BF16→FP8, eager→fused에 따로 둔다. 여러 변환의 총 오차만 보면 어느 단계가 예산을 초과했는지 알 수 없다.
-
-성능 원장도 cold compile, warm replay, kernel, collective를 분리한다. numerical PASS와 performance PASS는 독립 gate다. 실제 dispatch와 binary hash가 없는 benchmark는 release 근거가 아니다.
-
-**복구 종료 조건**
-
-CUDA 13 candidate에서 portable checkpoint, scaler, FP8 history를 복원하고 첫 GoldenBatchID의 logits·gradient·delta를 비교한다. compiled cache는 재생성한다. 실패하면 마지막 통과 rung으로 rollback하고 원인을 기록한다.
-
-이 결과와 dtype/byte manifest가 다음 장의 shard·collective 설계를 고정한다.
-
-**고정 실행 좌표의 최소 단위.**
-
-PyTorch `550d7b3834670483a4df436541272c055dc364bf`에서 autocast·GradScaler·SDPA dispatch의 실제 symbol과 test를 각각 고정한다. CUDA 공식 문서는 toolkit `12.x.y`와 `13.x.y` release note, compatibility guide revision, programming guide section을 기록한다. driver 상한 표와 toolkit build support를 같은 좌표로 인용하지 않는다.
-
-extension은 source commit, build file의 version/arch guard, dispatch function, correctness test 네 좌표를 한 묶음으로 둔다. 실제 candidate GPU trace가 없으면 kernel이 실행됐다고 쓰지 않는다.
-
-candidate 환경의 첫 실행은 actual loaded library와 kernel dispatch를 기록한다. manifest의 기대 binary와 다르면 numerical test 전에 실패한다. 이 검사가 host library 혼입을 막는다.
-
-**사례 연구: CUDA 12 기준선을 CUDA 13 후보로 옮긴다.**
-
-사례는 같은 GPU가 두 toolkit build를 모두 지원한다는 전제에서 시작한다. driver가 CUDA 13 runtime을 지원하는지, compiler가 target compute capability code를 생성하는지, extension과 framework wheel이 해당 toolkit ABI를 지원하는지 각각 확인한다. `nvidia-smi`가 보여주는 “CUDA Version” 한 줄을 installed toolkit compiler와 동일시하지 않는다.
-
-baseline manifest에는 GPU name/SM, driver, toolkit/nvcc, runtime library path, framework build CUDA, cuDNN/NCCL, compiler, extension commit과 build flags를 기록한다. candidate도 같은 schema를 쓴다. 실제 loaded `.so`와 kernel binary hash를 trace한다. shell의 `nvcc --version`만 맞고 process가 old library를 load하는 혼입을 막는다.
+한 열이라도 증거가 없으면 “지원”이 아니라 미검증이다. CUDA/toolkit migration은 이 표의 부모 artifact를 바꾸는 새 실행으로 취급한다.
 
 ## 14.4 CUDA 세대와 FP8 실행 상태를 함께 읽는다
 
@@ -2809,3 +2703,38 @@ UVM을 사용할 때는 allocation byte만 기록하지 말고 page residency, f
 실용적인 failure ladder는 `입력 생산 → pin queue → DMA enqueue → DMA complete → first consumer → HBM/L2 transaction → optimizer/checkpoint 경쟁` 순으로 최초 불변식 위반을 찾는다. 각 단계에 monotonic timestamp와 tensor/batch identity를 붙이고, 같은 shape의 clean control을 둔다. metric 상관만으로 인과를 확정하지 않고 stream event, allocator state와 test fixture로 반증한다.
 
 마지막으로 옵션을 효과가 아니라 상태 전이로 기록한다. `pin_memory=True`는 pinned staging을 만든다. `non_blocking=True`는 async copy와 event-tracked lifetime을 만든다. worker·prefetch 증가는 동시에 살아 있는 host object와 queue depth를 늘린다. CPU optimizer offload는 HBM capacity를 줄이는 대신 host NUMA 계산과 PCIe/DMA 경계를 추가한다. async checkpoint는 pause를 숨길 수 있지만 pinned pool·link·storage의 동시 경쟁과 두 단계 commit을 만든다. 이 인과 사슬까지 설명해야 “GPU가 놀고 있으니 DataLoader를 늘린다”는 추측이 재현 가능한 진단으로 바뀐다.
+
+## 14.17 GR-001 규범 trace — dtype 결정이 UpdateID commit을 허용하는가
+
+13장의 scheduler가 계산한 LR는 14장의 수치 판정을 통과해야 실제 update가 된다. `GR-001/A0042`에서 autocast forward, scaled backward, unscale, finite 합의와 optimizer kernel을 한 trace로 묶는다. overflow면 parameter·moment·scheduler 어느 것도 `U0042`로 공개하지 않는다.
+
+```mermaid
+sequenceDiagram
+    participant F as autocast forward
+    participant B as scaled backward
+    participant S as GradScaler
+    participant O as optimizer kernel
+    participant R as rank finite vote
+    F->>B: loss fp32, saved tensors mixed dtype
+    B->>S: scaled grads fp16/bf16/fp32
+    S->>S: unscale + found_inf
+    S->>R: finite flag for A0042
+    R-->>S: global decision
+    S->>O: step only if finite
+    O-->>S: parameter/moment mutation
+    S-->>R: U0042 candidate + new scale
+```
+
+PyTorch revision `3691693263d2b66a68867e39b7449876844e06cf`의 [`GradScaler.step`](https://github.com/pytorch/pytorch/blob/3691693263d2b66a68867e39b7449876844e06cf/torch/amp/grad_scaler.py#L330-L465)은 unscale 상태와 `found_inf`를 소비해 optimizer 호출 여부를 결정하고, [`GradScaler.update`](https://github.com/pytorch/pytorch/blob/3691693263d2b66a68867e39b7449876844e06cf/torch/amp/grad_scaler.py#L467-L540)는 scale/growth tracker를 갱신한다. autocast dispatch의 고정 C++ 경계는 [`autocast_mode.cpp`](https://github.com/pytorch/pytorch/blob/3691693263d2b66a68867e39b7449876844e06cf/aten/src/ATen/autocast_mode.cpp#L1-L180)다. 이 세 owner를 연결해야 “mixed precision을 켰다”가 어느 op dtype과 어떤 skip mutation을 뜻하는지 설명된다.
+
+수학-코드 mapping은 `L_s=sL`, `g_s=∂L_s/∂θ=s g`, `g=g_s/s`, `finite=∀_i isfinite(g_i)`이고, finite일 때만 11/12장의 optimizer 식을 평가한다. update 뒤 scale은 연속 성공 횟수와 growth/backoff factor의 state machine으로 움직인다. BF16에서 loss scaling이 항상 필요한 것처럼 일반화하지 않고 effective dtype과 framework branch를 기록한다.
+
+| object/state | shape·dtype | bytes 예 | commit oracle |
+|---|---|---:|---|
+| activation | `[8,4096]` bf16 | 64 KiB | FP32 reference tolerance |
+| scaled gradient | parameter shape fp16/fp32 | dtype×numel | unscale 전 digest |
+| `found_inf` | device별 scalar fp32 | 4 B/device | all ranks 동일 결정 |
+| loss scale | scalar fp32 | 4 B | skip/growth recurrence |
+| optimizer state | 11/12장 schema | 수백 MiB/parameter 예 | overflow 시 byte-identical |
+
+gradient 한 원소 `Inf`, rank 하나만 NaN, stale scale resume, unscale 전 clipping과 fp16 accumulation overflow를 각각 주입한다. overflow run은 parameter·moment·scheduler clock이 모두 그대로이고 attempt만 실패로 남아야 한다. 수치 증상은 [NaN 플레이북](../playbooks/01-nan.md), memory peak는 [OOM 플레이북](../playbooks/05-oom.md), 실행 baseline은 [단일 GPU golden run](../labs/28-single-gpu-golden-lab.md)에 연결한다. 15장에는 finite vote, selected kernel/dtype, parameter·gradient·optimizer-state bytes, CUDA stream completion과 `U0042` candidate를 넘긴다.

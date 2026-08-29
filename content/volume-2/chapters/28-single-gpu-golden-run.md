@@ -6,6 +6,24 @@
 
 이어 그 상태를 원자적 checkpoint로 저장해 fresh process에서 다음 batch까지 복원한다. 이 eager 기준선이 닫힌 뒤에야 compile·fusion·저정밀 같은 optimized candidate를 비교한다. 차이가 생기면 `artifact→data→forward→loss→backward→optimizer→checkpoint/resume`를 역으로 추측하지 않고 앞에서부터 최초로 갈라진 경계를 찾는다.
 
+이 장에서 앞 장들에 흩어진 계약은 처음으로 `GR-001` 한 실행에 합쳐진다. 각 노드는 다음 노드가 실제로 읽는 artifact를 만들어야 하며, 로그 메시지나 성공 exit code는 artifact를 대신하지 못한다.
+
+```mermaid
+flowchart LR
+  A[RunManifest<br/>source·env·seed] --> D[Golden BatchID]
+  D --> F[ForwardID<br/>layer sentinels]
+  F --> L[LossID<br/>sum/count]
+  L --> B[BackwardID<br/>grad ledger]
+  B --> U[UpdateID<br/>parameter/state delta]
+  U --> C[CheckpointID<br/>atomic publish]
+  C --> R[fresh-process resume]
+  R --> P{next-update parity}
+  P -->|pass| S[29장 multi-node 확장]
+  P -->|fail| X[최초 불일치 경계]
+```
+
+`GR-001`의 종료 조건은 “학습이 돌아갔다”가 아니다. 중단 없는 `U(k+1)`과 `checkpoint C(k) → 새 process → U(k+1)`이 같은 다음 sample, loss 분자·분모, gradient, parameter delta와 clock을 내는 것이다. 지원하지 않는 bitwise 동등성은 tolerance와 이유를 먼저 선언한다.
+
 ## 28.1 fixture와 실행 환경을 동결한다
 
 ### 28.1.1 RunID를 만드는 입력
@@ -1501,430 +1519,22 @@ small tensors는 값과 checksum, 큰 tensors는 selected slices·statistics와 
 
 수정 뒤 원 negative fixture가 expected invariant에서 막히고 neighboring fixtures가 유지되는지 확인한다. postmortem에 root cause, fix source, new guard와 regression ID를 연결한다.
 
-## 28.15 evidence package와 release를 독립 검토한다
+## 28.15 GR-001/Golden fork — 한 update를 독립 재생 가능한 묶음으로 봉인한다
 
-마지막 절은 새 기준값을 더 만들지 않는다. 앞 절의 config, oracle, fault result와 resume trace를 제3자가 깨끗한 process에서 재생할 수 있는 package로 묶는다. 성공 로그가 아니라 negative fixture까지 같은 경계에서 실패하는지가 release 판정의 핵심이다.
+후반의 evidence·release 증보는 아래 실행 순서로 합친다. golden run의 목적은 production 성능 흉내가 아니라 변화가 어디서 시작됐는지 판정할 작은 기준선을 만드는 것이다.
 
-### 28.15.1 단일 GPU release certificate를 만든다
+```mermaid
+flowchart LR
+ F[immutable fixture/env] --> FW[forward tensor ledger]
+ FW --> BW[backward gradient oracle]
+ BW --> U[optimizer+scheduler U0042]
+ U --> C[checkpoint CK43]
+ C --> R[fresh-process B118/U0043]
+ R --> E[evidence package + independent replay]
+```
 
-certificate는 실행한 objective, model/adapter, data/tokenizer, dependency·CUDA/GPU, dtype·kernel과 option 범위를 적는다. bytes/token/mask, forward/loss, backward, two-step optimizer와 checkpoint 결과를 표로 둔다.
+필수 artifact는 raw rows/messages, tokenizer/template, token/label/mask, model/config/parameter inventory, pre/post tensor digests, loss numerator·denominator, gradient, optimizer moments·scheduler·scaler, RNG/data cursor, environment/runtime digest와 checkpoint manifest다. 각 값은 producer·consumer·shape·dtype·bytes·tolerance를 갖는다.
 
-performance에는 valid target denominator, warmup/steady, repeats와 profiler state를 적는다. numerical failure를 speedup으로 상쇄하지 않는다. unsupported·not-executed cells를 명시한다.
+검증 순서는 forward boundary→gradient→moment/parameter delta→checkpoint object closure→next sample/update다. seed만 같다고 deterministic이라 하지 않고 bitwise·numerical·statistical grade를 분리한다. optimizer state swap, scheduler +1, RNG namespace 교환, label mask 이동, partial checkpoint와 CUDA/backend fallback을 한 번에 하나씩 주입한다. 최초 차이와 terminal resource 상태를 기록한다.
 
-failure suite에는 corrupt row, all-ignore, overflow, OOM, checkpoint kill, stale cache와 source upgrade가 있다. 모두 성공할 필요가 아니라 기대 boundary에서 올바르게 실패·복구해야 한다.
-
-독립 검토자가 manifest만으로 재생하고 다음 update까지 맞추면 certificate를 승인한다. 29장은 이 rank-local reference 위에 collective·sharding·fault를 추가한다. single GPU 결과를 cluster correctness로 확대하지 않는다.
-
-옵션 상호작용을 pairwise graph로 시험한다. mixed precision, activation checkpointing, compile, LoRA, quantized base와 packing은 각각 독립 option처럼 보여도 조합에서 새 branch를 만든다. compile+checkpointing은 recompute graph를 바꾸고, QLoRA+compile은 dequantization kernel과 graph break를 만들 수 있다. 모든 조합을 전수할 수 없다면 위험 edge를 우선한다.
-
-노드는 option과 effective state, edge는 함께 켰을 때 공유하는 module·kernel·RNG·checkpoint state다. 각 high-risk edge에 최소 fixture를 배정한다. pairwise PASS를 세 개 이상의 조합에 자동 일반화하지 않는다.
-
-조합별 requested/effective config, 소스 분기와 dispatched kernels를 비교한다. unsupported 조합이 silent fallback인지 hard error인지 확인한다. fallback이 수치적으로 맞아도 성능·memory support는 별도다.
-
-실패하면 option 하나씩 끄는 ablation으로 최초 상호작용을 좁힌다. baseline snapshot을 조합별로 무분별하게 늘리지 않고 common numerical oracle을 재사용한다. support matrix에 exact versions와 hardware를 둔다.
-
-### 28.15.2 fixture schema와 artifact를 version한다
-
-fixture는 raw rows, expected token/mask, tensor oracle, negative injection과 tolerances를 가진다. schema version이 없으면 새 field의 부재와 old fixture corruption을 구분하지 못한다. loader가 version별 required fields와 migration을 검증한다.
-
-expected outputs는 source data·model과 별도 content-addressed artifact다. 같은 코드가 계산한 값으로 즉시 expected를 덮어쓰면 공통 오류를 잡지 못한다. 독립 계산, old signed baseline과 reviewer 승인을 요구한다.
-
-tolerance는 tensor/metric별 absolute·relative, dtype와 shape 범위를 가진다. 하나의 넓은 epsilon으로 모든 값을 통과시키지 않는다. NaN/Inf는 tolerance 비교 전에 실패한다. discrete IDs·masks와 parameter ownership은 exact다.
-
-fixture migration은 old/new를 같은 runner에서 실행해 의미 차이를 설명한다. old fixture를 삭제해 historical regression을 잃지 않는다. deprecated support는 reason과 last-valid environment를 보존한다.
-
-### 28.15.3 negative fixture가 예상 경계에서 실패하게 한다
-
-wrong tokenizer, swapped labels, all-ignore row, stale cache, duplicate parameter, Inf gradient, corrupt checkpoint와 adapter-base mismatch를 의도적으로 만든다. 단순히 run이 실패하는 것으로는 부족하다. 각각 admission, collator, loss, optimizer 또는 loader의 기대 boundary에서 고유 reason으로 실패해야 한다.
-
-너무 늦은 실패는 bad state가 이미 durable해졌을 수 있다. 예를 들어 wrong tokenizer가 evaluation에서만 발견되면 여러 updates가 오염됐다. invariant를 가능한 최초 owner에 둔다. validation cost가 큰 경우 preflight sample과 periodic full audit를 조합한다.
-
-negative injection은 production code의 hidden backdoor가 되지 않게 test harness에서만 활성화한다. injection flag, target와 expected error를 artifact에 남긴다. 성공 경로에 같은 flag가 들어가지 않았는지 확인한다.
-
-fix 뒤 negative가 통과해버리면 guard regression이다. error message string exact match보다 structured error code와 boundary를 검증한다. 인접 valid fixture가 계속 통과하는지 본다.
-
-CI에서 golden run을 어떻게 나눈다. 매 commit에는 CPU/static schema·token/mask·small math tests를 실행할 수 있다. GPU smoke에는 forward/backward·one update와 critical negative fixtures를 둔다. nightly에는 two-step, checkpoint kill, compile·dtype와 performance repeats를 실행한다.
-
-hardware 비용 때문에 모든 GPU architecture를 매 commit 테스트할 수 없다. change impact graph로 CUDA/kernel·dtype changes를 relevant cells에 라우팅한다. scheduled matrix는 오래된 지원 조합과 최신 조합을 모두 포함한다.
-
-CI retry가 flaky failure를 숨기지 않게 첫 실패 artifact를 보존한다. retry count와 success pattern을 metric으로 둔다. infrastructure error와 product regression을 disposition하되 unknown을 PASS로 바꾸지 않는다.
-
-baseline regeneration job은 일반 CI와 권한을 분리한다. PR 코드가 expected를 동시에 바꾸면 독립 review가 필요하다. performance threshold는 noise와 runner health를 고려하되 numerical gates는 완화하지 않는다.
-
-GPU 환경 fingerprint를 정확히 남긴다. GPU name만으로 동일 환경이 아니다. UUID 또는 stable device identity, compute capability, memory size, power/clock policy, MIG mode, driver와 firmware, PCIe link와 thermals를 기록한다. 공유 환경에서는 다른 process와 utilization도 본다.
-
-loaded CUDA runtime, cuBLAS/cuDNN/NCCL, extension build flags와 PTX/cubin target을 남긴다. `nvcc --version` 하나가 Python process가 실제 load한 library를 증명하지 않는다. container와 host driver 경계를 구분한다.
-
-performance run은 power limit, clocks와 temperature를 관측한다. correctness run은 하드웨어 오류·ECC event가 없는지 확인한다. single GPU에서 NVLink/NCCL topology를 추론하지 않는다.
-
-환경 fingerprint가 다르면 exact performance baseline을 바로 비교하지 않는다. numerical/behavioral portability와 performance support를 분리한다. 새 fingerprint는 child evidence cell이다.
-
-memory snapshot을 tensor lifetime과 연결한다. allocated blocks 목록만으로 어떤 tensor가 살아 있는지 알기 어렵다. phase markers와 saved-tensor hooks, module boundaries를 제한적으로 사용해 large allocations의 owner를 찾는다. hook overhead를 별도 run으로 둔다.
-
-forward peak에는 attention/MLP activations, backward에는 saved tensors와 gradients, optimizer에는 moments·workspace가 있다. checkpointing은 saved activation을 줄이지만 recompute temporary를 만든다. compile은 memory planning을 바꾼다.
-
-Python reference, callback와 retained outputs가 GPU tensor를 붙들 수 있다. loss history에 tensor 자체를 append하지 않는지 확인한다. `detach().cpu()`도 H2D/D2H와 host memory 비용을 가진다.
-
-leak fixture는 동일 step을 반복해 allocated/reserved trend와 live object를 본다. allocator cache 성장은 leak와 다르다. `empty_cache` 뒤 숫자만으로 판정하지 않고 active blocks와 reachability를 본다.
-
-small overfit을 올바르게 해석한다. 8~32개 examples를 반복해 near-zero training loss에 접근하는 시험은 labels, gradient와 optimizer가 연결됐는지 보는 강한 smoke다. pretrained stochasticity, label smoothing와 noisy/multiple targets가 있으면 zero가 기대값이 아닐 수 있다. objective별 예상 floor를 정한다.
-
-overfit이 안 되면 learning rate, trainable inventory, loss mask, dropout·augmentation와 data duplication을 본다. eval mode로 우연히 dropout을 끈 결과와 training path를 구분한다. capacity가 너무 작은 fixture인지도 확인한다.
-
-overfit 성공은 generalization, data quality와 distributed correctness를 보장하지 않는다. 오히려 leakage·label shortcut으로 너무 빨리 맞을 수 있다. held-out counterexample와 shuffled-label control을 둔다.
-
-curve는 successful update와 valid targets x축으로 본다. skipped overflow와 corrupt rows가 있으면 wall-clock step과 다르다. selected sample predictions와 margins를 추적한다.
-
-deterministic 모드의 의미와 비용. framework deterministic algorithms option은 알려진 nondeterministic operations를 error 또는 deterministic implementation으로 바꿀 수 있다. 모든 hardware·library·data order의 bitwise 재현을 보장하지 않는다. exact supported scope를 기록한다.
-
-deterministic mode가 fallback kernel과 성능 저하를 만들 수 있다. correctness debug run과 production-like performance run을 분리한다. 두 경로의 numerical difference와 dispatch를 비교한다.
-
-atomic reduction, stochastic rounding, asynchronous worker와 uninitialized memory가 nondeterminism을 만들 수 있다. seed만 반복하기보다 first-divergence distribution을 본다. tolerance 내 차이도 final behavior에 amplification될 수 있다.
-
-reproducibility 등급을 bitwise, numerical, behavioral와 statistical로 나눈다. 어떤 artifact와 환경에서 어느 등급을 달성했는지 certificate에 쓴다. 요구보다 낮은 등급이면 reason과 compensating tests를 둔다.
-
-resume와 dataloader prefetch의 틈을 검사한다. checkpoint cursor가 consumed batch를 가리키는지 yielded·prefetched batch를 가리키는지 확인한다. worker queue에는 아직 trainer가 소비하지 않은 rows가 있을 수 있다. save 뒤 process가 죽으면 재시작에서 duplicate 또는 skipped samples가 생긴다.
-
-strict replay가 필요하면 batch plan과 consumed acknowledgements를 ledger에 둔다. safe update boundary에서 cursor를 commit하고, prefetch는 재생 가능하게 만든다. 성능과 exactness의 tradeoff를 명시한다.
-
-augmentation RNG는 sample identity와 epoch/occurrence에서 stateless하게 만들면 worker count 변화에 강할 수 있다. global RNG 방식이면 worker state와 queue를 복구해야 한다. 실제 transform source를 확인한다.
-
-duplicate replay가 허용되는 at-least-once policy라면 optimizer update와 data exposure accounting에 반영한다. exactly-once라고 과장하지 않는다. deletion/tombstone rows는 resume admission에서 다시 검사한다.
-
-산출물·구조 변경·진단 절차를 독립 검토한다. checkpoint와 export를 다른 산출물로 관리한다. training checkpoint는 model, optimizer, scheduler, scaler, RNG와 data cursor를 포함한다. inference export는 merged weights, quantization과 serving config를 가질 수 있지만 resume state는 없다. 두 artifact를 같은 `latest` alias 아래 섞지 않는다.
-
-adapter-only, full merged, quantized와 sharded exports는 parent checkpoint와 transformation edge를 가진다. tool revision, dtype/layout와 digest를 기록한다. export 성공 뒤 golden inference fixture를 실행한다.
-
-training resume loader가 export-only artifact를 받으면 required keys 부족으로 fail-closed해야 한다. serving loader도 incomplete optimizer shards를 무시하고 model weights로 추측하지 않는다. artifact kind와 schema를 검증한다.
-
-rollback은 목적별 alias를 parent 종류에 맞게 되돌린다. training continuation과 serving release가 같은 시점일 필요는 없다. lineage가 둘의 관계를 설명한다.
-
-tokenizer·template upgrade는 model upgrade다. weights가 같아도 tokenizer vocabulary, normalization, special IDs와 chat template가 바뀌면 input IDs와 labels가 달라진다. upgrade를 단순 preprocessing patch로 처리하지 않는다. fixed raw conversations의 rendered bytes·IDs·masks를 old/new로 diff한다.
-
-vocabulary resize가 있으면 embedding/head rows, tied state와 optimizer moments를 migrate해야 한다. 새 token initialization과 no-decay group을 기록한다. old checkpoint loader가 shape mismatch를 어떻게 처리하는지 본다.
-
-template role marker 변화는 assistant loss span과 generation stop을 바꾼다. SFT, DPO와 serving parity를 함께 평가한다. response-only collator가 새 marker를 찾지 못해 all-ignore가 되는 negative fixture를 둔다.
-
-cache와 tokenized shards는 tokenizer/template generation으로 무효화한다. raw path와 model name만 key로 쓰지 않는다. upgrade child는 새 training generation이다.
-
-model architecture upgrade의 state mapping. layer 수, hidden width, attention heads, MLP와 norm이 바뀌면 old weights를 어떻게 이관할지 명시한다. `strict=False` load가 missing/unexpected keys를 숨길 수 있다. 모든 disposition을 allowlist한다.
-
-head count만 바뀌어도 QKV layout과 RoPE mapping이 달라질 수 있다. reshape가 성공한다고 의미가 맞지 않는다. small tensor pattern을 넣어 conversion 전후 index mapping을 검증한다.
-
-MoE expert 추가·제거는 router·experts와 optimizer state를 바꾼다. random init, clone 또는 merge 정책을 기록하고 load balance fixture를 둔다. dense→MoE를 동일 resume로 부르지 않는다.
-
-architecture conversion 뒤 forward, selected activations, loss와 one/two updates를 새 baseline으로 검증한다. old result와 exact equality가 목표가 아닐 수 있지만 변환 의도와 차이를 설명한다.
-
-source function을 실제 call trace와 맞춘다. 문서에 `Trainer.training_step`이나 `AdamW.step`을 적었다고 우리 run이 그 symbol을 호출한 것은 아니다. subclass override, Accelerate wrapper, compiled function와 fused optimizer가 다른 경로를 탈 수 있다. loaded class와 lightweight call trace를 확인한다.
-
-소스 기록에는 caller→callee, guard condition, input/output state와 revision을 둔다. line number는 commit과 함께 사용한다. dynamic code 또는 remote code는 별도 trust boundary다.
-
-trace instrumentation이 dispatch를 바꾸지 않는지 paired run으로 본다. Python profiler가 fused path를 fallback시키는 경우가 있다. source-static evidence와 runtime-selected evidence를 구분한다.
-
-upgrade 뒤 symbol 이름이 같아도 body·guard가 바뀔 수 있다. content hash와 golden behavior를 함께 갱신한다. comment나 docstring만으로 state transition을 주장하지 않는다.
-
-실용 디깅 순서로 독립 재생한다. 디버깅은 artifact와 effective config의 diff에서 시작해 raw bytes→IDs·labels·mask 비교로 이어 간다. 여기까지 같다면 parameter init와 first logits, loss numerator/count, gradients·clipping·skip을 차례로 확인한다. 마지막으로 optimizer delta와 restored next update를 비교한다.
-
-이 순서는 최종 metric에서 거꾸로 추측하는 일을 막는다. source가 바뀌었더라도 first divergence가 data라면 kernel을 조사하지 않는다. logits까지 같고 gradient가 다르면 backward·loss scaling을 본다.
-
-각 boundary에 pass/fail/not-captured와 artifact locator를 둔다. capture가 없으면 “같다”고 쓰지 않는다. 조사 중 새 관측을 추가하되 baseline run을 오염시키지 않는다.
-
-수정 뒤 같은 순서로 root cause가 사라졌고 downstream update가 회복됐는지 확인한다. expected snapshot을 먼저 바꾸지 않는다. 인접 negative fixtures와 performance를 재실행한다.
-
-단일 GPU에서 끝내지 말아야 할 것. collective order, rank-local shard, all-reduce denominator, pipeline bubbles, network·NCCL failure와 distributed checkpoint는 한 GPU에서 증명할 수 없다. single GPU에서 mock한 collective는 수학 oracle일 뿐 실제 transport evidence가 아니다.
-
-반대로 data/token/loss/optimizer 의미를 single GPU에서 못 맞춘 채 cluster로 가면 divergence 원인을 병렬화 탓으로 오인한다. rank-local oracle과 expected global reduction을 먼저 고정한다.
-
-29장에 넘길 항목은 canonical batches, per-sample loss sums/counts, selected gradients·weights, optimizer next state, RNG plan와 checkpoint schema다. target topology와 collectives는 미실행으로 명시한다.
-
-cluster result는 이 package를 확장하며 덮어쓰지 않는다. single GPU baseline과 distributed child의 first divergence를 비교한다. 이 경계가 규모 확장의 출발점이다.
-
-데이터 오류를 optimizer 전에 차단하는 표. 입력 admission은 raw checksum, schema, encoding, length와 rights/tombstone을 확인한다. tokenizer 단계는 special IDs, template와 round trip 범위를 본다. collator는 labels, mask, position, packing boundary와 valid target count를 확인한다. 각 단계는 고유 disposition을 낸다.
-
-corrupt row를 skip할지 run을 중단할지는 정책이다. skip하면 SampleID, reason과 lost target mass를 기록한다. replacement sample을 뽑으면 data order·RNG가 바뀐다. 조용한 replacement를 금지한다.
-
-outlier length, duplicate SampleID와 all-ignore row를 fixture에 넣는다. 정확히 어느 boundary에서 차단되는지 확인한다. invalid row가 model forward까지 갔다면 admission owner를 앞당긴다.
-
-권리 tombstone은 cache·prefetch 뒤에도 재검사할 수 있어야 한다. golden run에서도 삭제된 row가 resume queue에서 살아나는 negative fixture를 둔다. 데이터 correctness와 governance를 별개라 하지 않는다.
-
-model initialization을 content hash로만 보지 않는다. random initialization은 architecture, initializer 함수, seed, parameter creation order와 dtype의 결과다. seed가 같아도 module 등록 순서나 fused initialization이 바뀌면 weights가 달라질 수 있다. selected parameter statistics와 digest를 저장한다.
-
-pretrained load에서는 expected, missing, unexpected, resized와 transformed keys를 disposition한다. `strict=False`가 성공했다고 올바른 load가 아니다. tied aliases와 device/dtype cast를 확인한다.
-
-adapter initialization은 base activation이나 quantization에 의존할 수 있다. LoftQ·PiSSA류는 data/sample, SVD와 precision을 state로 갖는다. standard LoRA zero-effective delta와 같은 expected를 쓰지 않는다.
-
-initial checkpoint를 저장해 repeated attempts가 동일 start를 사용할 수 있게 한다. initialization code 변경을 training instability로 오인하지 않는다. first forward 전에 parameter inventory를 승인한다.
-
-한 layer씩 freeze·unfreeze를 검증한다. freeze policy는 config pattern보다 actual parameters의 `requires_grad`, optimizer inclusion과 train/eval mode다. module별 trainable count와 qualified names를 출력한다. frozen dropout/stochastic depth가 동작하는지도 별도다.
-
-unfreeze 시 새 optimizer group을 추가하거나 optimizer를 재생성한다. moments, step age, LR·weight decay를 어떻게 시작할지 정한다. old scheduler가 group 수와 ordering을 지원하는지 확인한다.
-
-fixture는 projector, 마지막 transformer block, norm·head를 단계적으로 연다. expected gradients와 first update를 본다. accidentally trainable base나 omitted adapter를 negative fixture로 둔다.
-
-checkpoint 전후 trainable inventory와 optimizer state가 같다. stage transition은 일반 resume와 다른 child generation이다. 이전 stage의 cache·feature가 유효한지도 검토한다.
-
-gradient hooks를 진단용으로 안전하게 쓴다. hook는 gradient norm, None·nonfinite와 selected tensor를 볼 수 있지만 반환값으로 gradient를 바꾸거나 reference를 보존할 수 있다. read-only hook와 transform hook를 구분한다. golden baseline에는 필요한 최소 hook만 둔다.
-
-shared/tied parameter에는 hook 호출 수와 accumulation 의미가 다를 수 있다. module backward hook보다 parameter hook가 원하는 객체를 보는지 확인한다. activation checkpointing 재실행도 고려한다.
-
-hook output은 detached aggregate와 limited slice로 저장한다. full gradient dump는 memory·I/O와 민감 정보 위험이 있다. anomaly trigger 때만 restricted artifact를 만든다.
-
-hook off paired run에서 weights·updates가 같은지 본다. instrumentation이 graph capture나 compile을 깨면 별도 debug generation으로 처리한다. 관측 도구가 권위 state를 바꾸지 않게 한다.
-
-optimizer zero_grad의 set-to-none 의미. `zero_grad(set_to_none=True)`는 gradient tensor를 0으로 채우는 대신 None으로 만든다. optimizer가 None gradient parameter를 skip하는지 zero gradient와 동일하게 weight decay·moment를 적용하는지 source에서 확인한다. 둘은 항상 같지 않다.
-
-unused branch, frozen parameter와 실제 zero derivative를 구분하려면 None/zero가 중요하다. accumulation 시작과 optimizer step 뒤 expected state를 검사한다. stale gradient가 다음 update에 남는 negative fixture를 둔다.
-
-gradient clipping과 norm calculation이 None parameters를 어떻게 제외하는지 본다. adapter target이 한 batch에서 unused일 때 optimizer state가 어떻게 진행하는지도 확인한다.
-
-checkpoint가 gradient를 저장하지 않는다면 accumulation 중간 resume 정책과 연결한다. zero_grad timing을 step event ledger에 넣는다. callback이 너무 일찍 gradients를 지우지 않게 한다.
-
-weight decay parameter group을 검사한다. bias와 normalization weight를 no-decay로 두는 관습은 module/parameter 이름 규칙으로 구현될 수 있다. 이름 substring만 사용하면 custom modules를 잘못 분류할 수 있다. actual module type, parameter identity와 group을 inventory한다.
-
-tied embedding/head가 서로 다른 group에 중복 들어가면 오류다. adapter matrices, embeddings, sparse memory와 MoE experts의 policy를 명시한다. Muon과 AdamW split도 group ownership이다.
-
-selected scalar에서 decay-only update를 손으로 계산한다. gradient 0과 None의 동작을 구분한다. fused optimizer가 group option을 실제 적용하는지 next weight에서 확인한다.
-
-architecture·adapter upgrade 뒤 parameter names가 바뀌면 allowlist diff를 review한다. 새 parameter를 default group에 조용히 넣지 않는다. checkpoint optimizer group mapping도 qualified identity로 검증한다.
-
-loss component가 optimizer에 실제로 연결되는지 본다. LM loss, auxiliary router/load-balance, contrastive, KL와 safety reward가 total에 더해질 수 있다. logging scalar만 존재하고 total graph에 연결되지 않은 component를 찾는다. 각 component의 gradient를 selected parameter에서 따로 계산할 수 있다.
-
-weight가 0인 component는 expected zero gradient이고, detached metric은 관측용이다. weight schedule과 runtime effective value를 기록한다. NaN component를 `nan_to_num`으로 숨기는 정책은 disposition을 남긴다.
-
-component별 numerator/count와 global total equation을 손으로 맞춘다. 서로 다른 단위를 평균 하나로 합치기 전에 normalization을 검토한다. local batch에서 없는 component의 zero-count policy를 정한다.
-
-한 component를 disable한 paired run에서 예상 parameter delta가 사라지는지 본다. 이것이 objective wiring의 강한 fixture다. performance effect는 별도로 측정한다.
-
-tied weights와 optimizer serialization. input embedding과 LM head가 tied라면 checkpoint save/load 뒤에도 alias가 유지되는지 확인한다. 두 별도 tensors로 로드돼 값만 같은 상태는 다음 update에서 갈라질 수 있다. storage identity와 gradient accumulation을 본다.
-
-safetensors 같은 format은 tensor alias 표현에 제한이 있을 수 있어 framework save/load 정책이 canonical key와 re-tying을 담당한다. missing duplicate key를 corruption으로 오인하지 않고 model contract를 따른다.
-
-optimizer state는 logical parameter 하나에 하나여야 한다. duplicate parameter registration이나 load mapping이 moments를 두 벌 만들지 않는지 확인한다. vocabulary resize 뒤 tied state migration을 시험한다.
-
-fixture는 save 전 한 row update, load 뒤 alias, 다음 update와 output head를 비교한다. merge·quantization export에서도 tied semantics가 어떻게 변하는지 명시한다.
-
-tokenizer vocabulary resize의 골든 절차. 새 special token을 추가하면 tokenizer length, model embedding와 LM head rows를 resize한다. new row initialization, padding multiple와 tied relation을 기록한다. special ID가 template와 config에 일치하는지 본다.
-
-optimizer가 이미 존재하면 resized parameter identity와 state migration 문제가 생긴다. resize를 optimizer 생성 전에 할지, moments를 확장할지 정책을 둔다. old parameter state를 새 object에 잃지 않았는지 확인한다.
-
-old tokens의 embedding rows가 bitwise 또는 tolerance 내 보존되는지, new token만 초기화됐는지 검사한다. shifted IDs가 발생하는 tokenizer migration은 단순 row append와 다르다.
-
-checkpoint·adapter는 vocabulary generation을 참조한다. old adapter의 modules-to-save head shape가 새 base와 맞는지 본다. serving tokenizer와 training export parity를 재검증한다.
-
-exact·numerical·behavioral oracle의 우선순위. IDs, labels, masks, SampleID order, parameter ownership와 checkpoint inventory는 exact여야 한다. float tensors는 dtype·kernel에 따라 numerical tolerance를 사용한다. generation text와 metric은 behavioral/statistical oracle이 될 수 있다.
-
-아래 단계의 느슨한 oracle로 위 단계의 exact mismatch를 가리지 않는다. token IDs가 다른데 final loss가 비슷하다고 PASS하지 않는다. checkpoint keys가 빠졌는데 next loss 한 번이 맞아도 resume complete가 아니다.
-
-tolerance는 baseline variance와 수치 분석에서 정한다. 결과를 본 뒤 넓히지 않는다. max·mean error, relative scale와 downstream delta를 보고한다. distributional metric은 seeds와 interval을 가진다.
-
-certificate는 각 boundary의 oracle 등급을 표시한다. hardware upgrade에서 bitwise가 불가능해도 numerical·behavioral을 증명할 수 있지만 exact fields는 유지한다. 지원 요구와 실제 달성 등급을 비교한다.
-
-baseline 승격의 독립 검토. 새 source·dependency가 의도적으로 numerical result를 바꿀 수 있다. 먼저 old baseline 실패와 first divergence를 설명한다. 논문·source change가 새로운 수식을 요구하는지, bug fix인지, kernel rounding인지 구분한다.
-
-새 expected는 candidate code와 독립 reference 또는 hand calculation으로 검증한다. 같은 함수가 output과 snapshot을 둘 다 만들지 않는다. reviewer는 old/new tensors, tolerance와 downstream effect를 본다.
-
-승격 commit은 reason, affected fixtures, environment와 approver를 가진다. old artifact를 보존한다. performance 개선 때문에 numerical mismatch를 승인하지 않는다.
-
-baseline change 뒤 negative fixtures가 여전히 실패하고 checkpoint next update가 일관되는지 전수 실행한다. 29장의 distributed reference가 stale가 되므로 dependency graph를 따라 재검증한다.
-
-flaky failure를 통계로 숨기지 않는다. 100번 중 한 번 hang·NaN이 나면 평균 성공률 99%로 승인할 수 없다. failure class, seed, input, thermal·memory와 event order를 보존한다. reproduce budget과 confidence를 사전 계획한다.
-
-flaky가 hardware·driver·race인지 source logic인지 양분한다. deterministic mode, stream sync와 reduced concurrency는 진단용 counterfactual이다. debug option에서 사라졌다는 사실만으로 root cause를 확정하지 않는다.
-
-retry-to-green CI는 첫 실패 artifact를 유지하고 flaky ledger를 증가시킨다. recurrence threshold와 owner, quarantine policy를 둔다. critical checkpoint corruption은 낮은 빈도라도 hard fail이다.
-
-fix 뒤 failure injection과 long-enough repeat를 수행한다. 0 observed가 probability 0은 아니므로 실행 범위와 upper bound를 적는다. production monitoring으로 남은 risk를 이어받는다.
-
-data checksum과 semantic checksum. raw file hash는 bytes가 같은지 보장하지만 sample selection·decode·normalization 의미는 보장하지 않는다. dataset generation은 row IDs, schema, transformation code와 counts를 가진다. sample-level processed digest를 golden fixture에 둔다.
-
-Parquet/JSON ordering, locale·Unicode normalization과 library decoder가 결과를 바꿀 수 있다. logical rows를 canonical serialization로 hash할지 정의한다. float/media transforms는 numerical digest 범위를 사용할 수 있다.
-
-semantic checksum은 label distribution, token lengths, source mixture와 valid target totals 같은 summary다. exact checksum을 대신하지 않고 large dataset drift를 조기에 찾는다. matched counts가 same data를 증명하지 않는다.
-
-golden RunSpec은 immutable small subset의 exact processed artifacts를 가진다. full corpus는 manifest와 sampling proof를 연결한다. data upgrade가 model source upgrade와 함께 일어나면 axes를 분리한다.
-
-evaluation fixture를 training fixture와 분리한다. training golden batch는 gradient와 update를 검증하고 evaluation fixture는 generation·metric·normalization을 검증한다. 같은 examples를 써도 역할과 leakage를 명시한다. private benchmark를 training overfit fixture로 사용하지 않는다.
-
-generation은 prompt bytes·IDs, decode, stop와 max tokens를 고정한다. metric은 raw output, parser, normalization과 denominator를 가진다. callback의 model mode와 RNG 복구도 본다.
-
-evaluation failure가 checkpoint save·best model selection에 어떤 영향을 주는지 시험한다. missing score를 0이나 이전 value로 위장하지 않는다. best alias는 metric generation을 참조한다.
-
-24장의 evaluator/judge revision을 가져오되 single GPU golden은 작은 harness cell만 검증한다. 전체 benchmark 성능을 주장하지 않는다. objective와 evaluation code upgrade를 독립 axes로 둔다.
-
-한 번의 성공을 reproducible package로 바꾼다. package에는 immutable manifest, source/dependency lock, raw+processed fixture, command, environment fingerprint와 expected artifacts가 있다. output은 events, selected tensors, checkpoint와 report를 content-addressed 경로에 쓴다.
-
-새 작업자는 숨은 shell history나 mutable cache 없이 실행할 수 있어야 한다. 필요한 credentials·external services는 없거나 명시적 stub을 쓴다. network access가 필요하면 source pin과 offline mirror 정책을 둔다.
-
-runner는 preflight, run, validate와 package 단계를 분리한다. validation 실패 시 artifact를 보존하고 baseline을 갱신하지 않는다. cleanup이 evidence를 지우지 않게 한다.
-
-README는 단계 설명보다 실패 시 first-divergence 경로와 support 범위를 쓴다. machine-readable ledger와 사람이 읽는 summary가 같은 RunID를 사용한다. 재생 결과를 parent에 덮지 않는다.
-
-골든 런에서 하지 말아야 할 성능 주장. 작은 model·sequence의 tokens/s를 대규모 training throughput으로 외삽하지 않는다. kernel occupancy, memory bandwidth, communication과 data pipeline regime이 다르다. golden은 회귀와 경로 확인에 적합하다.
-
-한 GPU 결과로 multi-node scaling, NCCL overlap이나 checkpoint filesystem 성능을 말하지 않는다. compile warmup이 지배하는 short run의 평균을 steady speedup으로 쓰지 않는다. profiler-on 결과를 production baseline으로 쓰지 않는다.
-
-hardware·dtype·shape를 실제 실행하지 않았다면 source support와 runtime result를 구분한다. “지원 가능”과 “검증됨”을 별도 status로 둔다. vendor peak 수치를 measured throughput처럼 쓰지 않는다.
-
-성능 결론에는 denominator, repetitions, variance, environment와 numerical gates가 있다. 최적 option 하나만 보고하지 않고 baseline과 cost·memory·fallback을 함께 둔다.
-
-실패 복구 실습의 완결 조건. corrupt data는 admission에서, wrong label은 oracle에서, Inf gradient는 optimizer commit 전에, OOM은 phase trace에서, checkpoint kill은 parent fallback에서, stale dependency는 preflight에서 검출한다. 각 실패의 EvidenceID를 연결한다.
-
-복구는 단순 rerun이 아니다. bad artifacts를 quarantine하고 last complete parent, data cursor와 RNG를 선택한다. duplicate/skip policy를 적용한다. root cause guard를 추가한다.
-
-수정 뒤 original failing case, neighboring valid와 negative suite, checkpoint next update와 performance를 재검증한다. incident report에는 symptom, first divergence, cause, fix와 regression fixture가 있다.
-
-새 작업자가 같은 report로 failure를 재주입하고 expected recovery를 얻으면 runbook이 실행 가능하다. 사람의 기억에 의존하면 미완성이다. recovery path도 package 일부다.
-
-29장에 넘길 수학 oracle. canonical global batch의 per-sample loss sums/counts와 concatenated reference를 저장한다. selected parameter의 per-sample 또는 microbatch gradients, accumulated global gradient와 expected AdamW/Muon update를 둔다.
-
-분산 DP에서는 rank-local sums/counts를 어떤 collective로 합칠지 식을 제공한다. TP/PP/CP에서는 global logical tensor와 expected shard layout을 제공한다. single GPU가 actual collectives를 증명하지는 않는다.
-
-RNG는 global sample plan과 rank derivation policy를 제안하되 target world size에서 검증 전 `NOT_RUN`이다. checkpoint schema는 logical keys와 shard-independent digest를 제공한다.
-
-29장은 collective ordinal, process groups, communication bytes와 failure를 추가한다. global reconstructed loss·gradient·next update가 oracle와 맞아야 한다. 차이가 있으면 first divergent boundary를 찾는다.
-
-30장에 넘길 recipe option evidence. 각 option은 requested/effective value, parser/source guard, affected state, checkpoint field, observability와 golden fixture를 가진다. batch, accumulation, packing, precision, compile, adapter, checkpoint와 evaluation options를 포함한다.
-
-option 조합의 known support와 conflict, fallback을 표로 둔다. default는 dependency/hardware에 따라 바뀔 수 있으므로 resolved value를 기록한다. unknown·deprecated는 disposition한다.
-
-30장의 end-to-end recipe는 이 option evidence를 data/model/objective 선택과 연결한다. 숫자를 복사하지 않고 어떤 상황에서 어떤 효과·위험이 있는지 설명한다. actual scale run은 별도 evidence다.
-
-recipe upgrade가 option semantics를 바꾸면 golden fixture와 source anchor를 stale로 돌린다. reader가 옵션을 바꿨을 때 어느 tensor·state·metric이 변할지 예측할 수 있어야 한다.
-
-승인자가 답해야 할 반증 질의. 인수자는 RunID 하나에서 raw SampleID, tokens·mask, first logits, loss numerator/count, selected gradient, optimizer delta와 checkpoint next update를 차례로 조회한다. 각 값은 source·artifact와 oracle을 가진다.
-
-그다음 option 하나를 바꾸어 effective branch와 invalidated evidence를 예측한다. compile은 graph/kernel, mixed precision은 casts/scaler, packing은 mask/denominator, adapter는 parameter ownership을 바꾼다. 실제 child result와 맞는지 본다.
-
-마지막으로 corrupt row와 checkpoint kill을 주입한다. expected boundary에서 실패하고 last complete parent로 복구하며 SampleID/RNG/update clock이 정책과 맞아야 한다. stale artifact가 latest로 보이면 실패다.
-
-이 세 질의가 재생되고 실행하지 않은 hardware·topology cells가 명시되면 단일 GPU golden package를 승인한다. 승인은 training 전체가 옳다는 선언이 아니라 다음 규모와 변경을 비교할 강한 좌표계의 완성이다.
-
-오류 메시지보다 상태 전이를 테스트한다. 예외 문구는 dependency release마다 바뀔 수 있다. golden negative test는 error code, 실패 boundary, durable artifact 부재와 parent 유지 같은 상태를 본다. 문자열 한 줄 exact match로 취약하게 만들지 않는다.
-
-예외가 잡힌 뒤 trainer가 계속 실행하는지, retry하는지, run을 중단하는지도 검증한다. fatal corruption을 skip으로 바꾸거나 transient I/O를 영구 failure로 처리하면 운영 의미가 달라진다. disposition policy를 source와 manifest에 둔다.
-
-부분 state가 memory·disk에 남으면 다음 attempt가 읽지 않게 quarantine한다. callback이 failure를 PASS metric으로 덮지 않는지 확인한다. 실패 event와 cleanup event를 같은 AttemptID에 연결한다.
-
-golden artifact의 최소 보존과 privacy. 재현을 위해 raw prompts와 full gradients를 무제한 보존할 필요는 없다. public/synthetic fixture를 우선하고 민감 row는 restricted locator, checksum과 redacted view를 사용한다. artifact별 access와 retention을 둔다.
-
-token IDs도 rare sequence에서 정보를 노출할 수 있고 gradients는 data leakage 위험이 있다. selected aggregate·slice만 보존하며 원본이 필요한 경우 권한을 제한한다. tracker·profiler upload 전에 redaction한다.
-
-삭제 요청은 fixture, caches, checkpoints와 reports의 lineage를 따라 처리한다. baseline 재현성 때문에 rights floor를 무시하지 않는다. 허용된 대체 fixture로 child baseline을 만든다.
-
-증거 접근이 제한되면 authorized verifier가 digest·counts와 pass attestation을 제공할 수 있다. 독자는 그 제한을 알아야 한다. inaccessible artifact를 자동 success로 세지 않는다.
-
-notebook보다 runner를 권위로 둔다. notebook은 탐색과 설명에 유용하지만 cell 실행 순서, hidden state와 수동 수정이 재현성을 해친다. canonical golden은 non-interactive runner와 immutable config로 실행한다. notebook은 runner artifact를 읽어 시각화한다.
-
-노트북에서 발견한 계산은 script/unit fixture로 옮긴다. output screenshot이 아니라 machine-readable values와 oracle을 저장한다. kernel restart 뒤 처음부터 실행 가능한지 본다.
-
-환경 설치와 data download도 runner preflight 또는 documented immutable step으로 둔다. 개인 cache에 우연히 있던 file을 사용하지 않는다. network-disabled replay 가능성을 높인다.
-
-설명용 notebook이 baseline을 갱신하거나 production alias를 바꿀 권한을 갖지 않는다. 탐색과 승인 경계를 분리한다.
-
-한 장짜리 golden 결과표. 행은 input, token/mask, forward, loss, backward, optimizer, checkpoint, memory, performance와 failures다. 열은 expected, observed, oracle grade, tolerance, source, artifact와 status다. 빈 셀은 `NOT_CAPTURED` 또는 `NOT_RUN`이다.
-
-옵션 표는 effective value, selected branch, state changed, metric와 invalidated fixtures를 보여준다. environment 표는 source/dependency/CUDA/GPU fingerprint를 가진다. 세 표의 RunID가 같아야 한다.
-
-summary는 pass 개수보다 first failure와 support 범위를 앞에 둔다. 성능 개선은 numerical gates 뒤에 쓴다. retry와 flaky disposition을 숨기지 않는다.
-
-independent reviewer는 표의 임의 셀에서 raw artifact와 source로 이동한다. 링크가 끊기면 수치를 추정하지 않는다. 이 표가 29·30장의 인수 입력이다.
-
-독자가 직접 고칠 첫 세 버그. assistant loss mask one-off는 token 표와 valid count에서 찾아 collator boundary를 수정한다. forward가 실행됐다는 사실만으로 문제를 넘기지 말고, 수정 뒤 원 fixture와 인접 fixture를 재실행한다.
-
-optimizer group에서 adapter module 하나가 누락된 문제는 trainable inventory와, gradient는 있지만 weight delta가 없는 trace로 찾는다. 누락된 parameter identity를 group에 추가한 뒤 state initialization과 checkpoint를 검증한다.
-
-checkpoint가 RNG와 sampler cursor를 저장하지 않으면 restored loss가 같아도 다음 batch, dropout과 update가 달라진다. 이 차이를 확인한 뒤 state schema를 확장하고 kill/resume로 수정 결과를 증명한다.
-
-세 버그는 data, optimization와 durability라는 서로 다른 경계를 가르친다. 최종 loss 하나만 보면 모두 늦게 발견된다. first-divergence 방식이 실용적인 이유다.
-
-golden에서 production으로 확대할 때 다시 물을 것. model·sequence·batch가 커지면 kernel, memory, compile와 numerical regime가 바뀐다. single GPU fixture가 같은 code path를 계속 타는지 확인한다. 새 shape class는 child evidence다.
-
-world size가 늘면 data denominator, RNG, parameter sharding, collectives와 checkpoint가 추가된다. single GPU PASS를 복사하지 않는다. global logical oracle와 rank-local trace를 비교한다.
-
-data corpus가 커지면 duplicate, rights, tail lengths와 worker failures가 등장한다. immutable golden subset은 그대로 유지하면서 full pipeline sampling audit를 추가한다. small fixture만으로 data quality를 주장하지 않는다.
-
-운영 tracker, remote store와 scheduler가 붙으면 외부 failure와 authority가 생긴다. core RunSpec과 evidence identity를 보존하고 non-authoritative observers를 분리한다.
-
-분산 기준선으로 승격할 조건. 완료선은 loss가 내려가고 checkpoint 파일이 생겼다는 것이 아니다. raw row 하나를 다음 update까지 계산하고, option·failure 하나가 바꾼 최초 state를 찾으며, resume 뒤 동일 의미를 재생하는 능력이다.
-
-코드 근거는 실제 loaded functions와 guards, 실행 근거는 artifacts와 events, 수학 근거는 독립 oracle에 있다. 어느 하나가 나머지를 대신하지 않는다. 미실행 hardware·kernel·objective는 명시한다.
-
-이 package가 작고 빠르며 독립 재생 가능하면 이후 규모의 복잡성을 양분할 수 있다. cluster divergence가 나타났을 때 data·loss의 원래 오류인지 collective·sharding의 새 오류인지 판단한다.
-
-독자는 golden run을 한 번 만드는 데서 끝내지 않는다. source, CUDA, data, tokenizer와 recipe가 바뀔 때 child evidence를 만들고 baseline 승격을 검토한다. 이 반복이 학습 시스템의 가장 작은 신뢰 단위다.
-
-15분 cold-review 점검. **하나의 닫힌 수치 fixture로 전 경계를 잇는다.** 여러 개의 성공 로그를 나열하는 것보다, 사람이 처음부터 끝까지 다시 계산할 수 있는 한 실행을 갖는 편이 강하다. 예를 들어 vocabulary 7, hidden size 4, sequence length 4인 작은 causal LM과 두 row를 만든다. 첫 row의 labels는 `[-100, 2, 3, 4]`, 둘째 row는 `[-100, -100, 5, 6]`으로 두어 유효 token 수가 각각 3과 2가 되게 한다.
-
-padding·prompt mask·마지막 EOS가 서로 다른 위치에 있으므로 label shift와 denominator 오류를 동시에 드러낸다. embedding과 projection에는 정수에서 만든 고정 FP64 값을 넣고 dropout은 끈다. 이 fixture는 성능을 흉내 내기 위한 축소 모델이 아니라, `bytes→IDs→logits→N,S→gradient→delta→durable state`의 모든 화살표를 독립 계산 가능하게 만드는 수학적 자다.
-
-loss ledger에는 scalar `loss` 하나 대신 token별 negative log likelihood `\ell_{b,t}`, numerator `S=Σm_{b,t}\ell_{b,t}`, denominator `N=Σm_{b,t}`를 둔다. 위 예의 `N`은 5여야 한다. 두 microbatch의 `N_1=3`, `N_2=2`가 다르기 때문에 `(S_1/N_1+S_2/N_2)/2`를 잘못 사용하면 즉시 reference와 갈라진다. backward oracle은 `∇(S_1+S_2)/(N_1+N_2)`이며, 각 microbatch 평균 gradient를 단순 평균한 값이 아니다. 장에서 앞서 사용한 `N`과 `S` 표기가 구현에 따라 뒤집히지 않도록 산출물 schema에는 `loss_sum`과 `valid_token_count`라는 의미 이름을 사용한다.
-
-optimizer fixture는 projection의 2×2 slice만 trainable로 두고 AdamW 두 step을 계산한다. 첫 step 직전에는 `parameter_before`, unscaled gradient, clipping coefficient, first·second moment와 group step이 있고, 직후에는 adaptive contribution, decoupled decay contribution과 `parameter_after`가 있다.
-
-두 번째 step 직전에 checkpoint를 저장한 뒤 fresh process에서 복원한다. 연속 실행과 복원 실행의 다음 `BatchID`, RNG draw, loss sum/count, gradient, moment, LR과 delta가 차례로 같아야 한다. parameter만 같고 moment가 다르면 load 직후에는 숨지만 두 번째 delta에서 드러난다. 그래서 한 step save/load는 optimizer 복원을 충분히 시험하지 못한다.
-
-fixture의 정상 경로는 다음 상태 전이로 고정한다.
-
-| 경계 | 입력 상태 | 커밋 뒤 권위 상태 | exact하게 같아야 하는 것 | 수치 오차를 허용하는 것 |
-|---|---|---|---|---|
-| admission | environment·source·config·fixture digest | `RunID` | 모든 digest와 resolved option | 없음 |
-| collate | row bytes·tokenizer·template | `BatchID` | IDs·labels·mask·position·`valid_token_count` | 없음 |
-| forward | `BatchID`·weight digest·RNG state | `ForwardID` | shape·dtype·finite·branch | logits·activation 값 |
-| objective | logits·labels·loss mask | `LossID` | 기여 좌표와 denominator | token loss·loss sum |
-| backward | `LossID`·scaler state | `GradientID` | owner·presence·commit 가능 여부 | gradient 값·norm |
-| update | gradient·optimizer·scheduler state | `UpdateID` | step clock·group membership·skip 여부 | moment·parameter delta |
-| checkpoint | 모든 durable state·parent | `CheckpointID` | 파일 hash·completeness·lineage | 없음 |
-| replay/eval | checkpoint·eval fixture | `ReplayID`·`EvalID` | row·normalization·denominator·artifact hash | logits·metric 값 |
-
-이 표의 핵심은 observer가 상태를 만들지 않는다는 점이다. 로그, profiler와 W&B callback은 권위 상태를 읽어도 공용 RNG를 소비하거나 optimizer clock을 진행시켜서는 안 된다. observer를 제거한 control과 결과가 달라지면 계측 자체가 hidden input이다. 그 경우 callback source와 호출 순서를 manifest에 넣고, 학습 RNG와 평가·시각화 RNG를 분리한 뒤 새 baseline을 만든다.
-
-작은 fixture가 증명하는 범위를 과장하지 않는다. 이 실험으로는 tokenizer/template bytes와 label mask, loss reduction, autograd 연결, parameter-group ownership, AMP skip의 원자성, optimizer 수식, checkpoint state coverage와 재개 시 다음 update의 의미를 강하게 시험할 수 있다. synthetic OOM과 partial-write를 넣으면 예외 경계와 rollback 선택도 검증할 수 있다. 이 모두는 거대 모델을 학습하지 않고도 실패시킬 수 있는 계약이다.
-
-반면 이 fixture는 HBM 용량 한계, 긴 sequence에서 선택되는 attention kernel, 실제 CUDA reduction의 장기 오차, 대규모 데이터의 품질, 모델 수렴성, throughput, 멀티 GPU collective와 노드 장애를 증명하지 않는다. 작은 shape가 fused path의 alignment 조건을 만족하지 않아 eager fallback을 탈 수도 있다. 따라서 결과표에는 `small-synthetic-confirmed`와 `production-shape-not-run`을 별도 열로 둔다. 작은 실행을 통과한 뒤 실제 shape를 실행하지 않았다면 “CUDA 경로 검증 완료”가 아니라 “수식·상태 계약 검증 완료”라고 써야 한다.
-
-최초 불일치는 원인보다 앞선 증상일 수 있다. NaN이 loss에서 처음 관측됐어도 최초 원인은 tokenizer가 만든 빈 loss mask, 입력의 비정상 값, 이전 update에서 오염된 weight일 수 있다. 그러므로 두 실행을 비교할 때는 마지막 정상 durable state에서 시작해 producer 순서로 걷는다. 다음 표는 눈에 띄는 오류가 아니라 가장 먼저 비교할 권위 상태를 정한다.
-
-| 증상 | 가장 먼저 비교할 상태 | 다음 분리 실험 | 통과 판정 |
-|---|---|---|---|
-| 첫 batch부터 loss가 다름 | RowID→rendered bytes→IDs→labels/mask→`N` | collator를 CPU reference로 재생 | 최초 다른 경계가 하나로 좁혀짐 |
-| loss가 NaN | 입력·weight의 마지막 finite boundary, token loss 전 logits | FP32 eager, component loss 분리, 문제 row 이분 탐색 | 최초 nonfinite producer와 소비 함수가 특정됨 |
-| gradient만 NaN | loss scale, backward hook 순서, custom autograd | scaler 없이 FP32, 선택 parameter finite difference | forward 정상과 최초 비정상 gradient edge가 함께 보임 |
-| trainable delta가 0 | `step_committed`, LR, grad presence, group identity | overflow 없는 scalar optimizer fixture | freeze·zero grad·skip·group 누락 중 하나로 구분됨 |
-| OOM | phase별 allocated/reserved와 tensor lifetime | batch/sequence 이분 탐색, hook·cache·checkpointing A/B | 용량 부족과 step별 retention 증가가 구분됨 |
-| 같은 seed인데 batch가 다름 | sampler/worker RNG와 cursor, prefetch queue | `num_workers=0`, transform RNG 고립 | 첫 RNG consumer 또는 cursor drift가 특정됨 |
-| resume 직후만 다름 | parent·state coverage·첫 BatchID·LR·RNG draw | K 직전/직후 kill-point replay | K+1의 최초 다른 state가 특정됨 |
-| 새 환경에서만 다름 | canonical config와 loaded `.so` digest, kernel dispatch | cache를 비운 eager reference | config·artifact·dispatch drift가 구분됨 |
-
-cache는 환경과 데이터 양쪽에 숨어 있다. tokenizer·dataset cache는 오래된 processed artifact를 재사용할 수 있고, compile·kernel autotune cache는 다른 code path와 성능을 만들 수 있다. clean-room replay에서는 cache root를 새 임시 경로로 두고, reuse run에서는 cache key와 producer digest를 검사한다. cache를 지우니 문제가 사라졌다는 결론으로 닫지 않는다. 어떤 stale key가 어떤 consumer에 들어갔는지 찾아 invalidation rule과 regression fixture를 남긴다.
-
-config drift도 문자열 diff로 끝내지 않는다. requested config, parser 뒤 canonical config, component가 실제 소비한 effective config를 세 층으로 비교한다. 예컨대 CLI에는 `gradient_checkpointing=true`인데 모델의 해당 module branch가 켜지지 않았거나, optimizer 이름은 같지만 fused fallback이 선택될 수 있다. expected branch counter가 0이면 설정 파일이 같아도 실행 의미는 다르다. 반대로 logging interval처럼 수학 상태를 바꾸지 않아야 하는 옵션이 tensor trace를 바꾸면 observer coupling을 의심한다.
-
-인수는 재생과 반증으로 끝낸다. 검토자는 제공자가 고른 성공 로그를 읽는 대신 깨끗한 process에서 fixture를 재생하고, loss mask 한 칸 이동·adapter detach·optimizer group 누락·checkpoint marker 제거라는 네 negative control 중 적어도 둘을 고른다. 각 변형이 예상 경계에서 실패하고, fault flag를 끈 다음 원래 digest로 돌아와야 한다. assertion이 결함을 놓치거나 더 앞선 엉뚱한 경계에서 실패하면 baseline 자체를 승인하지 않는다.
-
-최종 인수 묶음에는 immutable environment/data/tokenizer/model/config manifest, golden batch와 독립 oracle, forward·backward·update trace, checkpoint generation과 resume replay, 평가 원장, fault bundle, source 좌표와 판정 코드가 들어간다. 모든 파일은 하나의 `RunID` 및 parent lineage로 연결한다. `PASS`는 실행 artifact가 있을 때만 허용하고, source를 읽었지만 실행하지 않은 경우는 `SOURCE_CONFIRMED`, small fixture만 통과한 경우는 `SMALL_FIXTURE_PASS`, 실제 shape가 남은 경우는 `PRODUCTION_SHAPE_NOT_RUN`으로 적는다. 이 어휘를 지키면 작은 실험의 강한 결론과 아직 하지 않은 큰 실험을 동시에 정직하게 보존할 수 있다.
-
-시간이 부족하면 먼저 manifest의 source·data·tokenizer·environment digest를 확인한다. 이어 첫 batch의 IDs, labels, mask와 valid count를 본다. first logits와 loss numerator/count가 oracle과 맞는지 확인한다. 이 세 단계가 다르면 optimizer나 CUDA 성능을 조사하지 않는다.
-
-다음으로 selected gradients의 owner·finite status, clipping과 optimizer delta를 본다. global update counter와 scheduler LR이 successful step을 가리키는지 확인한다. checkpoint에서 같은 states와 RNG·cursor를 복원해 next update를 비교한다.
-
-마지막에는 negative fixture 하나와 kill point 하나를 실행한다. expected boundary에서 실패하고 partial artifact가 latest로 보이지 않아야 한다. 성능 표에는 denominator, steady window와 profiler state가 있어야 한다. 빠졌으면 `NOT_CAPTURED`다.
-
-이 15분 점검은 전체 suite를 대신하지 않는다. 다만 가장 중요한 의미 경계를 빠르게 훑어 잘못된 run을 조기에 멈춘다. 이상이 보이면 28.15.5항의 first-divergence 순서로 깊게 들어간다.
-
-독립 검토자의 서명. 검토자는 author가 고른 성공 표본만 보지 않는다. 임의 SampleID, trainable parameter, checkpoint와 failure case를 선택한다. 정방향과 역방향으로 lineage를 걷고 machine report의 수치를 손계산·source와 대조한다.
-
-baseline 승격이 포함됐다면 old failure, 변경 이유, 독립 oracle과 negative regression을 확인한다. performance improvement가 expected 변경의 근거가 되지 않았는지 본다. 실행하지 않은 조합과 known flakiness를 report가 숨기지 않아야 한다.
-
-서명은 RunSpec과 artifact root digest, oracle grades, support 범위와 review identity를 가진다. 이후 파일이 바뀌면 서명이 무효가 된다. 최신 디렉터리 이름에 서명하지 않는다.
-
-승인된 package는 29장의 분산 child와 30장의 recipe가 참조한다. downstream 결과가 이 baseline을 덮지 않는다. source나 fixture가 바뀌면 dependency graph가 관련 인수를 다시 열어야 한다.
-
-최종 서명 전에 reviewer는 baseline 생성 권한과 실행 권한이 분리됐는지도 확인한다. candidate code가 자기 결과를 expected로 자동 승격할 수 있다면 검증이 순환한다. expected artifact 변경에는 이유, old/new diff, 독립 oracle과 별도 승인이 필요하다. CI retry가 첫 실패를 지우거나 tracker의 latest alias가 canonical artifact를 바꾸어서는 안 된다.
-
-또 하나의 RunSpec을 다른 clean environment에서 재생한다. package cache를 비우고 immutable sources만 사용해 dependency resolution, processed fixture, selected tensors와 checkpoint next update를 비교한다. bitwise 재현을 약속하지 않은 CUDA 경로는 선언한 numerical·behavioral 범위로 판정한다. 설명되지 않은 차이는 환경 탓으로 닫지 않고 실제 loaded library, dispatch와 RNG consumer를 찾는다.
-
-이 마지막 분리와 clean-room 재생이 통과하면 golden package는 개인 작업 디렉터리의 우연한 성공을 넘어선다. 다른 사람이 같은 증거로 같은 제한된 결론을 얻을 수 있고, 이후 분산 규모에서 새로 생긴 차이를 정확히 격리할 수 있다.
-
-그때 독자는 단일 GPU 결과를 성능 자랑이 아니라 학습 의미의 기준 좌표로 사용한다. data, 수식, code, CUDA state와 durable artifact가 한 RunID에서 만나는 이 좌표가 다음 모든 확장과 회귀 분석의 출발점이다.
-
-그 좌표는 다른 검토자가 독립적으로 다시 계산할 수 있어야 한다. 정상 fixture가 맞는지만 확인하지 않고 mask 반전, overflow 또는 partial checkpoint 가운데 하나를 주입했을 때 예상 경계에서 실패하는지도 확인한다. 재계산과 반증이 모두 통과해야 이후 멀티노드 run에서 생긴 차이를 단일 GPU 기준선의 결함과 구분할 수 있다.
+독립 reviewer는 writer가 만든 요약을 신뢰하지 않고 bundle resolver에서 재생한다. 장비가 없는 CUDA/multinode cell은 oracle과 command를 남기되 `NOT_RUN`이다. `golden-small-gpt-manifest`와 [단일 GPU 실습](../labs/28-single-gpu-golden-lab.md)이 canonical entry이며, 29장에는 동일 B117/U0042/CK43과 failure injection contract를 넘긴다.

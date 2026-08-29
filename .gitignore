@@ -3,3 +3,6 @@ _site/
 .DS_Store
 npm-debug.log*
 scratch/
+.epub-venv/
+content/volume-2/build/
+content/volume-2/dist/

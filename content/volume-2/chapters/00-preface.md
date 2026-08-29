@@ -4,6 +4,37 @@
 
 이 책은 이런 경계를 숨기지 않는다. 식은 코드에서 실제로 만들어지는 텐서와 나란히 놓고, 옵션은 이름을 열거하는 대신 어떤 상태를 바꾸는지 추적한다. 구현을 인용할 때는 짧은 핵심 부분과 파일·심볼·고정 리비전을 함께 제시한다. 특정 프레임워크의 편한 사용법보다, 프레임워크가 달라져도 남는 소유권과 불변조건을 먼저 붙잡는다.
 
+## GR-001: 이 책 전체를 관통하는 한 번의 실행
+
+이 책은 장마다 새로운 예제를 꺼내 독자를 다시 출발시키지 않는다. `GR-001`이라는 작은 대화 표본을 raw bytes에서 시작해 SFT, preference, online RL, checkpoint와 평가까지 운반한다. 실제 구현은 장마다 달라져도 질문은 같다. **지금 읽는 함수가 무엇을 입력받고, tensor와 durable state 가운데 무엇을 바꾸며, 그 변화가 다음 경계에 어떤 증거로 넘어가는가.**
+
+```mermaid
+flowchart LR
+  D[데이터<br/>SourceRow GR-001] --> T[template·tokenizer<br/>token/role span]
+  T --> B[collator·packing<br/>BatchID + denominator]
+  B --> F[model forward<br/>activation + logits]
+  F --> L[loss·backward<br/>numerator/denominator + grad]
+  L --> O[optimizer<br/>committed UpdateID]
+  O --> C[checkpoint<br/>model/optim/RNG/cursor]
+  C --> A[SFT adapter<br/>SFT-001]
+  A --> P[preference<br/>GR-001-P1 / DPO-001]
+  P --> R[online RL<br/>Trajectory / RL-001]
+  R --> E[evaluation·release<br/>EvalID + artifact digest]
+```
+
+각 화살표는 설명상의 연관이 아니라 재생 가능한 인계다. 책을 순서대로 읽지 않더라도 앞 단계의 ID·checksum·shape·revision을 잃지 않아야 한다. 링크된 원전은 논문이면 arXiv·공식 출판본으로, 코드는 가능한 한 repository·commit·path·line으로 고정한다. 원전이 수학적 아이디어를 증명하는 범위와 현재 코드가 실제로 구현한 범위를 구분한다.
+
+| 구간 | 독자가 손에 쥘 인계물 | 다음 장에서 확인할 첫 질문 |
+|---|---|---|
+| 1–3장: 최소 학습 loop | `BatchID`, shifted labels, loss sum/count, gradient, `UpdateID` | 같은 batch가 실제로 한 번만 commit됐는가 |
+| 4–6장: 데이터 제조 | source·tokenizer·mixture revision, packed span | 어느 source token이 loss 분모에 들어갔는가 |
+| 7–10장: 모델 내부 | embedding·attention·MLP의 shape와 activation probe | 최초 tensor divergence는 어느 layer인가 |
+| 11–14장: 수치와 optimizer | parameter group, moment, LR, dtype·kernel 선택 | 속도 변화가 update 의미를 바꾸지 않았는가 |
+| 15–17장: 분산과 복구 | rank owner, collective sequence, checkpoint generation | 재개 뒤 sample·step·state가 요구 등급으로 같은가 |
+| 18–20장: SFT·preference·RL | `SFT-001 → DPO-001 → RL-001`, policy/reward revision | 같은 부모와 분모를 사용했는가 |
+| 21–25장: modality·변경·평가·안전 | modality mask, ChangeID, EvalID, risk decision | 점수 변화와 학습 변화가 같은 사건인가 |
+| 26–30장: 관측·인수 | trace bundle, failure evidence, release manifest | clean process에서 반례까지 재생되는가 |
+
 ## 이 책이 답하려는 질문
 
 ### loss 하나를 믿으려면 무엇을 확인해야 하는가

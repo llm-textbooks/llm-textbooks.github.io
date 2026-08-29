@@ -60,7 +60,7 @@ for (const file of htmlFiles) {
   });
 }
 
-for (const asset of ["assets/site.css","assets/site.js","assets/favicon.svg","assets/mermaid.min.js","assets/katex.min.css","pagefind/pagefind.js","pagefind/pagefind-ui.js","downloads/volume-1-cuda-llm-serving-ko.epub","downloads/volume-2-finetuning-mechanisms-ko.epub","sitemap.xml","robots.txt","site-manifest.json","source-link-report.json"]) {
+for (const asset of ["assets/site.css","assets/site.js","assets/favicon.svg","assets/mermaid.min.js","assets/katex.min.css","pagefind/pagefind.js","pagefind/pagefind-ui.js","downloads/volume-1-cuda-llm-serving-ko.epub","downloads/volume-2-finetuning-mechanisms-ko.epub","sitemap.xml","robots.txt","site-manifest.json","source-link-report.json","volume2-editorial-report.json"]) {
   if (!fs.existsSync(path.join(SITE, asset))) errors.push(`missing artifact ${asset}`);
 }
 
@@ -70,7 +70,7 @@ if (sourceReport.counts.fatal !== 0) errors.push(`source-link audit has ${source
 const counts = Object.fromEntries(manifest.books.map(b => [b.id,b.documents]));
 if (counts["volume-1"] !== 78) errors.push(`volume-1 expected 78 documents, got ${counts["volume-1"]}`);
 if (counts["volume-2"] !== 53) errors.push(`volume-2 expected 53 documents, got ${counts["volume-2"]}`);
-if (stats.mermaid !== 106) errors.push(`expected 106 Mermaid diagrams, got ${stats.mermaid}`);
+if (stats.mermaid < 106) errors.push(`expected at least 106 Mermaid diagrams, got ${stats.mermaid}`);
 if (stats.tables < 340) errors.push(`expected at least 340 rendered tables, got ${stats.tables}`);
 if (stats.external < 1500) errors.push(`expected at least 1500 external links, got ${stats.external}`);
 

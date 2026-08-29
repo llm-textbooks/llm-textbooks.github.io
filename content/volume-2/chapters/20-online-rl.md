@@ -4,25 +4,47 @@
 
 온라인 RL은 하나의 trainer가 아니다. prompt queue, rollout engine, reward·value 계산, advantage, policy update, weight publication, checkpoint가 서로 다른 속도로 움직이는 폐쇄 루프다. 어느 한 함수의 수식이 맞더라도 서로 다른 시점의 상태를 조합하면 update 전체는 틀린다. 따라서 이 장의 출발점은 알고리즘 이름이 아니라 다음 한 줄의 계보다.
 
+## GR-001 수직 추적: prompt lease에서 새 정책 publication까지
+
+19장의 `GR-001-P1`로 승인한 policy를 `PolicyVersion=17`로 배포했다고 하자. 동일 계열 prompt `GR-001`을 actor가 lease해 completion 세 개를 만들고 reward service가 점수를 붙이며 learner가 한 번 update해 version 18을 만든다. 온라인 RL의 최소 단위는 loss scalar가 아니라 이 **versioned closed loop**다.
+
+```mermaid
+flowchart LR
+  P[PromptID GR-001] -->|lease v17| G[rollout actor]
+  G --> T[TrajectoryID × G<br/>tokens + old logp]
+  T --> W[reward/value<br/>fixed revisions]
+  W --> A[advantage<br/>mask + denominator]
+  A --> L[PPO/GRPO loss]
+  L --> O[optimizer commit<br/>UpdateID RL-001]
+  O --> C[PolicyVersion 18 candidate]
+  C -->|digest + replica ACK| U[published v18]
+  U -. next lease .-> G
+```
+
+verl 0.9.0 commit `483b8a00…`의 [`core_algos.py` reduction 경계](https://github.com/volcengine/verl/blob/483b8a009ba3a97563edee3a19887e4862b8094a/verl/trainer/ppo/core_algos.py#L1143-L1204)는 `loss_agg_mode`가 표본 측도를 바꾸는 위치다. OpenRLHF commit `3c3be623…`의 [`ppo_actor.py` update·동기화 경로](https://github.com/OpenRLHF/OpenRLHF/blob/3c3be6234e0cb353e76bb8019947db9dfe99fca7/openrlhf/trainer/ray/ppo_actor.py#L400-L470)와 [`vllm_worker_wrap.py` weight 수신 경계](https://github.com/OpenRLHF/OpenRLHF/blob/3c3be6234e0cb353e76bb8019947db9dfe99fca7/openrlhf/trainer/ray/vllm_worker_wrap.py#L32-L63)는 learner와 actor 사이 상태 이동을 보여 준다. 함수 존재를 atomic publication 보증으로 확대하지 않는다.
+
+| 경계 | tensor·shape | dtype·device | 분모·소유 state | 반드시 관측할 증거 |
+|---|---|---|---|---|
+| rollout | `input_ids[B,T]`, `response_mask[B,T]` | `int64`, actor CUDA | behavior v17, seed, sampling config | token, termination, weight digest |
+| likelihood | `old/ref/current_log_probs[B,T-1]` | FP32 권장, CUDA | action mask와 one-token shift | 세 revision, mask checksum |
+| reward/value | reward `[B]` 또는 `[B,T-1]`, values `[B,T-1]` | FP32 | reward/value revision | component와 join cardinality |
+| advantage | `advantages[B,T-1]` | FP32 | terminal/bootstrap·group rule | mean/std, all-equal 처리 |
+| policy loss | `loss_mat[B,T-1]→scalar` | FP32 reduction | token/sequence/group 분모 | numerator와 세 denominator |
+| optimizer | policy grad·moment shards | mixed precision, learner CUDA | RolloutID 집합, accumulation | clip/skip, delta, `RL-001` |
+| publication | model digest per replica | storage→actor CUDA | candidate v18, routing epoch | required ACK, active version |
+| checkpoint | model·optimizer·queue·dedup·RNG | durable storage | consistent cut | next RolloutID·UpdateID parity |
+
+PPO의 token 비율은 $\rho_t=\exp(\ell_t^{\mathrm{current}}-\ell_t^{\mathrm{old}})$다. 코드에서는 `[B,T-1]`의 `loss_mat`가 만들어지고 `core_algos.py`의 reducer가 token mean인지 sequence 내부 평균 뒤 batch mean인지 정한다. 이 마지막 함수가 수식의 $D$다. GRPO라면 같은 prompt의 완성된 group이 advantage 모집단이며 group 일부가 누락되면 shape가 맞아도 다른 목적함수다.
+
+반증 실험은 찢어진 경계를 겨냥한다. rollout 저장 뒤 ACK 전에 actor를 죽여 같은 `TrajectoryID`가 두 optimizer effect를 만들지 않는지 본다. v18을 일부 replica에만 load한 순간 장애를 내 routing pointer가 v17에 머무는지 확인한다. frozen trajectory에서 learner와 rollout engine의 old log-prob를 비교한다. action mask 한 칸 mutation은 최종 KL이 아니라 likelihood checksum에서 먼저 실패해야 한다. [online RL policy-version lab](../labs/20-online-rl-policy-version-lab.md)은 상태 전이와 중복 effect를, [종단 golden lab](../labs/30-sft-rl-deploy-golden-lab.md)은 SFT 부모부터 publication까지 검산한다.
+
+이후 PPO·GRPO·DAPO·GSPO와 queue·checkpoint 절은 이 표의 변형으로 합쳐 읽는다. 알고리즘마다 새 서사를 시작하지 말고 `GR-001`의 ratio 사건 단위, advantage 모집단, reducer 분모, publication state 중 달라지는 칸만 비교한다.
+
 > `PromptID → behavior PolicyVersion → RolloutID/TrajectoryID → OldLogProbRevision → RewardRevision → AdvantageRevision → UpdateID → candidate PolicyVersion → published PolicyVersion`
 
 이 식별자들은 장부 장식이 아니다. `PromptID`는 어떤 표본 분포에서 질문이 뽑혔는지를, behavior `PolicyVersion`은 실제 행동을 낸 확률분포를, old log-prob revision은 PPO 비율의 분모를, reward revision은 학습 신호를 만든 판정기를 고정한다. `UpdateID`는 어떤 trajectory 집합이 optimizer effect를 정확히 한 번 만들었는지를 증명한다. 마지막 `PolicyVersion`은 그 effect로 생성된 불변 weight 묶음이다. 이 연결 하나라도 끊기면 높은 reward나 낮은 KL은 원인을 설명하지 못하는 숫자가 된다.
 
-```mermaid
-flowchart LR
-  P[PromptID] -->|lease| B[Behavior PolicyVersion]
-  B -->|generate| R[RolloutID / TrajectoryID]
-  R --> O[OldLogProbRevision]
-  R --> RW[RewardRevision]
-  O --> A[AdvantageRevision]
-  RW --> A
-  A -->|admit + minibatch| U[UpdateID]
-  U --> C[Candidate PolicyVersion]
-  C -->|replica checksum + ACK| PUB[Published PolicyVersion]
-  PUB -. next generation .-> B
-```
-
-이 그림에는 의도적으로 `latest`가 없다. rollout을 시작한 순간에는 구체적인 불변 version을 lease하고, learner는 그 version에서 계산한 old log-prob와 reward revision을 사용한다. candidate를 commit했다고 actor가 곧바로 그것을 쓰는 것도 아니다. 모든 필수 replica의 load·checksum·사용 가능 시점이 확인된 뒤 routing pointer가 바뀌어야 published가 된다.
+위 `GR-001` 그래프에는 의도적으로 `latest`가 없다. rollout을 시작한 순간에는 구체적인 불변 version을 lease하고, learner는 그 version에서 계산한 old log-prob와 reward revision을 사용한다. candidate를 commit했다고 actor가 곧바로 그것을 쓰는 것도 아니다. 모든 필수 replica의 load·checksum·사용 가능 시점이 확인된 뒤 routing pointer가 바뀌어야 published가 된다.
 
 | 상태 | 반드시 고정할 것 | 다음 상태로 넘어가는 조건 | 이 상태가 없을 때 생기는 모호함 |
 |---|---|---|---|
@@ -2080,132 +2102,6 @@ independent reproduction, failure·negative results와 follow-up을 찾는다. �
 수학은 log-prob·advantage·ratio·KL와 loss denominator를 책임지고, 시스템은 actor/reward/learner queues, publication·checkpoint와 failure disposition을 책임진다. 둘은 TrajectoryID와 UpdateID에서 만나야 한다.
 
 끝 질문. 이 response가 어느 policy·sampling에서 나왔고 왜 이 reward·advantage를 받았으며 어느 update에 기여했는가. 현재 actor가 그 update의 정책을 실제로 쓰는가. 장애 뒤 같은 closure를 복구·rollback할 수 있는가. 답이 evidence로 재생되어야 한다.
-
-### 20.12.3 평가에서 승격까지 이어지는 release 증거
-
-policy evaluation과 reward evaluation을 분리한다. reward model score는 training signal이며 final utility evaluator와 같지 않아야 한다. policy evaluation은 task outcome, human·verifier, safety·privacy, calibration·cost와 latency를 별 protocol로 본다. reward 평균 상승을 release gate로 단독 사용하지 않는다.
-
-reward model 자체는 ranking·calibration, subgroup·OOD와 exploit tests를 가진다. policy가 score distribution을 바꾸면 reward validity를 재평가한다. evaluation worker의 exact revisions와 PolicyVersion을 연결한다.
-
-독립성 gate. training reward·prompts와 final evaluation item family·judge overlap을 audit한다. feedback된 items는 held-out claim에서 제외하거나 새 set을 만든다.
-
-rollout generation의 종료 이유를 학습 signal에 포함한다. EOS, max length, stop string, tool terminal, content filter, actor OOM·timeout과 user cancellation은 서로 다른 terminal semantics다. response mask·reward, bootstrap와 retry disposition을 이유별로 정한다.
-
-max-length truncation을 정상 low reward로 넣으면 policy가 task difficulty보다 runtime limit를 학습할 수 있다. infrastructure error는 quarantine한다. safety filter termination은 hard incident·training eligibility를 별로 둔다.
-
-terminal table. 각 reason의 valid tokens, reward components, advantage bootstrap, retry·billing과 metric denominator를 표로 만든다. unknown terminal을 정상 EOS로 간주하지 않는다.
-
-policy optimizer state와 publication state를 혼합하지 않는다. learner checkpoint는 next update를 위한 optimizer moments·scheduler를 가진다. publication artifact는 inference weight·adapter, tokenizer/template와 runtime conversion을 가진다. best published policy와 latest learner state가 다를 수 있다.
-
-rollback serving policy가 learner optimizer를 자동 되돌리는지 별 DecisionEvent가 필요하다. candidate training을 계속하면서 parent serving을 유지할 수도 있다. 두 aliases·generations를 분리한다.
-
-state query. current learner UpdateID, latest candidate, production PolicyVersion와 parent checkpoints를 한 graph에서 찾는다. “latest” 문자열을 artifact identity로 쓰지 않는다.
-
-online RL의 scheduler clock을 성공한 policy update로 고정한다. actor attempts, trajectories·minibatches와 learner optimizer commits는 서로 다른 counts다. LR scheduler는 어떤 commit에서 전진하는지 명시한다. AMP overflow·KL early stop와 invalid batch에서 clock을 검증한다.
-
-tokens/update가 rollout length·validity로 변하면 update-based LR의 token exposure가 달라진다. generated, trained valid tokens와 compute를 별 clock으로 기록한다. 13장의 migration 원칙을 적용한다.
-
-clock fault. learner batch discard, overflow와 mid-epoch checkpoint를 주입해 next LR·optimizer moments와 PolicyVersion publication을 hand state machine과 맞춘다.
-
-red-team prompt가 policy gradient를 조작하지 못하게 한다. 공격자가 high-reward exploit, excessive retries나 poison prompt를 queue에 넣을 수 있다. prompt eligibility, source quota·dedup, reward anomaly와 tool authorization을 둔다. user traffic와 authorized red-team channel을 구분한다.
-
-red-team findings는 training 대상이 되기 전 abstraction, privacy·evaluation independence와 data governance를 거친다. same item으로 fix를 평가하지 않는다. attack family holdout을 보존한다.
-
-poison fixture. duplicate burst, reward exploit·prompt injection과 fake tool success를 synthetic cases로 넣는다. ingestion·reward·publication gates가 어디서 차단하는지 본다.
-
-policy improvement를 causal claim으로 쓰는 조건. candidate가 좋아졌다는 주장은 parent와 paired prompts·environment, 동일 evaluation protocol과 uncertainty를 요구한다. reward·prompt distribution, tool version이나 sampling이 함께 바뀌면 joint change로 제한한다.
-
-online traffic A/B에는 interference·selection과 delayed outcome이 뒤따른다. offline replay, shadow·canary와 held-out human/verifier를 조합한다. hard failures를 평균으로 상쇄하지 않는다.
-
-결론. 어떤 objective·data·PolicyVersion 변경이 어떤 slice에서 얼마의 utility·cost 차이를 냈는지 조건부로 쓴다. 전체 지능 향상 같은 넓은 문장을 피한다.
-
-새로운 policy를 actor에 올리기 전 세 가지 parity. 검증 대상은 tokenizer/template와 token IDs, learner·actor chosen-token log-prob, canonical generation·tool parsing parity다. dtype·quantization tolerance와 sampling stochasticity를 구분한다.
-
-weight conversion·shard coverage, loaded digest와 cache generation을 확인한다. one actor canary 뒤 pool ACK를 수집한다. partial rollout은 policy가 정한 mixed-version handling을 따른다.
-
-negative. wrong tokenizer, missing expert shard와 stale CUDA Graph를 넣는다. 응답이 자연스러워도 parity detector가 실패해야 한다.
-
-운영자가 보존할 최소 golden set. short/long text, multi-turn, multilingual, math/code verifier, tool success·failure, safety benign/harmful와 privacy synthetic canary를 둔다. 각 prompt는 expected tokenization, reward components, policy metrics와 environment outcome을 가진다.
-
-golden set은 training eligibility가 없고 access-controlled version으로 관리한다. policy·reward·runtime upgrade마다 실행한다. fixed set 과적합을 막기 위해 rotating private set과 분리한다.
-
-결과. aggregate뿐 아니라 item family, numerical parity와 hard gates를 보존한다. expected output을 candidate 결과로 자동 갱신하지 않는다.
-
-online RL release certificate의 필수 항목. parent SFT/policy, algorithm equation digest, prompts·reward/reference, source·runtime, model/optimizer checkpoint와 actor artifact를 적는다. trajectory/update coverage, evaluation·redteam, cost·SLO와 rollback rehearsal을 포함한다.
-
-queue/controller generations, loaded actor ACK와 last safe parent를 기록한다. `NOT_RUN` algorithm·environment·topology cells와 waivers를 명시한다.
-
-승인. 수학 reviewer, data/reward, infrastructure와 safety owner가 같은 identities를 확인한다. 한 팀의 reward dashboard만으로 승격하지 않는다.
-
-다음 장들로 넘기는 공통 원장. 21장의 multimodal rollout에는 modality processor·environment state를, 24장 평가에는 exact PolicyVersion·protocol을, 25장 red-team에는 eligibility·holdout을, 26장 monitoring에는 funnel·clocks를 넘긴다.
-
-29장은 actor·reward·learner·checkpoint failure fixtures를 cluster에서 실행하고 30장은 SFT→preference→online RL→deployment의 generation chain을 닫는다.
-
-handoff. TrajectoryID, UpdateID, PolicyVersion, Reward/ReferenceVersion, PromptFamily, EnvironmentID와 CheckpointID가 공통 keys다. prose의 유사 용어가 아니라 이 identities로 장을 연결한다.
-
-실패 분류별 중단·복구 권한. 실패한 trajectory를 낮은 reward와 구분한다. 유효하게 실행됐지만 task를 실패한 response는 학습 signal이 될 수 있다. actor OOM, reward timeout, corrupt environment와 schema mismatch는 infrastructure failure다. 둘을 모두 0 reward로 넣으면 policy가 시스템 장애를 자신의 행동 결과로 학습한다.
-
-disposition은 valid-success, valid-failure, invalid-output, infrastructure, policy·safety quarantine와 duplicate를 가진다. funnel과 cost 분모를 맞춘다.
-
-fixture. 같은 text response에 다른 environment outcome·timeout을 붙여 reward·eligibility 차이를 확인한다. string만으로 disposition하지 않는다.
-
-rollout queue의 우선순위를 확률로 기록한다. priority replay가 reward, novelty·freshness 또는 curriculum을 쓰면 sample probability와 controller revision을 저장한다. selection correction 없이 분포가 바뀐다는 사실을 objective 범위에 포함한다.
-
-high priority가 특정 language·short response를 독점하지 않도록 coverage·age와 minimum shares를 본다. privacy deletion·quarantine item은 priority와 무관하게 제외한다.
-
-queue replay. known items·priorities와 RNG로 selected sequence를 재생한다. duplicate delivery·checkpoint resume에서도 disposition이 유지돼야 한다.
-
-learned reward의 calibration window를 policy와 함께 갱신한다. policy가 발전하면 reward model이 본 response 분포 밖으로 이동한다. old anchor, current samples와 human/verifiable labels로 ordering·scale·uncertainty를 주기적으로 평가한다. reward score drift와 true utility drift를 분리한다.
-
-retraining reward model은 new artifact·normalization/controller migration이다. policy와 reward를 동시에 바꾸면 paired dual-score window를 둔다. feedback loop의 선택 bias를 기록한다.
-
-stop rule. anchor reversal, exploit·OOD와 subgroup regression이 threshold를 넘으면 policy publication을 fence한다. reward 평균만 재정규화해 계속하지 않는다.
-
-online RL code review의 열 가지 좌표. prompt selection, actor sampling·logprob, terminal mask, reward join, advantage, policy/value/KL loss, denominator, optimizer commit, checkpoint와 publication caller를 찾는다. 각 좌표에 input/output tensor, detached state와 identity를 붙인다.
-
-어느 wrapper가 option default·auto batch·precision을 바꾸는지 확인한다. source symbol이 존재한다는 사실보다 production branch trace가 중요하다.
-
-review result. 작은 trajectory worksheet와 call graph가 같은 values·IDs를 내야 한다. missing edge는 `NOT_VERIFIED`다.
-
-배포 중 정책을 평가하는 subject를 고정한다. actor pool의 일부가 candidate, 일부가 parent이면 metric을 loaded digest별로 나눈다. alias assignment만으로 grouping하지 않는다. cache·adapter·generation config와 tool environment도 subject에 포함한다.
-
-late outcomes·human feedback을 request PolicyVersion에 다시 붙인다. rollout·serving traffic을 혼동하지 않는다. canary 종료 뒤 candidate exposures와 side effects를 보존한다.
-
-cohort audit. assignment, actual loaded policy와 response trace의 three-way consistency를 확인한다. mismatch 요청을 candidate score에 넣지 않는다.
-
-20장의 마지막 failure rehearsal. stale actor, reward revision mismatch, duplicate queue, learner NaN, partial checkpoint·publication과 unauthorized tool side effect를 순서대로 주입한다. detector·fence, disposition, rollback과 cleanup을 확인한다.
-
-복합 scenario는 reward outage 중 policy publication과 checkpoint를 겹친다. automation이 ambiguous state에서 새 policy를 승격하지 않아야 한다. parent actor sentinel과 next frozen update를 복원한다.
-
-인수. time-to-detect/fence/recover, lost·replayed compute와 orphan state를 기록한다. runbook을 읽지 않은 교대자가 같은 결론을 내야 한다.
-
-폐쇄 루프를 닫는 최종 문장. online RL의 핵심은 reward를 최대화한다는 한 줄이 아니다. 어떤 policy가 어떤 prompt·environment에서 만든 행동을 어떤 verifier·사람·reference가 평가했고, 그 signal이 어느 수식과 update를 거쳐 어떤 새 policy로 배포됐는지 재구성하는 일이다.
-
-완성선. 수학 worksheet, source functions, distributed events, checkpoint와 evaluation·rollback이 동일 IDs에서 만난다. 이 조건이 충족될 때만 높은 reward가 실제로 설명·검증·복구 가능한 학습 진척을 뜻한다.
-
-독립 검토자가 재생할 세 증거 경로. 가장 먼저 볼 세 그래프. 세 그래프에는 funnel 단계별 counts·latency와 disposition, PolicyVersion별 queue age·lag와 actor ACK, reward components·KL·ratio·update와 hard evaluation을 각각 담는다. 그래프 사이의 UpdateID와 시간·revision을 맞춘다.
-
-reward는 오르지만 valid funnel이 줄면 infrastructure·filter, lag가 오르면 capacity·publication, update가 커지며 KL·safety가 악화되면 learner를 본다. 상관을 원인으로 확정하기 전에 trace를 연다.
-
-책의 코드 예시는 실행 경계를 밝힌다. log-prob·advantage·PPO/GRPO loss 같은 짧은 핵심 식과 함수 부분을 인용할 수 있다. 바로 아래에 tensor shape, mask·denominator, detach와 caller를 설명한다. 전체 framework behavior를 snippet 하나에 귀속하지 않는다.
-
-actor·queue·checkpoint는 의사코드보다 fixed source와 event schema를 제시한다. 실행하지 않은 performance·algorithm cell은 수치 없이 남긴다. 원문 문구보다 독자의 재계산 능력이 목표다.
-
-최종 독립 검토. reviewer는 production PolicyVersion 하나를 골라 parent SFT, training trajectories, reward/reference, exact equation·source, optimizer checkpoint와 actor artifact를 역추적한다. trajectory 하나는 prompt부터 loss contribution까지 손으로 계산한다.
-
-그다음 stale actor와 reward outage를 가정해 fence·rollback·next update를 결정한다. manifest와 runbook이 같은 답을 내고 hard evaluation·privacy·tool state가 보존되어야 한다.
-
-판정. unknown alias, missing denominator, mixed revision이나 orphan queue가 있으면 완료가 아니다. 수정 뒤 frozen replay, checkpoint resume와 bounded canary를 다시 실행한다.
-
-지원 범위는 실제 검증한 algorithm 변형, model·tokenizer, reward·environment, actor/learner runtime, dtype·hardware와 topology 조합으로 제한한다. 다른 약어·논문이나 유사 framework의 성공을 호환성 근거로 복사하지 않는다.
-
-새 reward model, sampling processor, loss implementation, CUDA kernel 또는 queue schema가 들어오면 canonical trajectory, hand loss, distributed next update, publication·rollback을 다시 검증한다. score 개선보다 identity와 state 연속성이 먼저다.
-
-이 유지 규칙이 있어야 빠르게 변하는 RL 연구 결과를 실제 training system에 옮길 때 수학적 의도, 코드 구현과 운영 행동 사이의 틈을 지속적으로 발견하고 고칠 수 있다.
-
-독자는 결국 reward curve를 보는 사람이 아니라 폐쇄 루프의 모든 상태 전이를 재생하고, 최초 잘못된 trajectory·함수·revision을 찾아내며, 안전한 parent로 복구한 뒤 같은 실패가 다시 발생하지 않게 검증하는 운영자이자 연구자가 되어야 한다.
-
-그 능력은 알고리즘 이름을 많이 외운다고 생기지 않는다. 동일한 trajectory를 수식, tensor, 분산 event, checkpoint와 평가 표에서 같은 객체로 식별하고, 관측된 차이가 어느 경계에서 처음 생겼는지를 증명하는 반복 훈련에서 생긴다. 그래서 online RL의 마지막 산출물은 최고 점수 하나가 아니라 재현 가능한 인과 사슬과 안전하게 되돌릴 수 있는 변경 기록이다.
 
 ## 20.13 코드 워크스루: `agg_loss`의 분모가 실제로 누구에게 투표권을 주는가
 

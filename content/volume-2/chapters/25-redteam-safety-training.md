@@ -1,5 +1,55 @@
 # 25장 레드팀과 안전 학습: 공격을 데이터로 되돌리는 법
 
+24장의 실패 행은 보고서의 마지막 표가 아니라 다음 학습의 입력이다. 이 장은 `CaseSeedSet-025`를 재현 가능한 공격 사례로 확장하고, 검토·중복 제거·권한 경계를 거쳐 `SafetyFeedbackSet-025`로 commit한다. 공격 성공 문자열을 곧바로 SFT 정답이나 reward label로 쓰지 않는다.
+
+## 25.0 GR-001 안전 환류: 평가 실패를 학습 가능한 행으로 바꾼다
+
+```mermaid
+flowchart LR
+  S[CaseSeedSet-025<br/>from EVR-024] --> X[Attack transform<br/>revision + seed]
+  X --> A[AttemptID<br/>trajectory]
+  A --> J[human/judge review]
+  J --> D{admission gate}
+  D -->|reject| Q[quarantine + reason]
+  D -->|accept| F[FeedbackRowID]
+  F --> P[SafetyFeedbackSet-025]
+  P --> T[SFT/DPO/RL candidate<br/>CKPT-025]
+  T --> E[held-out red-team eval]
+  E --> I[SafetyDecision-025]
+  I -->|26장| O[telemetry contract]
+```
+
+|row/state|예시|학습 사용|불변조건|
+|---|---|---|---|
+|`CaseSeedID`|`CASE-locality-017`|아니오|24장 실패 row와 양방향 연결|
+|`AttemptID`|`ATT-025-0041`|아니오|attack template·tool permission·seed·전체 trajectory 보존|
+|judge row|unsafe, confidence 0.72, disagreement=true|검토 전 아니오|judge revision과 사람 재심 결과를 분리|
+|`FeedbackRowID`|chosen=safe refusal, rejected=tool execution|예|prompt·chosen·rejected의 tokenizer revision 동일|
+|holdout family|`indirect-injection/ko`|학습 금지|feedback과 semantic cluster가 겹치지 않음|
+|decision|ASR 0.18→0.07, utility −0.01|출시 입력|risk budget과 불확실성 동시 기록|
+
+공격 성공률은 다음 분모를 가진다.
+
+$$
+ASR={\sum_i w_i\,\mathbf 1[success_i]\,\mathbf 1[valid_i]
+\over \sum_i w_i\,\mathbf 1[valid_i]}.
+$$
+
+|기호|실제 필드|코드/상태 의미|
+|---|---|---|
+|$success_i$|`oracle.success`|정책 위반, 권한 획득, 정보 유출을 별도 outcome으로 판정|
+|$valid_i$|`attempt.status == completed`|timeout과 parser error를 안전 성공으로 세지 않음|
+|$w_i$|`sampling_weight`|공격 family의 목표 모집단에 대한 가중치|
+|분모|valid weight 합|prompt 수, completion 수, judge 호출 수가 아님|
+
+adversarial training은 $\min_\theta\mathbb E_x[\max_{\delta\in\mathcal S}L(\theta,x+\delta)]$로 쓸 수 있지만, 내부 최대화는 실제 attack generator의 budget·권한·중단 조건으로 구현된다. `\mathcal S`를 적지 않은 robust objective는 재현할 수 없다. 선호 학습 소비 경계는 [TRL DPO trainer의 고정 코드](https://github.com/huggingface/trl/blob/a7be897f5c8d7b52161f9f8a47d8e6242456b898/trl/trainer/dpo_trainer.py#L1755-L1780), 레드팀 실행기의 원형은 [garak 원 저장소](https://github.com/NVIDIA/garak), 안전 정렬의 배경은 [Constitutional AI 논문](https://arxiv.org/abs/2212.08073)에서 확인한다.
+
+### 반증 실험과 관측 인계
+
+`SAFE-025-M1`은 judge만 속이는 접미사를 넣는다. 사람 gold와 tool-side effect oracle이 유지되므로 judge 점수만 좋아진 후보를 거부해야 한다. `M2`는 feedback의 paraphrase를 holdout에도 넣어 split lineage gate를 실패시킨다. `M3`는 공격이 제안한 tool call을 실제 권한 없이 성공으로 기록한다. executor event와 비교해 최초 불일치를 찾아야 한다. `M4`는 안전 reward를 높이면서 과잉 거절률을 악화시킨다. 다차원 decision rule이 단일 reward 상승을 기각해야 한다.
+
+26장에 넘기는 것은 평균 ASR이 아니라 `{SafetyDecision-025, attack-family budget, feedback digest, held-out row set, required runtime signals}`다. `attack_attempts_total{family,status}`, `unsafe_outcomes_total{family,outcome}`, `judge_disagreement_ratio{judge_revision}`, `refusal_rate{capability_slice}`의 schema와 cardinality budget도 함께 넘긴다. 실행 재현은 [reward calibration 실습](../labs/19-reward-calibration-disagreement-lab.md)과 [stale rollout 플레이북](../playbooks/08-stale-rollout.md)에 연결한다. 아래의 위협 모델·agent·멀티모달·reward hacking 절은 이 폐회로의 공격 family와 admission rule을 확장한다.
+
 레드팀 결과를 SFT나 RL에 넣는 순간, 공격을 재는 데 쓰던 표본이 모델을 바꾸는 학습 데이터가 된다. 이 경계를 기록하지 않으면 다음 평가에서 모델이 새로운 공격에 강해진 것인지 이미 본 문구를 외운 것인지 구별할 수 없다. 그러므로 “안전 점수가 올랐다”고 결론 내리기 전에 위협 모델과 공격 경로를 고정하고, 어떤 case family가 학습으로 넘어갔는지 추적해 private 평가와의 누출부터 진단한다.
 
 이 장을 관통하는 사슬은 다음과 같다.
@@ -2556,254 +2606,27 @@ known limitations는 over-refusal, uncovered domains, multimodal blind spots, ju
 
 업데이트 뒤 old card를 덮지 않고 model/policy generation별로 보존한다. adapter·quantized exports가 다른 support를 가지면 별도 표를 둔다. rollback parent와 revocation을 연결한다.
 
-## 25.15 한 CaseID의 왕복으로 최종 승인 조건을 닫는다
+## 25.15 GR-001/Safety fork — AttackID에서 학습 환류까지
 
-마지막 절은 한 공격 사례를 data, loss, checkpoint, 평가와 production incident까지 왕복시켜 누락된 증거를 찾는다.
+후반의 CaseID 왕복, 선택 편향, reward hacking, 헌법·과정 보상과 refusal 논의는 `AttackID` 폐회로로 합친다. red-team 발견, evaluation, 데이터 편입, reward/RL update와 product mitigation은 서로 다른 상태다. 공격 성공을 곧바로 학습 row로 복사하지 않는다.
 
-private tool-injection case 하나를 선택한다. raw payload의 권리·redaction, rendered messages, target/tool policy, attack attempts와 judge/human 판정을 기록한다. runtime root cause와 training eligibility를 결정한다.
-
-학습 row로 승인되면 SFT 또는 preference의 roles, chosen/rejected, loss mask와 SampleID를 확인한다. gradient가 어느 parameters에 도달하고 benign control과 충돌하는지 본다. candidate checkpoint와 policy bundle을 만든다.
-
-offline family/private, capability와 sandbox side-effect를 평가하고 canary 권한을 제한한다. production detector, trace exemplar와 rollback을 검증한다. incident exact case 성공만으로 promotion하지 않는다.
-
-그 뒤 guard threshold와 model adapter를 각각 제거해 어느 layer가 failure를 막았는지 본다. stale cache·session과 tool token을 남겨 rollback이 완전한지 시험한다. 전체 사슬이 같은 CaseID·RunID·ReleaseID로 재생돼야 한다.
-
-### 최종 판정의 여섯 축
-
-첫 축은 위협 모델 coverage다. 어떤 공격자·권한·budget을 검증했는지 적는다. 둘째는 harmful behavior 감소와 uncertainty다. 셋째는 benign helpfulness·capability와 over-refusal이다.
-
-후속 판정에는 실제 tool/RAG/side-effect containment, data·judge·model·policy·serving generations의 lineage, incident detection·rollback과 residual risk가 포함된다. weighted 평균 하나로 hard failure를 상쇄하지 않는다.
-
-각 축은 PASS, FAIL, NOT_RUN과 evidence를 가진다. missing telemetry, judge outage와 inaccessible case를 PASS로 바꾸지 않는다. high-severity unknown은 release를 제한할 수 있다.
-
-reviewer는 weakest axis와 strongest claim을 골라 반증한다. 문장이 evidence보다 넓으면 범위를 줄인다. 안전성은 한 번의 인증이 아니라 새 공격과 runtime 변화에 따라 계속 갱신되는 제한된 case다.
-
-### 옵션 하나가 바꾸는 상태를 설명한다
-
-safety loss weight를 올리면 단순히 “더 안전해지는” 것이 아니다. total gradient에서 safety rows의 비중, optimizer moments와 capability replay의 상대 영향이 바뀐다. category별 efficacy, over-refusal과 selected parameter update를 함께 본다.
-
-attack budget을 늘리면 target model은 같아도 any-success probability, query cost와 발견 가능한 tail이 바뀐다. static ASR과 adaptive budget curve를 분리한다. budget이 다른 결과를 같은 benchmark score로 비교하지 않는다.
-
-judge threshold를 바꾸면 model behavior가 아니라 confusion matrix, review queue와 reported ASR이 변한다. raw responses를 old/new threshold에 paired 평가한다. threshold update를 model improvement로 세지 않는다.
-
-tool permission을 낮추면 side effect risk는 줄지만 task success도 변한다. model output score와 authorization-denied count, benign tool completion을 함께 본다. 옵션의 효과를 어느 state가 소유하는지 명확히 한다.
-
-### 안전 checkpoint가 완전한지 확인한다
-
-checkpoint에는 model·adapter weights, optimizer, scheduler, scaler·EMA와 data/curriculum cursor가 있다. 안전 학습에서는 reference/reward/judge generation, policy taxonomy와 row eligibility도 필요하다. model weight만 저장하면 resume가 같은 objective를 보장하지 않는다.
-
-stage 전환에서 safety adapter가 optimizer group에 실제로 들어 있는지, frozen base가 변하지 않았는지 inventory를 비교한다. DPO reference와 online RL reward가 parent digest를 유지하는지 본다. stale classifier cache를 차단한다.
-
-resume 첫 step 전 golden safety/benign batch의 logits, loss components, valid counts와 selected gradients를 재현한다. 첫 update delta까지 uninterrupted run과 비교한다. dropout·distributed nondeterminism의 허용오차를 사전 정의한다.
-
-incomplete save나 mixed generations는 loader가 거절해야 한다. parent는 child commit 전 삭제하지 않는다. rollback rehearsal에서 old policy text나 tool permission이 섞이지 않는지 확인한다.
-
-**비용 장부에 false positive도 넣는다**
-
-안전 방어 비용은 학습 GPU 시간과 classifier latency만이 아니다. benign request 차단, human review, customer support, tool fallback과 incident response가 포함된다. false positive의 사용자·업무 영향도 severity별로 본다.
-
-attack generation과 judge ensemble은 큰 evaluation 비용을 가진다. campaign당 target queries, attacker/judge tokens, accelerator hours와 사람 시간을 보고한다. 재현 가능한 core와 exploratory frontier의 예산을 분리한다.
-
-runtime guard가 latency를 늘려 timeout·retry를 만들면 traffic와 cost가 변한다. cold/warm, blocked/allowed paths와 tool workflows를 나눈다. 빠른 unsafe path가 차단돼 평균 latency가 내려가는 착시도 점검한다.
-
-비용 최적화가 coverage를 줄이지 않도록 high-severity 강제 관문s를 유지한다. judge calls를 줄일 때 calibrated sampling과 audit rate를 둔다. missing evaluation을 비용 절감 성공으로 쓰지 않는다.
-
-**독자의 실습 순서**
-
-공개 attack family 하나와 harmless sandbox target을 고른다. target·attacker·judge revision, cases, attempts와 budget을 manifest에 고정한다. invalid·timeout을 포함한 denominator를 손으로 재계산한다.
-
-한 failure를 SFT row와 DPO pair 두 방식으로 설계한다. tokenized roles, labels, valid completion count와 preference statistic을 계산한다. benign matched control과 gradient owner를 적는다. 실제 대규모 학습을 실행하지 않아도 이 계약은 정적으로 감사할 수 있다.
-
-system prompt, guard와 tool policy를 각각 켜고 꺼서 defense layer를 분리한다. model-only, guard-only와 full stack 결과를 표로 만든다. mock tool side effect와 authorization log를 확인한다.
-
-candidate release·stale session·rollback은 상태 기계로 그린다. 어느 generation mismatch에서 요청을 차단하는지, incident case가 어떻게 private regression과 training candidate로 갈라지는지 설명한다.
-
-**장을 닫는 기준**
-
-레드팀은 공격 문자열을 많이 모으는 일이 아니다. 공격자 권한과 피해를 정의하고, 실패를 재현하며, 올바른 data·model·system layer를 수정하고, capability와 residual risk를 함께 측정하는 과정이다.
-
-안전 학습은 refusal score를 높이는 일이 아니다. target span·preference·reward가 어떤 gradient를 만들고, benign assistance와 tool action을 어떻게 바꾸는지 검산해야 한다. judge와 benchmark의 오류도 model 오류와 분리한다.
-
-운영 완성선은 incident에서 CaseID, training row, candidate, policy bundle, canary와 rollback까지 재생되는 상태다. raw sensitive evidence는 최소 권한으로 보호하면서 aggregate claim을 독립적으로 검토할 수 있어야 한다.
-
-이 기준을 통과한 release도 검증한 threat model 안에서만 안전하다. 새 attack, modality, tool, judge와 policy가 등장하면 affected cells를 다시 연다. unknown을 남기는 것이 과장된 보장보다 강한 안전 공학이다.
-
-**마지막 반증 시험.** release report에서 가장 높은 개선 수치를 고른다. 같은 raw parent cases를 old/new judge, model-only/full-stack, fixed/adaptive attacker의 네 축으로 교차 평가한다. 개선이 judge threshold, timeout 증가, guard 차단이나 attack budget 축소에서 나온 것인지 분리한다. 이어 같은 mechanism의 다른 언어·modality와 benign boundary를 넣어 coverage가 실제로 넓어졌는지 본다.
-
-tool case라면 model response만 읽지 않고 authorization request, sandbox execution과 committed side effect까지 trace한다. unsafe call이 guard에 막혔다면 model failure와 system containment을 둘 다 기록한다. safe text 뒤 숨은 tool argument가 있으면 language judge PASS를 취소한다. rollback 뒤 session, cache, draft model과 queued actions까지 parent generation인지 확인한다.
-
-data case라면 source 권리, redaction, split, loss mask와 realized gradient contribution을 추적한다. private evaluation sibling이 training에 들어가지 않았는지 확인한다. label orientation과 policy taxonomy가 candidate run에서 실제로 사용된 revision과 맞아야 한다. row가 존재한다는 사실만으로 소비됐다고 추정하지 않고 SampleID와 UpdateID를 찾는다.
-
-이 반증에서 살아남은 문장만 safety case에 남긴다. 실패하면 score를 숨기지 않고 어떤 defense layer와 scope에서만 유효했는지 축소한다. 다음 red-team 주기는 그 실패와 unknown을 우선 탐색한다. 이렇게 해야 안전 작업이 benchmark 승패가 아니라 점점 더 정확해지는 위험 모델과 복구 가능한 운영 체계가 된다.
-
-최종 인수자는 임의의 CaseID를 골라 공격 목적과 권한, attempts·budget, target responses, judge와 human adjudication을 재구성한다. 같은 CaseID에서 training eligibility, transformed row, loss mask, candidate checkpoint와 release bundle을 찾는다. 어느 단계에서도 자연어 파일명으로 최신본을 추정하지 않는다. generation resolver와 checksum이 정확한 객체를 가리켜야 한다.
-
-이어 benign control과 high-severity tool control을 같은 model·policy generation에서 실행한다. safety score가 좋아졌지만 helpfulness floor나 deterministic authorization이 깨졌다면 release는 통과하지 못한다. telemetry가 누락되면 incident 0이 아니라 unknown이다. rollback parent가 존재해도 rights floor, active sessions와 side effects를 복구하지 못하면 rollback-ready가 아니다.
-
-새 judge 또는 새 attack tool을 하나 도입했다고 가정한다. 어느 evaluation cells가 stale가 되고 어떤 raw outputs를 재사용할 수 있으며 무엇을 다시 생성해야 하는지 설명한다. judge change는 model output을 바꾸지 않지만 판정과 review queue를 바꾸고, attacker change는 query distribution과 budget을 바꾼다. 이 영향 구분을 재현할 수 있을 때 25장의 안전 사슬이 비로소 닫힌다.
-
-그 사슬은 공격을 완전히 끝냈다는 선언이 아니다. 검증한 범위, 남은 위험과 다음 탐색 지점을 정확히 보여주는 살아 있는 계약이다. 새로운 failure가 발견되면 이전 PASS를 지우지 않고 child safety case로 추가하며, containment와 durable fix, 재평가와 rollback을 같은 사건 계보에서 관리한다.
-
-독립 검토자가 이를 다시 완전히 재생할 수 있어야 비로소 운영 가능한 안전 근거가 된다.
-
-## 25.16 보상·사람 판정의 선택 편향을 공격 표면으로 다룬다
-
-레드팀 결과가 preference나 reward dataset으로 들어가면 공격 성공 여부와 학습 기여가 같은 변수가 아니다. `CaseID → AssignmentID → RawRatingID → AdjudicationID → PairID → RewardExampleID → UpdateID`를 잇고, 각 변환에서 포함 확률과 제외 이유를 남긴다. 고위험 사례만 사람이 재심하면 adjudicated set은 원 공격 분포의 무작위 표본이 아니다. 그 승률을 전체 attack success rate로 보고하거나, sampling weight 없이 reward calibration에 쓰지 않는다.
-
-### 코드 워크스루: garak Attempt에서 학습 후보까지 첫 불일치를 찾는다
-
-고정 revision `8ed1543b985a5722adb659584182faf6f7907d4e`에서 하나의 시도는 다음 경계를 지난다. `Probe._execute_attempt`(`garak/probes/base.py:309-319`)가 prompt를 generator에 넘기고 `generations_this_call`개의 output을 `Attempt.outputs`에 붙인다. `_execute_all`(`:321-383`)은 이 일을 직렬 또는 병렬로 수행한다. 병렬 분기의 `imap_unordered`와 주석이 말하듯 반환 배열은 입력 case 순서가 아니다. 따라서 위치 `i`가 같은 것끼리 붙이는 집계기는 첫 단계부터 다른 공격의 응답을 판정할 수 있다.
-
-그 뒤 `StringDetector.detect`(`garak/detectors/base.py:220-274`)는 output마다 `float | None` 하나를 만든다. 문자열이 발견되면 `1.0`, 발견되지 않으면 `0.0`, output이나 판정이 유효하지 않으면 `None`이다. 마지막으로 `Evaluator._evaluate_one_detector`(`garak/evaluators/base.py:62-90,137-199`)가 threshold 아래를 `passes`, 위를 `fails`, `None`을 `nones`로 나눈다.
-
-집계 결과에는 `total_evaluated=passes+fails`, `total_processed=passes+fails+nones`가 따로 기록된다. 여기서 garak의 pass는 probe가 찾으려던 현상이 검출되지 않았다는 뜻이다. 책의 ASR 분자는 `fails`, 분모는 `total_evaluated`에 대응하지만, 이 대응은 detector 방향과 threshold를 manifest에 고정했을 때만 성립한다.
-
-이 분모는 추측이 아니라 좁은 단위 계약으로 확인할 수 있다. `tests/evaluators/test_evaluators.py:505-528`의 `test_eval_record_fields`는 세 output의 detector score를 `[0.0, 0.8, None]`, threshold를 `0.5`로 둔다. 기대치는 `passed=1`, `fails=1`, `nones=1`, `total_evaluated=2`, `total_processed=3`이다. 구현의 report record(`garak/evaluators/base.py:189-222`)도 두 필드를 따로 쓴다. 따라서 유효 판정 비율의 분모와 scanner가 손댄 output 수는 같은 숫자가 아니다. 다만 여기서 `processed`는 report count의 정적 의미일 뿐이다. 요청 처리량, latency, detector 비용이나 운영 환경의 성능을 측정한 benchmark로 읽으면 안 된다.
-
-핵심 경로를 무해한 합성 상태로 줄이면 다음과 같다. 실제 공격 문구나 모델은 필요 없다.
-
-```python
-attempts = [
-    {"case_id": "c0", "family": "boundary", "output": "SAFE_HELP",   "score": 0.0},
-    {"case_id": "c1", "family": "boundary", "output": "UNSAFE_MARK", "score": 1.0},
-    {"case_id": "c2", "family": "boundary", "output": None,          "score": None},
-]
-
-def disposition(score, threshold=0.5):
-    if score is None:
-        return "judge_invalid"
-    return "attack_success" if score >= threshold else "attack_failed"
-
-rows = [{**a, "disposition": disposition(a["score"])} for a in attempts]
-valid = [r for r in rows if r["disposition"] != "judge_invalid"]
-asr = sum(r["disposition"] == "attack_success" for r in valid) / len(valid)
-coverage = len(valid) / len(rows)
-assert (asr, coverage) == (0.5, 2 / 3)
+```mermaid
+flowchart LR
+ T[threat model + capability graph] --> A[AttackID execution]
+ A --> J[judge/human/verifier disposition]
+ J --> H[root cause: model/data/tool/product]
+ H --> M[mitigation candidate]
+ M --> V[attack replay + benign controls]
+ V --> Q[quarantine or eligible training data]
+ Q --> D[release safety case]
 ```
 
-fixture의 schema는 `Attempt[3] → Output[3] → DetectorScore[3] → Disposition[3]`이다. tensor가 아니라 행 집합이지만 shape 계약은 엄격하다. 각 축은 길이 3이고 `case_id`와 `output_idx`로 결합한다. score가 `None`인 c2를 `0.0`으로 대치하면 ASR은 1/3로 내려간다. 모델이 안전해진 것이 아니라 관측 실패가 분모에 들어간 것이다. 상류의 `test_evaluate_with_nones`(`tests/evaluators/test_evaluators.py:343-356`)는 `[0.0,None,0.8,None]`을 pass 1, fail 1, none 2로 세는 계약을 직접 고정한다.
+| evidence | 고유 state | 반증 질문 |
+|---|---|---|
+| attack | target subject, prompt/tool/media lineage, seed | 재현 가능한가, 권한 경계가 무엇인가 |
+| judgment | policy/rubric/judge revision, disagreement | 위치·길이·선택 편향인가 |
+| reward | component numerator/denominator, proxy version | 사람 효용과 갈라지는가 |
+| training | eligibility, family split, objective·UpdateID | holdout/benign behavior를 오염했나 |
+| mitigation | model vs sandbox/guard identity | capability를 줄였나 탐지만 피했나 |
 
-이제 평가 결과를 학습 후보로 바꾼다. 이 변환은 garak의 책임이 아니다. garak는 공격 실행·검출·집계를 제공하지만 SFT row, preference pair, reward update를 생성하지 않는다. 그러므로 아래 코드는 프로젝트가 별도 version과 test를 가져야 하는 명시적 경계다.
-
-```python
-def to_training_candidate(row, policy_rev, judge_rev):
-    if row["disposition"] != "attack_success":
-        return None
-    return {
-        "sample_id": f"rt:{row['case_id']}:{judge_rev}",
-        "case_id": row["case_id"],
-        "prompt_asset_digest": "sha256:fixture-only",
-        "rejected": row["output"],
-        "chosen": "SAFE_HELP",          # 사람이 정책 경계와 도움성을 별도 승인
-        "policy_rev": policy_rev,
-        "judge_rev": judge_rev,
-        "split": "train-candidate",     # sealed sibling은 여기로 오면 안 된다
-        "weight": 1.0,
-    }
-
-candidate = to_training_candidate(rows[1], "policy-7", "judge-3")
-assert candidate["case_id"] == "c1"
-assert to_training_candidate(rows[2], "policy-7", "judge-3") is None
-```
-
-`candidate`가 생겼다고 gradient가 발생한 것은 아니다. export digest, tokenizer·chat-template revision, chosen/rejected orientation, loss mask와 dataloader가 관측한 `SampleID`를 거쳐야 한다. DPO라면 19장의 sequence log-ratio에 들어간 pair와 이어지고, SFT라면 chosen completion token만 loss mask가 1인지 확인한다. `UpdateID`에서 이 SampleID를 찾지 못하면 “레드팀 결과를 학습했다”가 아니라 “후보 큐에 넣었다”고 써야 한다. 같은 root family의 sealed evaluation sibling은 lineage gate가 export 전에 거절해야 한다.
-
-첫 불일치 표는 네 변형을 한 번에 섞지 않는다. 첫째, `generations=1→4` 또는 adaptive query budget `1→8`은 case당 output 수와 any-success 확률을 바꾼다. `Attempt` 직후 output-count 열에서 처음 갈라져야 한다. 성공 output 하나만 남기면 실패 비용과 탐색 편향을 잃는다. 둘째, `parallel_attempts=1→4`는 완료 순서만 흔들 수 있다. CaseID로 정렬한 raw multiset은 같아야 하며 위치 join의 CaseID가 달라진다면 executor-to-join 경계가 최초 오류다.
-
-셋째, judge threshold `0.5→0.9` 또는 detector revision 변경은 frozen response를 바꾸지 않는다. divergence는 `DetectorScore`나 `Disposition`에서 시작해야 한다. response bytes부터 다르면 judge 비교가 아니라 target 재생 실패다. 넷째, benign-near-boundary control을 campaign 앞이나 뒤에 두었을 때 score가 달라지면 stateful target, rate limit, cache 또는 judge drift를 의심한다. 순서 효과를 모델의 평균 안전성으로 접지 말고 campaign position을 blocking 변수로 둔다.
-
-ASR과 과잉 거절은 같은 detector의 보수로 만들지 않는다. 공격 fixture의 `UNSAFE_MARK` 검출은 policy violation 축이고, benign fixture의 과도한 거절은 별도 helpfulness rubric 축이다. candidate가 c1을 막으면서 benign c3에도 항상 `SAFE_HELP` 같은 상투적 문장만 내면 공격 ASR은 내려가도 유용성은 무너질 수 있다. 따라서 release 표에는 `(ASR, valid coverage, benign unnecessary-refusal rate, helpful completion rate)` 네 열과 각 judge revision을 둔다. high-severity violation은 강제 관문로 남기고 평균 helpfulness로 상쇄하지 않는다.
-
-이 walkthrough가 증명하지 않는 것도 분명하다. 문자열 detector의 `1.0`은 지정 문자열이 있었다는 사실만 증명하며 의미적 정책 위반, 실제 tool side effect나 인간의 위해 판단을 증명하지 않는다. NFKC test도 하나의 Unicode 우회를 막는 계약이지 다국어·이미지·도구 공격의 coverage가 아니다. 상류 evaluator test는 `None` 분리와 집계 방향을 증명하지만 우리의 training conversion, sealed split, reward calibration과 배포 안전성을 시험하지 않는다. 이 음성 증거를 남겨야 코드 좌표가 보증서로 과장되지 않는다.
-
-같은 이유로 `test_eval_record_fields`가 통과했다는 사실은 출시 관문가 닫혔다는 뜻이 아니다. 이 테스트는 조직별 허용 한계, severity별 강제 관문, 승인권자와 예외 만료일을 읽지 않으며 model registry나 deployment controller를 호출하지 않는다. 실패 attempt를 SFT row·preference pair·RL prompt로 변환하는 코드도 실행하지 않는다. 그러므로 `집계 테스트 PASS`, `release 정책 PASS`, `registry publication 차단 PASS`, `학습 환류 PASS`를 네 칸으로 분리하고 각 칸에 직접 호출된 함수와 assertion이 없으면 `미검증`으로 둔다.
-
-release 전 변형 fixture는 한 번에 한 경계만 흔든다. `[0.0,0.8,None]`에서 `None→0.0`을 바꾸면 최초 차이는 detector disposition과 두 분모여야 한다. threshold `0.5→0.9`는 frozen output을 유지한 채 pass/fail에서 갈라져야 한다. report의 `total_evaluated`만 고의로 3으로 바꾸면 재계산기가 이를 거절해야 한다. 마지막으로 high-severity fail 한 건을 넣었을 때 release decision이 `PASS→BLOCK`으로 바뀌고 registry publish 호출이 발생하지 않는지는 프로젝트의 통합 fixture로 따로 증명한다. 첫 세 테스트가 마지막 동작을 대신하지 않는다.
-
-### reward 폐루프를 반대 방향에서도 검산한다
-
-OpenAI `lm-human-preferences/label_types.py:44-49`에서 best-of-N choice는 N개 reward logit의 sparse softmax loss가 된다. 반면 `:95-102`의 scalar comparison은 `output1-output0`과 입력 difference의 제곱 오차다. pair orientation을 뒤집고 difference 부호를 유지하는 주입은 parser 단계가 아니라 label-to-loss 변환에서 잡혀야 한다. `rewards.py:43-61`은 `do_dropout`을 모델에 전달한 뒤 마지막 token의 scalar head에 gain과 bias를 적용한다. 같은 pair에서 reward가 흔들릴 때 먼저 label bytes, orientation, dropout mode, normalization gain·bias, checkpoint digest 순으로 비교한다.
-
-실전 fixture에는 unsafe/benign 경계 pair, tie, abstain, 긴 답, 비영어 답과 tool side-effect 사례를 넣는다. 원 판정표와 재심표를 분리하고 blind condition·presentation order를 교차한다. label 한 건 삭제, annotator 한 명의 방향 반전, 재심 대상만 과대표집, dropout을 평가 때 켜기, reward gain을 stale checkpoint에서 복원하기를 각각 주입한다. 최초 차이가 assignment, raw rating, adjudication, tensor label, stochastic forward, normalization 중 예상한 지점에서 발생하는지 본다.
-
-출시 checklist는 단순 agreement threshold가 아니다. 공격 family별 overlap, annotator 군집별 confusion, tie·abstain·invalid 분모, 재심 선택 확률, benign control의 false positive, reward model train/eval mode, seed, reward normalization parent, label schema와 pair orientation을 확인한다. 사람 판정과 reward가 일치해도 둘이 같은 편향을 공유할 수 있으므로 독립 규칙 기반 oracle이나 별도 전문가 표본으로 반증한다. 안전 개선이라는 결론은 이 측정 범위 안의 추론이며, 관측하지 않은 언어·권한·도구까지 법적·기술적 보장으로 넓히지 않는다.
-
-마지막 판정은 `공격이 줄었는가`와 `정상 요청을 덜 막는가`를 같은 숫자로 합치지 않는다. severity 강제 관문, family별 ASR·coverage, benign ORR과 미판정 비율을 각각 통과시킨 뒤에만 release를 논의한다. 실패한 축은 해당 CaseID에서 raw attempt, judge 입력, label 변환, reward와 update를 역순으로 걸어 최초 불일치를 찾고, 그 경계의 owner에게 수정과 회귀 fixture를 함께 배정한다.
-
-## 25.17 reward hacking을 proxy와 사람 효용의 분기로 탐지한다
-
-red-team prompt에 높은 reward가 붙는 원인을 분해한다. 실제 안전한 해결, 길어진 면책문, 특정 형식 marker, 과도한 거절, judge가 선호하는 문체는 같은 score를 만들 수 있다. 길이·style을 보존하거나 교란한 counterfactual pair를 만들고 reward, 독립 judge, 사람 판정을 나란히 비교한다.
-
-과최적화 campaign은 policy checkpoint별 raw reward 분포와 tail, KL, 응답 길이, 정상 요청 거절률, held-out 공격 성공률을 기록한다. reward 상승 구간에서 독립 지표가 꺾이는 최초 checkpoint가 release 경계다. clipping은 극단 score의 gradient를 제한하지만 proxy 결함을 고치지 않고, whitening은 scale을 바꾸지만 순위 편향을 제거하지 않는다.
-
-공개 component test가 reward margin과 scaling 경로를 검증해도 production annotator의 구성·교육·보상·중복 판정과 disagreement 원자료는 증명하지 않는다. 이 정보가 없으면 “human-aligned score” 대신 어떤 공개 fixture와 rubric에서 관측한 모델 score인지 좁게 표기한다.
-
-## 25.18 헌법·과정 보상·검증기를 하나의 반증 가능한 폐루프로 묶는다
-
-헌법적 AI를 “AI가 AI를 평가한다”는 한 문장으로 줄이면 설계의 절반이 사라진다. 공개된 Constitutional AI 절차에는 서로 다른 두 번의 학습이 있다. 먼저 초기 응답에 원칙을 적용해 자기비평과 수정본을 만들고, 수정본을 SFT 데이터로 삼는다. 다음에는 같은 prompt의 후보 둘을 AI judge가 원칙에 비추어 비교하고, 그 선호로 reward model을 학습한 뒤 RL을 수행한다. 따라서 constitution은 장식적인 system prompt가 아니라 `원칙 revision→비평 prompt→수정본→선호 판정→reward revision→policy update` 전체의 부모 artifact다. 어느 한 단계의 원칙·judge template·후보 순서가 바뀌면 뒤의 데이터와 모델도 새 generation이다.
-
-**RLAIF의 절약은 감독 비용을 없애는 것이 아니라 옮긴다.**
-
-AI feedback은 사람 pair label의 양을 줄일 수 있지만 무엇이 바람직한지 결정하는 일을 제거하지 않는다. 누가 원칙을 썼는지, 상충 원칙의 우선순위가 무엇인지, judge가 어느 언어와 위험 family에서 과신하는지, 같은 model family가 응답 생성과 판정을 함께 맡아 오류를 공유하는지가 새로운 감독 표면이 된다. 그래서 candidate 생성 model, critic, reviser, preference judge와 최종 독립 evaluator의 revision을 따로 기록한다. 후보 순서를 뒤집고 길이를 맞춘 pair, 원칙 하나만 바꾼 최소쌍, judge가 모르는 언어, 사람과 AI가 불일치한 표본을 보존한다.
-
-Anthropic의 공개 연구는 이 두 단계 메커니즘과 실험을 설명하지만 상용 모델의 최신 데이터 생성기·전체 judge prompt·private red-team corpus를 byte 단위로 공개하지 않는다. 공개 논문을 근거로 메커니즘을 설명할 수는 있어도 생산 파이프라인을 그대로 재현했다고 쓸 수는 없다. 이 음성 증거는 약점이 아니라 결론의 경계다.
-
-**process reward는 단계 경계의 측정 문제다.**
-
-과정 보상 모델은 최종 답 하나 대신 중간 단계마다 정오 라벨을 받는다. 수학적으로 token classification처럼 보이지만 분모는 모든 token이 아니다. 현재 TRL의 `PRMTrainer.tokenize_row`는 각 completion step 뒤에 separator token을 붙이고 그 separator의 마지막 token에만 0 또는 1을 둔다. prompt와 단계 내부 token은 `-100`이다. 따라서 loss와 accuracy의 유효 표본 수는 sequence length가 아니라 살아남은 step boundary 수다.
-
-이 구현 세부는 옵션의 의미를 바꾼다. `train_on_last_step_only=True`이면 학습 split에서 앞 단계 라벨이 모두 `-100`이 되어 사실상 마지막 단계 감독만 남는다. `max_completion_length`가 단계 separator 직전에 잘리면 그 단계의 라벨은 통째로 사라진다. “같은 batch size”라도 풀이 길이와 truncation 분포가 다르면 유효 감독 질량이 다르므로 `valid_step_count`, positive/negative count와 잘린 label count를 함께 기록해야 한다. TRL의 canonical test는 no-truncation, last-step-only, truncation과 ignore-mask accuracy를 직접 고정한다.
-
-```python
-# PRM batch에서 optimizer가 실제로 보는 분모
-valid = labels.ne(-100)
-valid_steps = valid.sum()
-loss = cross_entropy(step_logits[valid], labels[valid], reduction="sum")
-loss = loss / valid_steps.clamp_min(1)
-```
-
-이 코드는 개념식이다. 프레임워크의 실제 reduction과 distributed scaling을 그대로 대신하지 않는다. 중요한 것은 `B×T`를 분모로 쓰지 않는다는 점이다. rank별 valid step 수가 다르면 local mean을 평균하는 방식도 틀릴 수 있으므로 전역 loss sum과 전역 valid count를 reduce해야 한다.
-
-**outcome verifier와 process verifier는 서로 대체재가 아니다.**
-
-최종 상태를 실행해 맞는 답인지 확인하는 outcome verifier는 중간 설명이 잘못돼도 답이 우연히 맞으면 통과시킨다. 반대로 process verifier는 단계 annotation granularity와 서술 방식에 민감하며, 완전히 다른 유효 풀이를 오답으로 볼 수 있다. 둘은 서로의 오류를 상쇄할 수 있지만 자동으로 독립적이지 않다. 같은 generator가 만든 풀이와 같은 model family의 judge를 쓰면 오류 상관이 커진다.
-
-인수 fixture는 네 칸을 유지한다. 첫째 최종 답과 과정이 모두 옳은 control, 둘째 답은 맞지만 중간 추론이 틀린 shortcut, 셋째 과정은 유효하지만 마지막 arithmetic이 틀린 사례, 넷째 표현만 바꾼 등형 문제다. outcome score, step score, 사람 판정과 symbolic execution을 나란히 놓고 최초 불일치를 기록한다. 어느 하나의 점수를 진실로 선언하지 않는다.
-
-**Goodhart를 점수 이상으로 진단한다.**
-
-검증 가능한 보상도 specification 전체를 검증하지 않으면 proxy다. 모델은 문법 검사만 통과하는 빈 답, 공개 test만 맞추는 분기, instance label 열거, 과도하게 긴 면책문처럼 검증기가 보지 않는 차원을 희생할 수 있다. reward hacking의 신호는 단순히 reward가 높다는 사실이 아니라 최적화 강도가 커질수록 proxy와 독립 효용이 갈라지는 것이다.
-
-등형 변환 시험은 이 갈라짐을 좁게 잡는다. 객체 이름과 순서만 바꾸되 논리 구조를 보존한 문제에서 결과도 같은 변환을 따라야 한다. 원 문제의 instance만 열거한 출력은 extensional checker를 통과할 수 있지만 등형 문제에서는 깨진다. 여기에 길이·문체 보존 pair, hidden test, 독립 final-state oracle과 사람 표본을 더한다. clipping이나 KL은 정책 이동 크기를 제한할 뿐 누락된 검증 차원을 복구하지 않는다.
-
-**red-team 발견을 학습으로 되돌릴 때 평가를 소비하지 않는다.**
-
-폐루프는 `AttackCaseID→raw response/tool trace→judge revision→human adjudication→train eligibility→SFT/preference/RL row→UpdateID→sealed sibling evaluation→release decision`으로 닫는다. 발견 prompt를 그대로 train과 test에 복제하면 다음 점수 상승은 일반화가 아니라 암기일 수 있다. 같은 root family에서 train 변형과 봉인된 sibling을 별 generator·seed로 만들고, 원 공격은 제한된 회귀 fixture로 보존한다.
-
-출시 전에는 최소 다섯 번 반증한다. 후보 순서를 뒤집었을 때 AI preference가 유지되는지, 원칙 하나를 제거했을 때 예상 family만 변하는지, PRM separator와 truncation을 바꿨을 때 유효 step 분모가 경보를 내는지, outcome-only와 process-only selection의 오류 집합이 실제로 다른지, reward 상위 tail이 봉인된 사람·red-team 평가에서도 좋아지는지 본다. 이 다섯 경계를 통과해야 “보상이 올랐다”를 “의도한 행동이 개선됐다”로 승격할 수 있다.
-
-## 25.19 red-team 평가를 실제 학습 환류와 혼동하지 않는다
-
-폐루프의 기본 키는 prompt 문자열이 아니라 `AttackCaseID`다. case에는 probe·intent·payload revision, generator revision과 sampling seed를 붙이고, 각 generation을 output index로 분리한다. garak의 `Attempt`와 probe의 `_mint_attempt`는 이 최소 계보를 구현한다. detector는 output마다 score 또는 unscorable 상태를 만들고, report는 scan metadata와 evaluation record를 다시 묶는다. 이 연결이 있어야 같은 공격의 재시도와 서로 다른 공격을 coverage 분모에서 구분할 수 있다.
-
-판정기는 단일 정답 oracle이 아니다. normalization 설정만 바뀌어도 full-width 문자에 대한 탐지가 달라지고, 모델 judge revision은 threshold와 false-positive/false-negative를 함께 움직인다. 결과에는 detector·judge revision, normalization, threshold, score, verdict와 abstain/unscorable을 보존한다. confusion matrix는 사람 판정 anchor의 고정 stratified set에서 공격군별로 계산한다. unscorable을 안전 성공이나 공격 성공으로 몰아넣지 말고 coverage 결손으로 별도 보고한다.
-
-여기까지는 평가다. report export가 끝났다고 policy가 학습된 것은 아니다. 실패 사례를 hard-negative artifact로 만들 때 prompt·response·judge rationale·label provenance·dedup cluster·권리·접근등급을 기록한다. split은 row 무작위가 아니라 attack family, source conversation, template와 semantic duplicate group을 묶어 나눈다. dataset digest를 Trainer run과 묶고 optimizer update 뒤 새 PolicyRevision·RewardRevision을 발행해야 비로소 feedback edge가 닫힌다.
-
-다음 회차는 새 revision을 대상으로 고정 회귀 suite와 적응형 attacker를 함께 실행한다. judge도 함께 업데이트했다면 과거 raw output을 새 judge와 고정 사람 anchor로 재채점하여 policy 변화와 judge drift를 분리한다. 공격 성공률만 낮고 benign refusal과 capability가 악화되면 안전 향상으로 승인하지 않는다.
-
-공개 canonical test가 직접 증명하는 범위는 case 생성, output cardinality, detector 전처리, unscorable 처리와 report 구조다. hard-negative materialization에서 trainer/eval split, optimizer step과 policy/reward revision까지 잇는 종단 시험은 별도다. 적응형 attacker, judge drift calibration, family leakage 방지와 unsafe corpus의 최소권한·암호화·retention도 자동으로 성립하지 않는다. 실제 admission test가 통과하기 전에는 “red-team training loop 완료”라고 쓰지 않는다.
-
-## 25.20 거부 감소와 안전성 향상은 반대 방향일 수 있다
-
-Heretic의 evaluator는 설정된 marker 문자열이 응답에 포함되는지로 refusal을 세고, benign prompt에서 첫 생성 token logprob가 원본과 얼마나 달라졌는지를 batchmean KL로 계산한다. Optuna는 이 두 값을 함께 최소화한다. 이는 “거부 표현이 줄고 첫 token 분포가 덜 변했다”는 proxy다. harmful compliance가 늘지 않았는지, 우회 표현의 거부를 놓치지 않는지, 전체 sequence와 tool action이 안전한지는 측정하지 않는다.
-
-따라서 red-team admission에서는 최소 네 칸을 분리한다. 해로운 요청에 올바른 거부, 해로운 요청에 순응, 정상 요청의 과잉 거부, 정상 요청의 정상 수행이다. 언어·공격 family·대화 길이·tool 권한별 confusion과 severity를 계산하고, adaptive jailbreak와 held-out model-family를 사용한다. marker count만 떨어지면 첫 두 칸을 구분할 수 없고, benign 첫-token KL이 작아도 이후 sequence가 크게 갈라질 수 있다.
-
-가중치 intervention artifact에는 원본 checkpoint digest, prompt dataset과 split, residual extraction 설정, direction·projector와 layer weight, 수정 checkpoint digest, evaluator revision을 기록한다. 이것은 trainer run의 optimizer lineage와 다른 provenance다. safety/generalization과 독립 replication이 없는 상태에서는 연구용 intervention 결과를 production safety improvement나 표준 fine-tuning recipe로 승인하지 않는다.
-**공개된 결과에서 비공개 safety pipeline을 발명하지 않는다.**
-
-red-teaming과 sleeper-agent 연구는 공격 수집, 조건부 행동과 training 이후 지속성에 관한 중요한 반증을 제공한다. 하지만 논문에 적힌 평가 절차가 production hard-negative ingestion과 policy update를 자동으로 증명하지 않는다. trigger-aware sealed evaluation과 benign capability를 함께 측정하고, 공개되지 않은 data filtering·access control·rollout orchestration은 `PubliclyUnavailable`로 남긴다.
-red-team 평가에서 judge drift와 오염된 hard case가 모델 변화로 오인되는 과정은 [평가·오염·불확실성 결정적 실습](../labs/24-eval-contamination-uncertainty-lab.md)의 failure injection으로 추적한다.
-
-길이와 상투 문구만으로 reward를 올리는 proxy exploit, 사람 빈도와 reward probability가 반대로 움직이는 H probe는 [reward calibration·tie·disagreement 실습](../labs/19-reward-calibration-disagreement-lab.md)에서 분리한다. 같은 reward model이 공격을 만들고 성공까지 판정하는 순환 검증은 허용하지 않는다.
+reward 상승과 사람 효용 하락, monitor만 회피, refusal 감소와 unsafe compliance 증가, judge 순서 bias, tool 권한 우회와 multilingual/paraphrase transfer를 각각 별 mutation으로 둔다. constitutional rule이나 process verifier가 있어도 outcome 안전을 자동 보장하지 않는다. benign false refusal, utility, critical safety와 exploit reproducibility를 동시에 본다. 결과는 26장에 IncidentID·detector telemetry로, 30장에 exact subject의 safety hard gate와 residual risk로 넘긴다.

@@ -1443,195 +1443,13 @@ NCCL debug/tuning, interface selection, async error handling와 timeouts는 perf
 
 one node stale driver/library, wrong GPU visibility, duplicate local rank, wrong NIC/interface, port/store collision와 previous orphan process를 넣는다. import→device→representative kernel→collective smoke 뒤 training dry-run으로 진행한다. 실패 node를 quarantine한다.
 
-## 16.14 SLO·capacity·launcher evidence로 release를 승인한다
+## 16.14 cluster 실행 승인 표
 
-release는 scheduler config가 배포됐다는 선언이 아니라 queue부터 recovery까지의 SLO와 decision replay가 통과했다는 증거 묶음이다. policy, capacity clock과 launcher source를 함께 고정해 다음 변경의 비교 기준을 만든다.
+| admission | placement | launch | collective | recovery |
+|---|---|---|---|---|
+| resource·data·checkpoint locality | rank/GPU/NIC/fault domain | rendezvous generation·env digest | group·sequence·byte count | last commit·replayed sample·RTO |
 
-### capacity planning과 failure rehearsal을 같은 완료 시간 모델로 닫는다
-
-capacity model에는 arrival distribution, job size/duration/topology, queue policy, fragmentation, maintenance/failure, checkpoint/recovery와 scaling startup을 반영한다. raw GPU utilization보다 admitted useful tokens/hour, queue/deadline, preemption loss와 recovery SLO를 본다.
-
-what-if는 hardware/node count, topology mix, reservations, max gang, checkpoint interval와 elastic policy를 one axis씩 바꾼다. historical replay와 synthetic stress를 구분한다. demand forecast uncertainty와 worst/failure scenario를 보고한다.
-
-**Final rehearsal**
-
-large gang admission, competing queues, topology soft fault, node death, rendezvous resize, multi-cluster checkpoint copy, maintenance drain와 control-plane failover를 serially independent fixtures로 실행한다. expected state transition, alerts, cleanup와 first recovered update를 확인한다.
-
-certificate는 scheduler/controller/launcher source revisions, resource/topology manifests, queue decisions, leases/membership, data/checkpoint plane, environment, metrics/SLO와 rollback을 same RunID로 묶는다. `NOT_RUN` cluster/hardware/policy cells를 남긴다.
-
-독립 reviewer는 JobID 하나를 queue request에서 physical placement, LaunchID/ranks, training CheckpointID와 preempt/recovery까지 추적한다. capacity/SLO 계산과 actual events가 맞고 failure가 expected gate에서 차단될 때 cluster scheduling recipe를 승인한다.
-
-### source·policy config·decision event를 replay한다
-
-Slurm controller/selection/backfill 또는 사용하는 plugins, Kubernetes scheduler framework plugins/gang controller/operator, Ray placement-group/scheduler/autoscaler의 actual revision과 config를 고정한다. public project의 generic source가 production plugins/admission webhooks를 대신하지 않는다. local wrapper와 policy order를 함께 기록한다.
-
-DecisionEvent에는 queue snapshot, resource/topology state, request, filter failures, feasible candidates, scores/tie-break와 chosen placement를 기록한다. random/clock-dependent tie-break가 있으면 seed/time state를 보존한다. replay가 exact 또는 policy-equivalent result를 내야 한다.
-
-**Decision failure**
-
-stale node cache, resource double-count, plugin timeout/exception, inconsistent labels/taints와 two controllers를 넣는다. fail-open/closed policy와 leader/fencing을 확인한다. decision log가 selected result만 남겨 rejected reasons를 잃지 않아야 한다.
-
-### SLO를 queue·startup·step·recovery로 분해한다
-
-end-to-end time-to-train은 queue wait, reservation/bind, image/data/checkpoint staging, rendezvous/compile warmup, steady steps, checkpoint pauses와 failures/recovery로 나눈다. average 하나는 topology fragmentation과 tail failures를 숨긴다. each phase의 p50/p95/p99와 censored/failed jobs를 기록한다.
-
-service class에는 deadline, max queue/startup/recovery, preemption policy와 minimum useful work를 명시한다. priority가 높다고 physics를 무시하지 않는다. infeasible SLO는 admission에서 reason과 alternatives를 반환한다. smaller mesh/late start가 objective/batch를 바꾸는지도 표시한다.
-
-**SLO failure**
-
-fast queue but slow staging, immediate start but bad topology, high throughput but repeated failure와 successful recovery beyond deadline을 넣는다. completed jobs만으로 SLO를 계산하지 않는다. cancellation/timeout 원인을 포함한다.
-
-**capacity reservation과 autoscaling의 state clock을 닫는다**
-
-reservation에는 owner, resource/topology, start/end, reclaim/preempt와 lease generation을 기록한다. autoscaler에는 demand signal, pending bundles/Pods/jobs, node templates, min/max, cooldown과 provisioning/drain state가 포함된다. scheduler queue와 cloud/provider actual node readiness를 분리한다.
-
-scale-out은 VM/node ready만으로 완료되지 않는다. driver/device plugin/network/storage probe와 scheduler registration, topology labels와 launcher smoke를 통과해야 usable capacity다. scale-in은 active gang/lease/checkpoint와 fault-domain minimum을 검사한다.
-
-**Autoscale failure**
-
-provision timeout, partially configured node, duplicate registration, quota exhaustion, spot/preempt notice, oscillation와 scale-in during checkpoint를 넣는다. idempotent request, quarantine, cooldown와 no orphan billing/resource를 확인한다.
-
-capacity model은 provision lead-time/failed attempts와 ready fraction을 포함한다. requested GPU count가 usable GPU-hours와 같지 않다. warm pool 비용과 deadline benefit을 paired replay로 평가한다.
-
-**final blind scheduler audit와 support matrix**
-
-support matrix 행은 cluster/backend, node/GPU/NIC topology, queue/service class, gang size, elastic range, data/checkpoint locality, maintenance/failure와 launcher environment다. 열은 admission, placement, launch, running SLO, preempt/resize/recovery, cleanup와 evidence다. empty cell은 `NOT_RUN`이다.
-
-첫 reviewer는 JobSpec, queue/resource/topology snapshot만 받아 feasible set, chosen placement, rank mapping와 expected SLO를 재구성한다. 둘째 reviewer는 controller/launcher/training/checkpoint events에서 original decision과 recovery를 역추론한다. manifest와 다르면 hidden state/source가 있다.
-
-**Blind negative copy**
-
-test state에서 lease generation, NIC label, quota share, rendezvous epoch, checkpoint locality와 launcher library를 하나씩 바꾼다. admission/controller/probe가 expected stage에서 실패해야 한다. real cluster artifact를 변경하지 않는다.
-
-new scheduler/plugin, node image, GPU/NIC, queue policy, cloud/cluster와 training topology가 들어오면 relevant support cells를 다시 실행한다. previous utilization/SLO PASS를 이름만으로 상속하지 않는다. canary와 rollback window를 둔다.
-
-최종 certificate는 decision replay, physical/logical topology, complete LaunchID, training first/last UpdateID, failure/recovery와 capacity costs를 잇는다. independent reviewer가 same evidence로 동일 admission/rollback 결론을 얻을 때 16장의 운영 봉인이 닫힌다.
-
-**production drift를 scheduler decision과 training evidence로 감시한다**
-
-배포 직후의 PASS는 장기 운영을 보증하지 않는다. cluster에는 node image, firmware, driver, CUDA library, container digest, scheduler plugin, queue policy, quota, topology label, storage mount와 network route가 서로 다른 속도로 바뀐다. training code가 그대로여도 이 중 하나가 달라지면 admission 결과, placement 비용, launch 지연과 collective 성능이 달라진다. 따라서 drift 감시는 단순한 자산 목록 비교가 아니라 동일 JobSpec이 이전과 같은 feasible set과 rank mapping을 얻는지 확인하는 decision replay여야 한다.
-
-매 실행은 immutable JobSpec digest, scheduler policy digest, cluster inventory generation, node image digest, driver/runtime version, topology snapshot, data/checkpoint location과 queue share를 기록한다. 기록 시점도 중요하다. submission, admission, allocation, launcher start, first update와 final checkpoint마다 snapshot identifier를 남겨 중간 변경을 찾는다. latest 상태 하나만 보관하면 실행 도중 label이나 route가 바뀐 사건을 설명할 수 없다.
-
-drift detector는 먼저 intended change와 unexplained change를 구분한다. change ticket와 rollout cohort에 연결된 변화는 expected 집합에 넣되 자동으로 정상 판정하지 않는다. ticket에 없는 digest, 사라진 topology edge, queue weight 변화, 다른 collective library와 checkpoint endpoint는 unexplained로 격리한다. expected 변화도 canary에서 queue time, gang acquisition time, startup time, steady step time, retry count와 recovery time의 기준 구간을 벗어나면 rollback 후보가 된다.
-
-**Paired replay 절차**
-
-동일 resource shape와 dataset shard를 가진 control job과 candidate job을 같은 시간대의 대응 가능한 fault domain에 배치한다. 완전히 같은 node를 동시에 쓸 수 없으므로 GPU model, NIC path, storage locality, queue pressure와 thermal 상태를 matching key로 기록한다. 두 실행의 allocation decision, rank-to-device map, collective plan과 update 처리량을 비교한다. 차이가 candidate 변경 때문인지 background load 때문인지 구별하도록 최소 세 번 교차 실행하고 실행 순서를 바꾼다.
-
-감지 임계치는 평균 하나로 만들지 않는다. admission rejection rate, pending age의 p95, partial gang hold time, topology downgrade rate, launcher retry, first-update latency, step-time p50/p99, straggler fraction, checkpoint duration와 recovery success를 각각 본다. throughput 평균이 유지되어도 tail latency가 늘거나 재시작이 잦으면 useful work와 deadline risk가 악화될 수 있다. 반대로 짧은 queue spike 하나만으로 안정적인 candidate를 되돌리지 않도록 관찰 창과 최소 표본 수를 명시한다.
-
-**Drift 대응 단계**
-
-첫 단계는 새 admission만 중지하고 이미 안정적으로 실행 중인 gang은 유지하는 freeze다. 둘째는 affected cohort와 unaffected cohort를 label, digest와 policy generation으로 분리하는 quarantine다. 셋째는 scheduler policy나 node image를 이전 generation으로 되돌리는 rollback이다. 넷째는 orphan lease, stale rendezvous member, 남은 reservation과 불완전 checkpoint를 정리하는 reconciliation이다. 각 단계에는 owner, 시작 조건, 최대 지속 시간, 해제 조건과 증거 위치를 명시한다.
-
-freeze가 모든 queue를 막아서는 안 된다. 영향받은 accelerator type, topology island, runtime digest나 service class만 좁게 선택한다. 다만 원인이 shared control plane이나 checkpoint service이면 범위를 넓힌다. 범위 결정 근거를 event에 남겨 다음 교대자가 임의로 축소하지 않게 한다. emergency job도 별도 override token, 만료 시간과 책임자를 가져야 하며 정상 admission 검사를 조용히 우회하면 안 된다.
-
-drift rehearsal에서는 topology label 하나의 누락, queue weight의 예상 밖 변경, node image digest 불일치, storage endpoint 지연, rendezvous backend의 stale generation과 launcher environment의 library shadowing을 차례로 주입한다. detector가 알람만 내는지 보지 말고 admission freeze, cohort quarantine, rollback, cleanup과 재개까지 수행한다. 재개 후에는 같은 JobSpec의 decision replay가 baseline과 허용 범위 내에서 일치하고 새 orphan resource가 없음을 확인한다.
-
-**교대 가능한 runbook과 release certificate로 운영을 마감한다**
-
-좋은 runbook은 특정 운영자의 기억을 압축한 설명서가 아니라 관측 가능한 상태에서 다음 안전한 행동을 고르는 절차다. 첫 화면에는 cluster generation, scheduler health, queue pressure, active gangs, pending 이유, maintenance window, fault-domain availability, data/checkpoint service와 최근 drift alert를 둔다. 각 지표에는 정상 범위, 데이터 freshness, source와 unavailable일 때의 대체 확인 방법을 적는다.
-
-incident entry는 증상 이름보다 state transition으로 시작한다. `SUBMITTED`에서 `ADMITTED`로 가지 못하면 quota, feasibility, policy와 dependency를 확인한다. `ADMITTED`에서 `ALLOCATED`로 멈추면 gang completeness, reservation conflict와 topology fragmentation을 본다. `ALLOCATED`에서 `RUNNING`으로 가지 못하면 launcher generation, device visibility, network probe와 rendezvous membership을 본다. `RUNNING` 중 progress가 멈추면 UpdateID, collective heartbeat, straggler와 checkpoint barrier를 확인한다. 이렇게 분기하면 queue가 길다는 이유로 무조건 capacity를 늘리는 오판을 줄인다.
-
-모든 runbook 명령은 read-only diagnosis, reversible containment와 destructive cleanup을 구분한다. cleanup에는 exact target identifier, expected generation, dry-run 결과, 승인자와 복구 가능성을 요구한다. broad selector나 최신이라는 별칭으로 lease와 checkpoint를 지우지 않는다. 명령 출력은 incident bundle에 보존하되 credential, secret와 사용자 데이터는 마스킹한다. 동일 명령의 재실행이 안전한지도 명시한다.
-
-**교대 연습**
-
-주 담당자는 말없이 synthetic incident를 시작하고 다음 교대자는 dashboard와 event만으로 affected scope, current state, last safe checkpoint, 허용 가능한 preemption과 rollback target을 찾아야 한다. 첫 담당자는 숨은 구두 정보를 제공하지 않는다. 두 사람이 서로 다른 결론을 얻으면 문서에 missing source, ambiguous state나 stale link가 있다는 뜻이다. runbook을 고친 뒤 같은 유형이 아닌 변형 사건으로 다시 검증한다.
-
-release certificate는 build나 scheduler 배포의 성공 표시가 아니다. 대상 cluster와 cohort, JobSpec/policy/image digest, queue와 topology 조건, admission 및 gang 결과, launcher identity, rank map, first/last UpdateID, steady-state SLO, injected failure, recovery checkpoint, cleanup, capacity cost와 reviewer 결론을 하나의 bundle로 묶는다. 각 항목은 원본 event나 immutable artifact로 연결되고 생성 시간과 보존 기간을 가진다.
-
-certificate의 예외 칸은 비워 두지 않는다. 미실행 항목은 `NOT_RUN`, 적용 불가는 근거가 있는 `NOT_APPLICABLE`, 실패는 observed/expected state와 owner가 있는 `FAIL`로 기록한다. 임시 waiver에는 affected scope, risk, compensating control, 승인자와 자동 만료 시간이 필요하다. waiver가 만료되면 admission gate가 다시 닫혀야 하며 과거 승인 문자열을 복사해 새 release에 쓰지 않는다.
-
-최종 승인자는 세 질문에 답한다. 같은 evidence만 받은 다른 사람이 placement와 recovery 결정을 재현할 수 있는가, 가장 늦은 failure injection 뒤에도 deadline과 데이터 안전 조건을 만족하는가, rollback 뒤 scheduler·launcher·training·checkpoint plane에 orphan state가 남지 않았는가. 하나라도 확인되지 않으면 release는 준비된 것이 아니다. 세 답이 명시적인 증거와 함께 일치할 때 cluster scheduling은 단순한 자원 배분을 넘어 반복 가능하고 교대 가능한 training operation이 된다.
-
-**Slurm·Kubernetes·Ray launcher의 ownership을 비교한다**
-
-**제출 문자열에서 실제 rank와 environment까지 추적한다**
-
-Slurm 기반 환경에서는 submission script의 partition, nodes, tasks, GPUs, CPUs, memory, constraints, exclusive·reservation과 time limit가 scheduler request를 만든다. `sbatch`, `srun`과 MPI/torch launcher의 역할을 구분한다. allocation을 얻은 batch shell과 각 rank process의 환경·affinity가 자동으로 동일하다고 가정하지 않는다.
-
-controller·selection plugin과 site policy가 feasible node와 priority·backfill을 결정한다. exact Slurm version, `slurm.conf`, GRES·topology, cgroup/task plugin과 wrapper를 고정한다. generic upstream 문서만으로 local behavior를 단정하지 않는다.
-
-allocation 뒤 `SLURM_NODEID`, local task ID, visible device와 launcher의 global/local rank mapping을 표로 만든다. GPU가 GRES 순서와 CUDA ordinal에서 어떻게 대응하는지 확인한다. NIC·CPU affinity와 NUMA도 rank마다 기록한다.
-
-**Slurm 실패 표본**
-
-requested tasks-per-node와 GPU 수 불일치, stale GRES, duplicate local rank, heterogeneous node와 time-limit preemption을 주입한다. scheduler allocation은 성공했지만 launcher smoke가 실패하는 경계를 분리한다. job requeue가 checkpoint·scheduler clock과 같은 generation에서 시작하는지 본다.
-
-**Kubernetes에서는 Pod 수보다 gang과 topology가 training 단위다**
-
-분산 학습의 여러 Pod는 모두 준비되어야 유용한 update를 시작할 수 있다. 기본 scheduler가 일부만 bind하면 GPU를 점유한 채 나머지를 기다리는 partial gang이 생긴다. gang scheduler·queueing controller 또는 operator가 사용하는 PodGroup·workload semantics를 고정한다.
-
-resource request/limit, extended GPU resource, nodeSelector·affinity, taints/tolerations, topology spread와 priority/preemption을 읽는다. device plugin이 광고한 GPU count와 실제 device·driver health를 admission probe로 확인한다. Pod `Running`은 NCCL 준비 완료가 아니다.
-
-Stateful rank identity, rendezvous endpoint, service·DNS와 restart policy를 launcher manifest에 연결한다. Pod UID가 바뀌면 old membership과 CUDA context를 폐기한다. init container의 image/data staging과 main container startup을 구분한다.
-
-**Kubernetes 실패 표본**
-
-한 Pod Pending, image pull backoff, stale device-plugin allocation, wrong topology label, eviction·node drain과 operator leader failover를 시험한다. partial gang release, checkpoint fence와 orphan PVC·service cleanup을 확인한다.
-
-**Ray placement group은 bundle 원자성과 actor 생명주기를 함께 본다**
-
-Ray 기반 training은 placement group의 bundles와 strategy로 CPU·GPU 자원을 함께 예약할 수 있다. PACK·SPREAD·strict 계열 전략이 fault domain과 locality에 어떤 결과를 만드는지 실제 cluster state에서 확인한다. bundle index를 rank·role에 안정적으로 매핑한다.
-
-placement group ready가 actor initialization·collective 준비 완료를 뜻하지 않는다. actor restart, ownership과 autoscaler node provisioning을 별 state로 둔다. head node failure와 GCS persistence가 training generation에 미치는 영향을 확인한다.
-
-autoscaler demand vector가 bundle을 만족할 node type을 고르는지, partially fulfilled request와 idle timeout이 gang을 흔들지 본다. cloud quota·launch latency와 node setup command 실패를 usable capacity에서 제외한다.
-
-**actor failure**
-
-한 worker actor crash, owner death, placement group removal race와 node replacement를 주입한다. old rendezvous member와 object reference를 폐기하고 checkpoint에서 새 LaunchID로 복구한다. actor 재시작 횟수만으로 optimizer state continuity를 주장하지 않는다.
-
-**physical topology를 NVLink·PCIe·NIC 경로로 펼친다**
-
-GPU 두 개가 같은 node에 있다는 사실만으로 통신 비용이 같지 않다. GPU-GPU 경로가 NVLink/NVSwitch인지 PCIe root complex를 통하는지, GPU-NIC가 어떤 PCIe switch·NUMA CPU에 가까운지 topology matrix로 기록한다. logical TP·CP·EP·DP 축을 이 물리 graph에 매핑한다.
-
-NVLink bandwidth는 세대·GPU와 link 수에 따라 다르고 NVSwitch fabric 구성이 영향을 준다. 공식 hardware·system 문서와 `nvidia-smi topo`·Fabric Manager health 같은 실제 probe를 교차한다. 숫자를 모든 장비에 일반화하지 않는다.
-
-inter-node에서는 NIC speed, rail, switch oversubscription, GPUDirect RDMA, IOMMU·ACS와 routing이 경로를 바꾼다. interface name만 같아도 link·NUMA가 다를 수 있다. rank→GPU→NIC affinity와 selected NCCL channel을 trace한다.
-
-**topology cost fixture**
-
-pairwise bandwidth·latency, all-reduce·all-to-all와 representative tensor size를 측정한다. cold/warm, concurrent traffic과 faulted link를 분리한다. scheduler score가 예측한 cost와 실제 collective time을 비교해 model을 보정한다.
-
-**communicator 생성의 rank 집합과 transport를 검증한다**
-
-process group 생성은 global ranks, device, unique communicator identity와 collective ordering을 합의한다. TP·DP·CP·EP마다 다른 rank subset과 communicator가 있을 수 있다. group creation order와 membership digest를 모든 rank에서 검증한다.
-
-NCCL은 topology·plugin·environment에 따라 P2P, shared memory와 network transport를 선택한다. debug log는 진단에 유용하지만 production 성능을 바꿀 수 있는 verbosity를 관리한다. selected interface·rail과 algorithm/protocol을 실제 trace에서 확인한다.
-
-timeout은 느린 collective, rank crash, 순서 불일치와 이전 CUDA fault의 공통 증상일 수 있다. timeout 값을 키우기 전에 rank별 last collective ordinal, stream event와 async error를 수집한다. 모든 rank가 같은 collective를 같은 tensor contract로 호출했는지 본다.
-
-**communicator failure**
-
-중복 rank, missing rank, wrong group, collective order swap, stale unique ID와 NIC down을 독립 주입한다. 실패 뒤 communicator를 재사용하지 않고 generation을 올린다. checkpoint·optimizer commit과 fence를 맞춘다.
-
-**topology-aware placement는 가장 비싼 통신 축부터 배치한다**
-
-tensor parallel처럼 매 layer 큰 collective가 있는 축은 대개 빠른 intra-node fabric에 두는 것이 유리할 수 있다. pipeline은 stage activation을 인접 경로로 보내고, data parallel은 큰 gradient collective를 수행한다. MoE expert parallel은 all-to-all 패턴과 load imbalance를 가진다. 실제 bytes·frequency로 우선순위를 계산한다.
-
-단순 TP-in-node 규칙도 model·node GPU 수가 나누어떨어지지 않거나 CP·EP가 더 비쌀 때 바뀐다. candidate logical mesh마다 collective volume, path bandwidth·contention과 failure domain을 추정한다. 15장의 owner ledger를 입력으로 쓴다.
-
-placement score가 communication만 최소화하면 모든 job을 좋은 island에 몰아 queue·fairness를 악화시킬 수 있다. expected time-to-quality, fragmentation과 deadline을 함께 본다. hard constraint와 soft preference를 구분한다.
-
-**placement replay**
-
-같은 JobSpec에 여러 feasible allocations를 생성해 predicted step time와 measured short probe를 비교한다. chosen placement, rejected alternatives와 tie-break를 보존한다. score model upgrade는 historical replay와 canary를 거친다.
-
-**fault domain은 node보다 전원·switch·rack·zone까지 내려간다**
-
-같은 rack의 여러 node는 top-of-rack switch, power와 cooling failure를 공유할 수 있다. zone·cluster도 storage·control plane dependency를 공유할 수 있다. labels를 실제 inventory와 검증하고 stale·unknown domain을 admission에서 다룬다.
-
-checkpoint replica와 control-plane quorum을 training gang과 같은 fault domain에 몰아두면 큰 장애에서 함께 잃는다. data·checkpoint placement와 recovery target을 scheduler resource graph에 포함한다. latency·비용과 durability trade-off를 명시한다.
-
-DP replica를 spread하면 장애 상관은 줄지만 cross-rack communication이 늘 수 있다. TP·EP처럼 tightly coupled 축은 가까이, redundant 역할은 분산하는 혼합 정책을 검토한다. workload bytes와 recovery SLO로 결정한다.
-
-**correlated failure rehearsal**
-
-node 하나가 아니라 rack switch, zone network와 checkpoint endpoint failure를 주입한다. surviving quorum, last durable checkpoint와 target cluster capacity를 확인한다. single-node PASS를 cluster resilience 근거로 쓰지 않는다.
+capacity와 평균 utilization은 이 다섯 열이 닫힌 뒤 비교한다. 일부 rank만 새 membership이나 checkpoint generation을 보는 상태는 처리량과 무관하게 승인하지 않는다.
 
 ## 16.15 장애 복구와 운영 변화를 release certificate로 마감한다
 
@@ -2575,3 +2393,44 @@ PyTorch의 고정 소스에서 `DynamicRendezvousHandler.next_rendezvous`의 직
 6. `(RunID, UpdateID, attempt)`를 idempotency key로 metric·checkpoint pointer를 한 번만 공개한다.
 
 Ray의 worker-failure 시험은 actor가 죽은 뒤 결과 스트림과 local-rank 집합이 다시 형성되는지를 보여준다. 이 근거는 실행면의 좋은 회귀 시험이지만 optimizer moment나 data cursor의 동일성을 묻지 않는다. 따라서 Ray report가 두 번 도착하는 변형에서는 `ReportOrdinal`과 `UpdateID`를 함께 비교해 duplicate commit을 거부한다. “actor가 살아났다”와 “gradient mass가 한 번만 반영됐다”는 서로 다른 판정이다.
+
+## 16.21 GR-001 — placement를 collective 실행 계약으로 만든다
+
+클러스터 scheduler의 출력은 GPU 여덟 장의 주소 목록이 아니다. 15장이 요구한 group과 collective 순서를 물리 fabric에서 실행할 수 있는 **배치 증명서**다. `GR-001/U0042`에서는 Job generation `JG9`, rendezvous generation `RG3`, communicator generation `CG12`를 분리한다. node 교체가 생기면 rank 번호가 우연히 같아도 새 세대다.
+
+```mermaid
+sequenceDiagram
+    participant Q as Cluster scheduler
+    participant L as torchrun/elastic agent
+    participant R as Rendezvous
+    participant W as Rank workers
+    participant K as 17장 checkpoint catalog
+    Q->>L: JobID=GR-001, placement JG9
+    L->>R: join(RG3, min=max=8)
+    R-->>W: rank map + world size
+    W->>W: create DP/TP groups CG12
+    W->>W: execute collective ordinals for U0042
+    W-->>Q: commit vote or first divergent ordinal
+    Q->>K: checkpoint request only after U0042 commit
+```
+
+### launcher에서 collective까지 고정 소스를 잇는다
+
+PyTorch revision `3691693263d2b66a68867e39b7449876844e06cf`의 [`SimpleElasticAgent._initialize_workers`](https://github.com/pytorch/pytorch/blob/3691693263d2b66a68867e39b7449876844e06cf/torch/distributed/elastic/agent/server/api.py#L660-L728)는 rendezvous 결과에서 worker group을 초기화하고, [`_restart_workers`](https://github.com/pytorch/pytorch/blob/3691693263d2b66a68867e39b7449876844e06cf/torch/distributed/elastic/agent/server/api.py#L730-L736)는 기존 group을 멈춘 뒤 새 초기화를 시작한다. process group의 Python 진입점 [`init_process_group`](https://github.com/pytorch/pytorch/blob/3691693263d2b66a68867e39b7449876844e06cf/torch/distributed/distributed_c10d.py#L1530-L1760)은 store·rank·world size·backend를 해석해 group을 만든다. restart 함수는 optimizer와 sample cursor를 복구하지 않는다. 그것은 17장 loader와 애플리케이션의 책임이다.
+
+호출 카드는 `placement(JG9) → elastic rendezvous(RG3) → rank environment → init_process_group → DP/TP subgroup construction(CG12) → U0042 collective ordinal stream → commit vote`다. scheduler가 바꾼 것은 node/GPU/NIC와 failure domain의 mapping이고, rendezvous가 바꾼 것은 membership generation이며, process group이 바꾼 것은 communicator와 collective namespace다. 한 필드 `restart_count`로 합치지 않는다.
+
+### rank·fabric·byte 원장
+
+| rank | node/GPU | TP/DP 좌표 | NIC/rail | U0042 예상 collective | logical payload |
+|---:|---|---|---|---|---:|
+| 0–1 | n0/g0–g1 | dp0,tp0–1 | hca0/r0 | TP all-gather #17 | rank당 32 MiB |
+| 2–3 | n0/g2–g3 | dp1,tp0–1 | hca1/r1 | DP reduce-scatter #31 | rank당 16 MiB |
+| 4–5 | n1/g0–g1 | dp2,tp0–1 | hca0/r0 | TP all-gather #17 | rank당 32 MiB |
+| 6–7 | n1/g2–g3 | dp3,tp0–1 | hca1/r1 | DP reduce-scatter #31 | rank당 16 MiB |
+
+실제 wire byte에는 collective algorithm의 반복 전송이 붙는다. 따라서 `logical_bytes`, NCCL이 보고한 channel/protocol, NIC port byte와 link retry를 별 열로 둔다. 모든 rank에서 `(GroupID,CG12,ordinal,op,count,dtype)`가 같아야 하며, 시작 시각 차이는 hang의 충분조건이 아니다.
+
+관측은 placement decision, rendezvous join/lease, process start, group creation, 각 collective enqueue/completion, heartbeat와 exit를 `GR-001/U0042`에 join한다. 장애 주입 A는 n1의 rank 5를 ordinal 31 직전에 종료한다. 새 `RG4/CG13`이 만들어지고 `U0042`가 재사용되지 않은 attempt로 다시 계산돼야 한다. B는 rank 6에 잘못된 `WORLD_SIZE=7`을 넣어 group 생성 전에 실패시킨다. C는 rail r1을 격리해 fallback path와 tail 증가를 관측하되 tensor 결과는 바뀌지 않아야 한다. 실행 절차는 [멀티노드 장애 실습](../labs/29-multinode-failure-lab.md), triage는 [rank hang 플레이북](../playbooks/06-rank-hang.md), 부분 checkpoint가 보이면 [partial checkpoint 플레이북](../playbooks/09-partial-checkpoint.md)으로 이어진다.
+
+17장에 넘기는 durable cut은 `placement JG9`나 “job succeeded”가 아니다. 마지막으로 전 rank가 합의한 `U0042`, canonical ObjectID와 global ranges, scheduler clock, scaler/RNG/data cursor, source topology `RG3/CG12`, 그리고 저장 요청의 idempotency key를 넘긴다. 새 topology가 들어오면 rank 파일을 재사용하는 대신 global interval에서 새 read plan을 만든다.

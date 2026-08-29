@@ -992,125 +992,9 @@ migration 성공 기준은 global tensor checksum 또는 shard recomposition, op
 
 rollback은 old manifest를 보존하고 target generation이 commit되기 전에는 old run을 수정하지 않는다. migration 도중 storage object를 in-place overwrite하지 않는다. candidate가 새 checkpoint schema를 쓰기 전에 old reader 호환 범위를 확인한다.
 
-## 15.11 memory·topology·recovery 비용으로 전략을 선택한다
+## 15.11 병렬 전략 선택의 단일 규범
 
-가장 빠른 정상 run만 비교하면 운영 전략을 고를 수 없다. peak memory와 communication tail뿐 아니라 checkpoint 시간, failure blast radius와 time-to-recover를 useful tokens/hour의 불확실성에 포함한다.
-
-### 병렬 전략별 persistent와 peak memory를 비교한다
-
-기본 회계는 parameter (P), gradient (G), optimizer state (O), activation (A), communication/workspace (C)와 fragmentation (F)다. DP는 P·G·O를 replica마다 가지며, FSDP는 persistent shard를 줄이지만 일시 full parameter와 buffer가 있다. TP는 parameter와 activation feature를 나누지만 collective와 replicated component가 남는다.
-
-PP는 stage별 layer를 나눠 parameter를 줄이지만 microbatch schedule에 따른 activation live-set과 bubble이 있다. CP는 sequence activation을 나누지만 K/V exchange buffer가 필요하다. EP는 expert parameter를 나누지만 token dispatch buffer와 imbalance headroom이 필요하다. 단순 각 degree로 전체 memory를 나누지 않는다.
-
-peak는 동시 생존 tensor로 계산한다. FSDP prefetch와 activation checkpoint recompute, DP bucket, TP workspace, checkpoint staging이 겹치는 시점을 timeline에서 찾는다. 각 component의 최대치를 따로 더하면 과대 추정할 수 있고, steady state 하나만 보면 과소 추정할 수 있다.
-
-memory 절감을 batch 증가로 바로 바꾸면 statistical recipe가 달라진다. 확보한 memory를 sequence length, microbatch 또는 checkpoint buffer 중 어디에 쓸지 별 결정으로 둔다. throughput과 convergence, recovery를 함께 평가한다.
-
-### expected completion time에 failure와 recovery를 포함한다
-
-전략 후보별 steady tokens/sec만 비교하지 않는다. compile·initialization, checkpoint pause, failure rate, 평균 lost work와 restart/reshard 시간을 포함한 useful tokens per day를 계산한다. 더 복잡한 5D mesh가 5% 빠르지만 recovery가 몇 시간 걸리면 긴 run에서 손해일 수 있다.
-
-failure domain도 본다. tensor parallel group이 한 node를 넘으면 link와 장애 범위가 커진다. pipeline stage를 node 경계에 맞추면 activation traffic과 placement가 달라진다. expert placement는 hot expert의 NIC 병목과 node loss 때 복구 가능한 replica를 고려한다.
-
-checkpoint storage bandwidth와 metadata scaling도 병렬 전략의 일부다. 수천 shard의 small file 문제, object-store consistency, manifest publish latency와 garbage collection을 측정한다. 저장이 training stream과 경쟁하는지도 본다.
-
-운영팀이 이해하고 진단할 수 있는 복잡성도 비용이다. group ID, tensor placement와 trace를 자동화하지 못한다면 다차원 mesh incident가 길어진다. 새 전략은 source와 benchmark뿐 아니라 failure rehearsal과 runbook gate를 통과해야 한다.
-
-**고정 구현 좌표를 따라가는 읽기법**
-
-PyTorch checkout에서는 DDP reducer의 bucket 생성·ready·communication hook 경로, FSDP의 all-gather/reshard와 state-dict 경로, distributed tensor placement와 checkpoint planner를 찾는다. 고정 revision `e40c5000b825a538c3f1f01e5edffb7f51b1924f`와 실제 path·symbol·test를 source card에 적는다.
-
-Megatron 계열 checkout에서는 parallel state의 group 생성, column/row parallel linear, pipeline schedule, context parallel attention과 expert token dispatcher를 각각 추적한다. config 옵션에서 object 생성, forward call, collective wrapper와 test까지 잇는다. main branch의 기억으로 함수명을 쓰지 않고 checkout에서 확인한다.
-
-NCCL 고정 source `sources/nccl-v2.30.7-1`에서는 public collective가 enqueue plan과 transport/proxy로 내려가는 층을 읽되 내부 구현을 API 보증으로 오해하지 않는다. source revision과 build configuration을 기록하고 공식 user guide의 semantics·environment 설명과 분리한다.
-
-test는 single-process shape test, multi-rank semantic test, failure/mismatch test, checkpoint reshard test로 나눈다. CI에서 실제 GPU 수와 skip condition을 확인한다. test 이름만 보고 5D mesh나 multi-node failure가 검증됐다고 말하지 않는다.
-
-### observability를 tensor·group·event cardinality로 설계한다
-
-step metric에는 global rank만 쓰지 않고 mesh coordinate와 topology generation을 붙인다. collective event에는 group ID, ordinal, op, numel, dtype, stream, start/end와 caller role을 기록한다. tensor name을 무제한 label로 넣지 않고 stable bucket/module ID를 사용한다.
-
-memory telemetry는 persistent shard, gathered parameter, activation, communication buffer와 checkpoint staging을 구분한다. rank별 peak 분포를 보고 가장 높은 coordinate를 찾는다. 평균은 한 rank OOM을 숨긴다. EP에서는 expert token count와 all-to-all byte, PP에서는 stage idle/bubble, CP에서는 shard length를 함께 본다.
-
-correctness telemetry에는 valid-token denominator, gradient checksum 또는 sampled digest, optimizer commit generation과 parameter-group step이 있다. 모든 gradient를 외부로 내보내지 않고 incident 시 고정 probe와 layer digest를 사용한다. 개인정보나 model leakage를 고려해 raw tensor dump를 기본으로 하지 않는다.
-
-hang detector는 “마지막 heartbeat”뿐 아니라 마지막 collective ordinal과 expected next op를 보여 준다. rank 간 diff로 최초 control-flow divergence를 찾는다. timeout 뒤 communicator abort, process teardown과 new rendezvous generation을 자동 연결한다.
-
-**장애를 owner·consumer·commit 질문으로 분해한다**
-
-사례 하나는 특정 rank만 loss가 다르지만 all-reduce 뒤 gradient가 비슷한 경우다. data denominator, RNG와 TP/CP shard-local loss를 본다. local loss 로그를 global objective로 오인했을 수 있다. 같은 logical sample과 mask의 owner를 추적한다.
-
-둘째는 FSDP resume 뒤 optimizer가 일부 parameter를 갱신하지 않는 경우다. parameter object identity, optimizer group binding과 state key mapping을 본다. model weight checksum이 맞아도 moment가 다른 parameter에 붙거나 누락될 수 있다. 첫 update의 per-parameter delta로 찾는다.
-
-셋째는 EP에서 periodic step latency spike가 생기는 경우다. data mixture와 hot expert token count, capacity drop, all-to-all peer matrix를 조인한다. network 평균 bandwidth만 보면 특정 destination incast를 놓친다. router auxiliary metric과 실제 hardware imbalance를 분리한다.
-
-넷째는 PP가 checkpoint 직후 hang하는 경우다. restored microbatch schedule state, pipeline tag와 stage별 expected op를 본다. in-flight activation을 저장하지 않았다면 commit boundary에서 재시작해야 한다. stage별 data cursor가 다르면 첫 send/recv부터 갈라진다.
-
-다섯째는 CP degree 변경 뒤 validation만 악화되는 경우다. position offset, packed segment mask, dropout RNG와 online softmax 합성을 본다. output이 finite하고 throughput이 좋아도 미래 token leakage 또는 document boundary 오류가 있을 수 있다. adversarial packed sequence fixture로 확인한다.
-
-**최종 통합 인수 시험**
-
-소규모 logical model과 synthetic tensor로 각 병렬 축을 하나씩 켠 reference ladder를 만든다. single rank, DP, FSDP, TP, PP, CP, EP 순으로 추가하되 매 단계 forward, loss denominator, gradient와 optimizer delta를 reference와 비교한다. 마지막에 복합 mesh를 구성한다.
-
-각 단계에서 analytical communication byte와 trace byte, expected placement와 actual local shape를 비교한다. odd hidden, uneven sequence, empty expert, partial accumulation과 tied weight를 경계 fixture로 둔다. happy path의 균등 shape만 시험하지 않는다.
-
-failure ladder는 rank delay, collective mismatch, checkpoint shard 누락, resize와 overflow 동시 발생을 포함한다. 시스템이 fail closed하고 마지막 committed generation으로 복구하는지 본다. 복구 뒤 next sample ID, lr, optimizer state와 first delta를 비교한다.
-
-성능 gate는 correctness 뒤에 둔다. tokens/sec, critical-path collective, peak live-set, bubble, imbalance와 checkpoint overhead를 측정한다. 후보 topology가 빠른 이유를 tensor byte와 timeline으로 설명하지 못하면 채택하지 않는다.
-
-최종 산출물은 `MeshManifest`, `TensorPlacementLedger`, `CollectiveByteLedger`, `CheckpointGeneration`, `FailureTimeline`, `MigrationCertificate`와 source/test cards다. 이 자료를 받은 다른 운영자가 rank 숫자를 외우지 않고 logical tensor의 owner와 이동을 복원할 수 있어야 한다.
-
-병렬화의 본질은 GPU 수를 늘리는 옵션이 아니다. 하나의 수학적 update를 여러 장소와 시간으로 분해한 뒤, collective와 checkpoint를 통해 다시 같은 의미로 합성하는 일이다. DP·FSDP·TP·PP·CP·EP는 서로 다른 축을 분할하며 실패 모양도 다르다. tensor의 global 의미, local placement, stream과 commit generation을 한 원장으로 묶을 때만 복합 mesh를 설명하고 복구할 수 있다.
-
-**collective byte를 실제 숫자로 계산한다**
-
-BF16 gradient 1억 원소가 있다고 하자. logical payload는 약 200MB다. DP degree 8의 ring all-reduce를 단순 모델로 계산하면 rank당 link byte는 대략 (2(8-1)/8\times200=350)MB다. 이 값은 algorithmic payload 근사이며 실제 NIC counter와 같지 않다. chunk header, protocol, topology hop과 동시 traffic이 있기 때문이다.
-
-FSDP가 같은 gradient를 reduce-scatter한다면 rank마다 결과 25MB shard를 남긴다. ring 근사 link byte는 all-reduce의 절반 구성요소에 해당하지만, backward마다 module 단위 여러 call이 발생하고 padding·bucket이 추가된다. 다음 forward의 parameter all-gather byte와 합쳐 step 전체를 계산한다. “FSDP는 통신이 절반” 같은 단정은 call schedule과 prefetch를 빼먹는다.
-
-TP degree 4에서 hidden shard output 32MB의 all-reduce가 layer마다 두 번 있고 48 layer라면 logical call payload만 3,072MB다. 각 call의 ring factor와 빈도를 적용한다. DP gradient 통신보다 payload가 작아도 latency-critical forward path에 있어 critical path 영향이 클 수 있다. DP는 backward와 overlap될 여지가 더 크다.
-
-EP all-to-all은 rank별 send count가 다르다. 입력 token 8,192개, hidden 4,096, BF16, top-2라면 복제 뒤 raw activation payload가 전체 약 134MB 규모다. rank별 expert 분포가 균등하지 않으면 가장 큰 peer send와 recv가 병목이다. padding-to-capacity를 쓰면 실제 전송 byte가 valid routed token보다 커진다.
-
-CP ring에서 K와 V shard를 여러 step 이동한다면 per-rank tensor size에 ring hop 수를 곱한다. GQA의 KV head 수가 byte를 바꾸고 sequence length가 직접 비례한다. compute overlap이 완전하지 않으면 exposed communication을 trace에서 측정한다. analytical ledger는 기대 범위를 주고 trace는 구현과 topology를 검증한다.
-
-byte 원장은 unit을 엄격히 쓴다. MB와 MiB, element와 byte, one-way와 bidirectional counter를 구분한다. profiler가 aggregate device byte인지 link별 byte인지 확인한다. compression 또는 lower-precision communication을 쓰면 transmitted dtype과 optimizer가 소비하는 reconstructed dtype을 모두 기록한다.
-
-**NCCL topology와 process placement를 연결한다**
-
-GPU 사이 경로는 동일하지 않다. 한 node에서도 GPU 쌍이 NVLink/NVSwitch로 직접 연결되는지 PCIe switch와 host bridge를 지나는지에 따라 bandwidth와 latency가 다르다. inter-node에서는 GPU-NIC affinity, NUMA와 network rail이 추가된다. global rank 연속성이 물리적으로 가까움을 보장하지 않는다.
-
-TP처럼 latency-sensitive하고 빈번한 group은 빠른 intra-node fabric 안에 두는 경우가 많다. PP activation은 stage 사이 bandwidth와 균형을 고려해 node 경계를 배치한다. DP는 큰 group으로 inter-node를 걸칠 수 있으나 gradient bucket과 overlap이 필요하다. EP all-to-all은 많은 peer를 연결하므로 rail과 placement에 민감하다.
-
-rank placement manifest에는 hostname, local rank, PCI bus ID, NUMA node, NIC와 mesh coordinate를 둔다. scheduler가 GPU를 재배치하면 동일 mesh shape라도 물리 mapping이 달라진다. run 시작 admission에서 expected affinity를 검증하고 topology generation에 포함한다.
-
-NCCL이 선택한 algorithm과 transport는 message size와 topology, 환경에 따라 달라질 수 있다. 강제 환경 변수는 특정 benchmark를 개선해도 다른 collective나 shape를 악화시킬 수 있다. automatic baseline과 candidate를 message-size sweep, 실제 call histogram으로 비교한다.
-
-GPUDirect 경로가 비활성화되면 host staging과 CPU/PCIe traffic이 늘 수 있다. 단순 bandwidth 저하뿐 아니라 CPU NUMA와 pinned memory가 병목이 된다. topology dump, NIC/GPU counter와 process map을 함께 본다. 라이브러리 로그 한 줄을 전체 경로의 유일한 증거로 쓰지 않는다.
-
-**stream overlap을 event DAG로 증명한다**
-
-backward가 layer (L)의 gradient를 완성하면 bucket ready event를 communication stream이 기다리고 reduce-scatter를 실행한다. optimizer가 해당 shard를 사용할 수 있는 시점은 collective completion event 뒤다. 다음 iteration의 parameter all-gather는 optimizer update 완료 뒤여야 한다. 이 네 edge가 빠지면 overlap은 빨라도 틀릴 수 있다.
-
-FSDP prefetch는 현재 module compute 중 다음 module parameter all-gather를 시작한다. prefetch distance가 너무 크면 full parameter live-set이 겹친다. 너무 작으면 compute가 communication을 가리지 못한다. layer compute와 gather duration의 분포를 기반으로 선택하고 max memory를 gate한다.
-
-TP collective는 forward critical path에 있어 작은 지연도 stage bubble을 늘릴 수 있다. PP와 결합하면 한 stage의 TP straggler가 downstream stage idle을 만든다. local kernel trace만 보지 않고 pipeline clock과 group collective를 logical microbatch로 조인한다.
-
-CUDA Graph capture가 collective를 포함하면 rank별 replay 순서가 고정되어야 한다. dynamic expert token 때문에 all-to-all count가 달라질 때 static buffer capacity와 valid count를 분리하거나 graph fallback을 group-wide로 합의한다. 한 rank만 다른 graph를 선택하면 collective ordinal이 갈라진다.
-
-event DAG audit는 trace에서 각 dependency가 실제 wait로 나타나는지 확인한다. 불필요한 global synchronize는 overlap을 없애고, 누락된 wait는 race를 만든다. 인위적으로 producer를 지연해 consumer가 정확히 기다리는지 failure fixture로 검증한다.
-
-**loss와 optimizer state의 global 의미**
-
-분산 시스템이 같은 parameter update를 만들려면 먼저 objective denominator가 같아야 한다. token mean, sample mean, preference pair mean과 expert auxiliary loss의 가중치를 각각 정의한다. DP rank와 PP stage, CP shard에서 local scalar를 어떻게 합쳐 global loss를 만드는지 수식으로 적는다.
-
-gradient accumulation에서 각 microbatch mean을 단순 더하고 accumulation count로 나누면 valid token이 다른 batch에 같은 무게를 준다. global loss sum과 count를 누적하거나 equivalent scale을 사용한다. DDP의 world-size averaging, pipeline microbatch scaling과 optimizer accumulation factor가 중복으로 나누지 않는지 검산한다.
-
-gradient clipping의 norm도 global parameter 집합에 대한 norm인지 local shard norm인지 중요하다. FSDP/TP shard별 squared norm을 올바른 group에서 합치고 replicated parameter를 중복 세지 않는다. expert parameter와 dense parameter의 replica axes가 다르면 하나의 world all-reduce가 답이 아닐 수 있다.
-
-optimizer state는 logical parameter ID에 붙는다. flattening, shard와 tied weight가 physical tensor object를 바꿔도 identity를 유지한다. parameter group의 lr·weight decay와 no-decay membership도 checkpoint schema의 일부다. topology migration에서 순서 기반 zip으로 state를 붙이지 않는다.
-
-step counter는 global update generation과 parameter-local update를 구분할 수 있다. conditional expert가 어떤 step에 gradient 0이거나 사용되지 않았을 때 moment와 counter를 갱신하는 정책을 확인한다. sparse update 의미가 optimizer마다 다를 수 있다. 모든 parameter가 같은 scalar step이라고 자동 가정하지 않는다.
+전략 선택은 이름이 아니라 `logical tensor layout → rank owner → collective sequence → activation lifetime → checkpoint representation`의 합성이다. 동일 `GR-001` update에서 global numerator/denominator, logical delta와 resume 결과가 맞은 후보만 memory·throughput 비교로 넘긴다.
 
 ## 15.12 shared state와 elastic·multi-cluster 수명주기를 닫는다
 
@@ -2834,3 +2718,44 @@ NVLink와 NVSwitch는 주로 node 내부 GPU 경로를 구성하고, InfiniBand�
 **sample과 UpdateID 소유권을 같은 원장에 둔다.**
 
 rank별 sample 집합을 합쳤을 때 duplicate·missing과 padding sentinel을 분리한다. gradient가 모두 모였다는 사실만으로 exactly-once sample ownership이나 optimizer commit이 성립하지 않는다. 필수 rank가 같은 UpdateID와 overflow 결정을 합의한 뒤에만 새 parameter generation을 publish한다. 미지원 world-size 변경은 조용한 재매핑보다 load 전에 거부하는 편이 안전하다.
+
+## 15.22 GR-001 — UpdateID를 rank 소유권과 collective에 투영한다
+
+13장에서 받은 `GR-001/U0042`를 world size 8, DP 4×TP 2 mesh에 놓는다. UpdateID는 rank-local counter가 아니다. 여덟 rank가 같은 logical update를 계산한다는 join key이며, 각 rank는 그 update의 일부 tensor와 collective 사건을 소유한다.
+
+```mermaid
+flowchart LR
+    U[GR-001 / U0042<br/>valid tokens 8192] --> M[DP4 × TP2 mesh]
+    M --> P0[TP rank 0<br/>W rows 0:4096]
+    M --> P1[TP rank 1<br/>W rows 4096:8192]
+    P0 --> AG[forward all-gather / TP collective]
+    P1 --> AG
+    AG --> RS[backward reduce-scatter]
+    RS --> V[DP finite+denominator vote]
+    V --> C[all ranks commit U0042]
+    C --> N[16장 Job/communicator ledger]
+```
+
+### 구체적인 source call path
+
+PyTorch revision `3691693263d2b66a68867e39b7449876844e06cf`에서 FSDP2의 [`fully_shard`](https://github.com/pytorch/pytorch/blob/3691693263d2b66a68867e39b7449876844e06cf/torch/distributed/fsdp/_fully_shard/_fully_shard.py#L110-L190)는 module parameter를 group에 귀속시키고, [`FSDPParamGroup.pre_forward`](https://github.com/pytorch/pytorch/blob/3691693263d2b66a68867e39b7449876844e06cf/torch/distributed/fsdp/_fully_shard/_fsdp_param_group.py#L452-L525)는 forward 전 materialization과 reshard 정책을 소비한다. gradient wire representation은 [`foreach_reduce`](https://github.com/pytorch/pytorch/blob/3691693263d2b66a68867e39b7449876844e06cf/torch/distributed/fsdp/_fully_shard/_fsdp_collectives.py#L730-L830)의 reduce-scatter packing에서 확인한다. 저장 직전 이름과 optimizer mapping은 [`get_state_dict`](https://github.com/pytorch/pytorch/blob/3691693263d2b66a68867e39b7449876844e06cf/torch/distributed/checkpoint/state_dict.py#L1271-L1397)가 canonical FQN으로 바꾼다.
+
+따라서 실제 경로는 `fully_shard(module) → pre_forward all-gather/materialize → module forward/backward → foreach_reduce packing/reduce-scatter → finite·denominator 합의 → optimizer shard mutation → get_state_dict canonicalization`이다. 각 함수의 존재가 실행 증거는 아니다. trace의 process-group generation, collective ordinal과 tensor ObjectID가 이 경로와 일치해야 한다.
+
+### shape·byte·rank 원장
+
+예시 parameter `transformer.h.0.attn.q_proj.weight`의 global shape를 `[8192,4096]`, bf16이라 하자. 논리 payload는 `8192×4096×2=67,108,864 bytes`다.
+
+| 단계 | rank-local logical shape | rank-local payload | owner·사건 |
+|---|---:|---:|---|
+| TP row shard | `[4096,4096]` | 32 MiB | TP rank 0/1 |
+| DP+TP persistent shard | `[1024,4096]` | 8 MiB | DP rank별 FSDP shard |
+| forward materialized TP shard | `[4096,4096]` | 32 MiB | DP group all-gather 완료 뒤 |
+| gradient reduce-scatter output | `[1024,4096]` fp32 | 16 MiB | optimizer owner rank |
+| Adam moments `m,v` | 각각 `[1024,4096]` fp32 | 각각 16 MiB | `U0042` commit state |
+
+이 표의 payload byte는 ring/tree wire byte가 아니다. collective algorithm, channel 수와 topology를 반영한 실제 NIC/NVLink byte는 16장에서 별도로 측정한다. rank별 원장 키는 `(GR-001,U0042,ObjectID,MeshGeneration,GroupID,CollectiveOrdinal)`이다.
+
+장애 주입은 세 개면 충분히 갈림길을 만든다. rank 3에서 collective ordinal 하나를 건너뛰면 [rank hang 플레이북](../playbooks/06-rank-hang.md)이 group/ordinal 최초 차이를 찾아야 한다. rank 5의 valid-token denominator를 1 줄이면 collective는 끝나도 single-rank oracle과 parameter delta가 달라져야 한다. reduce-scatter 완료 전에 optimizer를 호출하면 event dependency assertion이 막고 `U0042`는 publish되지 않아야 한다. 작은 실행은 [멀티노드 장애 실습](../labs/29-multinode-failure-lab.md)의 rank-kill·collective signature로 연결하고, OOM은 [OOM 플레이북](../playbooks/05-oom.md)에서 persistent shard와 materialization peak를 분리한다.
+
+16장에는 “8 ranks”라는 숫자만 넘기지 않는다. JobID, MeshGeneration, rank→GPU/NIC mapping, process groups, 각 group의 예상 collective ordinal·payload, `U0042` prepare/commit vote와 outstanding work를 넘긴다. 그래야 클러스터 재배치가 동일 학습 함수를 보존했는지 판정할 수 있다.

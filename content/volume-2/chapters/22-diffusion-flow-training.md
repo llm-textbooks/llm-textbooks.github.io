@@ -4,6 +4,22 @@ autoregressive 모델이 다음 token의 조건부 분포를 맞힌다면 diffus
 
 따라서 이 장의 기준 질문은 “어떤 diffusion인가”가 아니라 “어느 좌표의 상태를, 어느 시간 규약으로 만들고, 모델 출력의 어떤 의미에 손실을 주며, 어느 solver가 그 출력을 어떻게 해석하는가”이다. 이 네 질문 중 하나라도 비어 있으면 shape가 모두 맞고 loss도 내려가면서 잘못된 모델을 만들 수 있다. 특히 `prediction_type`, latent scale, time 방향과 loss denominator는 문자열이나 사소한 상수가 아니라 학습할 벡터장을 바꾸는 상태다.
 
+`GR-001/DF-022`는 기존 causal-LM 실행을 버리는 별도 이야기가 아니다. `BatchID → ForwardID → LossID → UpdateID`라는 commit 골격은 보존하되, token shift 대신 time/noise draw와 corruption state가 들어오는 구조적 diff다.
+
+```mermaid
+flowchart LR
+  X0[SampleID<br/>clean x0·condition] --> EN[encoder<br/>latent z0]
+  EN --> Q[NoiseDrawID<br/>t, epsilon]
+  Q --> XT[corruption/interpolation<br/>x_t]
+  XT --> DN[denoiser/velocity model]
+  DN --> PR[prediction<br/>epsilon·v·x0·flow]
+  PR --> LS["LossID<br/>weight(t)·sum/count"]
+  LS --> UP[UpdateID<br/>optimizer+EMA]
+  UP --> SV[solver contract<br/>별도 생성 경로]
+```
+
+이 그림에서 학습과 생성을 역방향 화살표 하나로 잇지 않은 이유가 중요하다. 학습 target의 의미와 solver가 해석하는 vector field가 합의되어야 하며, timestep 방향·latent scale·prediction type 중 하나만 달라도 낮은 loss가 올바른 sampling을 보장하지 않는다.
+
 ## 22.1 확산 학습을 corruption·target·denoising 상태 사슬로 읽는다
 
 확산 모델을 노이즈 제거 그림으로 축약하지 않고 clean sample, time/noise draw, corrupted state, target, prediction과 loss의 소유자로 나눈다.
@@ -1970,69 +1986,19 @@ publication gate는 matrix row의 PASS와 certificate signature를 읽어 immuta
 
 release 서명에는 tested seed, resolution, duration, condition length, sigma range, NFE, dtype, topology와 hardware도 포함한다. 같은 source와 weight라도 kernel, collective order와 decoder backend가 달라 trajectory가 바뀔 수 있다. 허용 오차는 결과를 본 뒤 넓히지 않고 component별 first-difference budget으로 사전 고정한다. 새 runtime은 이 matrix를 다시 통과한 뒤에만 기존 capability를 상속한다.
 
-## 22.16 코드 워크스루: FlowMatch Euler `step`에서 시간 방향을 증명한다
+## 22.16 GR-001/Diffusion fork — noise state에서 solver step과 checkpoint까지
 
-flow matching을 학습할 때 `u_theta(x_sigma,sigma)`가 잘 맞아도 sampler가 반대 방향으로 적분하면 결과는 무너진다. Diffusers 고정 revision `d57cecde`의 `FlowMatchEulerDiscreteScheduler.step`은 model output, sigma schedule, mutable step index와 stochastic branch가 만나는 가장 짧은 production 경계다. 이 함수는 training loss가 아니라 **학습한 velocity를 한 번 소비하는 해석기**이므로, 논문 objective와 inference parameterization을 연결할 때 둘을 같은 함수로 오인하지 않는다.
+FlowMatch Euler, BD3·MDLM과 causal video의 후반 증보는 공통 trajectory ledger 아래 둔다. `TrajectoryID`의 state는 `(sample, t/sigma, clean/noise or discrete corruption, target parameterization, RNG, solver state, model/checkpoint generation)`이며 LLM UpdateID와 같은 이름으로 time index를 덮지 않는다.
 
-### 짧은 원문을 ODE 한 스텝으로 번역한다
-
-핵심 경로는 `scheduling_flow_match_euler_discrete.py:483-511` 가운데 다음 부분이다.
-
-```python
-sample = sample.to(torch.float32)
-sigma = self.sigmas[self.step_index]
-sigma_next = self.sigmas[self.step_index + 1]
-current_sigma = sigma
-next_sigma = sigma_next
-dt = sigma_next - sigma
-if self.config.stochastic_sampling:
-    x0 = sample - current_sigma * model_output
-    noise = randn_tensor(sample.shape, generator=generator, ...)
-    prev_sample = (1.0 - next_sigma) * x0 + next_sigma * noise
-else:
-    prev_sample = sample + dt * model_output
+```mermaid
+flowchart LR
+ X0[clean x0/token] --> Q[noise/corruption q_t]
+ Q --> M[model prediction epsilon/v/flow/logits]
+ M --> O[objective + timestep denominator]
+ O --> S[solver step / reverse transition]
+ S --> C[trajectory checkpoint]
 ```
 
-`sample`과 `model_output`은 이미지 latent라면 `[B,C,H,W]`, video latent라면 구현에 따라 `[B,C,T,H,W]`, token field라면 `[B,L,D]`처럼 같은 shape다. `sigma`, `sigma_next`, `dt`는 scalar이며 전체 state에 broadcast된다. 함수는 update 전에 sample을 FP32로 올려 작은 `dt*u`가 저정밀 덧셈에서 사라지는 위험을 줄이고, deterministic 경로가 끝나면 output을 model dtype으로 되돌린다. scheduler의 mutable `_step_index`가 어느 sigma pair를 읽을지 소유한다.
+DDPM의 epsilon/v/x0 target, flow의 velocity와 discrete diffusion의 transition logits는 동일 output tensor가 아니다. 코드 mapping은 scheduler의 `scale_noise/add_noise`, model forward, target construction, weighted reduction과 solver `step`을 순서대로 고정한다. 연속 예에서는 `[B,C,H,W]` latent와 scalar/vector timestep의 broadcasting·dtype·bytes를, discrete 예에서는 `[B,L,V]` logits, corruption mask와 valid-token denominator를 기록한다.
 
-선형 conditional path를 `x_sigma=(1-sigma)x_0+sigma epsilon`으로 놓으면 sigma가 noise 쪽 좌표이고 `dx/dsigma=epsilon-x_0`다. model이 이 velocity `u`를 예측할 때 Euler 식은
-
-\[
-x_{\sigma_{k+1}}=x_{\sigma_k}+(\sigma_{k+1}-\sigma_k)u_\theta(x_{\sigma_k},\sigma_k)
-\]
-
-다. 코드의 `dt`와 마지막 줄이 정확히 이 식이다. denoising schedule은 보통 sigma가 감소하므로 `dt<0`이다. “이전 sample”이라는 이름 때문에 `sigma-sigma_next`를 쓰면 부호가 두 번 뒤집히지 않는다. 실제로는 velocity와 반대 부호로 이동해 data endpoint에서 멀어진다.
-
-stochastic branch는 단순히 Euler 결과에 noise를 더하지 않는다. 먼저 `x0=sample-sigma*model_output`으로 clean endpoint를 추정하고, 다음 sigma에서 `(1-sigma_next)x0+sigma_next*noise`로 다시 섞는다. 따라서 `stochastic_sampling=True`는 RNG state뿐 아니라 transition 식 자체를 바꾼다. `s_churn` 인자가 signature에 있어도 이 고정 함수 본문의 선택 경로에는 사용되지 않는다. 다른 Euler scheduler에서 본 churn 의미를 이 클래스에 자동 이식하면 안 된다.
-
-### 세 숫자로 shape·state·최초 분기를 검산한다
-
-scalar fixture를 `x0=2`, `epsilon=-1`, `sigma=0.75`, `sigma_next=0.25`로 잡자. forward state는 `x_sigma=0.25·2+0.75·(-1)=-0.25`, 정확한 velocity는 `u=epsilon-x0=-3`, `dt=-0.5`다. deterministic step은 `-0.25+(-0.5)(-3)=1.25`이고, 이는 직접 계산한 `x_0.25=0.75·2+0.25·(-1)=1.25`와 같다. 이 등식은 model 품질과 무관하게 scheduler convention을 검사한다.
-
-첫 변형에서는 `dt`를 양수 `sigma-sigma_next`로 바꾼다. 최초 차이는 model output이 아니라 `dt`이며 결과가 `-1.75`로 data에서 멀어진다. 둘째는 `model_output=+3`으로 target sign만 뒤집는다. 최초 차이는 model output checksum이고 같은 `dt`에서 역시 `-1.75`가 된다. 셋째는 BF16 sample `4096`과 작은 update를 사용한다. 함수가 FP32로 올리지 않은 복제본과 비교하면 최초 차이가 update 덧셈에서 나타날 수 있다. 넷째는 동일 generator state로 stochastic branch를 두 번 실행해 noise checksum과 output을 맞추고, generator를 복원하지 않은 run은 `randn_tensor`에서 처음 갈라져야 한다.
-
-per-token time을 쓰면 함수는 `[B,L]` sigma마다 schedule에서 바로 아래 값을 찾아 `dt`를 `[B,L,1]`로 만든다. 이때 global `_step_index`의 scalar sigma pair와 동일하다고 가정하지 않는다. token별 sigma가 같을 때만 scalar 경로와 비교하고, 서로 다른 sigma fixture에서는 각 token이 자기 `dt`로 움직이는지 본다. 함수가 어느 경우에도 마지막에 `_step_index`를 하나 올린다는 사실도 resume state에 포함한다.
-
-고정 revision에는 이 scheduler의 독립 unit test 파일이 확인되지 않는다. `tests/pipelines/stable_audio_3/test_stable_audio_3.py:233-247`은 stochastic scheduler 설정이 pipeline의 8-step 기본값을 선택한다는 통합 계약만 검증한다. 위 Euler 수치, integer timestep 거부, scalar/per-token parity, dtype 복원과 RNG replay는 별도 golden fixture로 채워야 한다. pipeline test를 step 식의 직접 증거로 과장하지 않는 것이 중요하다.
-
-trajectory 비교 순서는 `initial sample → passed timestep 값 → step_index → current/next sigma → dt → model_output → x0 또는 noise draw → FP32 prev_sample → output dtype → incremented step_index`다. 마지막 waveform이나 image만 비교하지 않는다. 학습 target sign 오류는 model output에서, schedule 역전은 sigma/dt에서, resume 오류는 step index에서, stochastic 재현 오류는 noise draw에서 처음 나타난다. 이렇게 first divergence를 고정하면 flow 논문의 경로 미분, model parameterization과 production scheduler의 mutable state가 하나의 검증 가능한 설명으로 닫힌다.
-
-운영 조치는 최초로 갈라진 주체에만 적용한다. `x_t`가 먼저 다르면 data·VAE·noise/time sampler를, model output이 먼저 다르면 target parameterization과 condition path를, `dt` 이후만 다르면 scheduler·solver state를 고친다. 마지막 sample의 품질 지표가 나빠졌다는 이유만으로 세 층을 동시에 바꾸면 원인을 지우고 새 trajectory를 만들 뿐이다. 수정 뒤에는 같은 scalar fixture와 실제 latent의 짧은 trajectory를 함께 재생해 수식 계약과 production 경로가 모두 닫혔는지 확인한다.
-
-## 22.17 BD3와 MDLM의 checkpoint는 model weight보다 넓다
-
-저장·복구 경로를 다음 corruption의 입력으로 읽는다. 두 구현의 `on_save_checkpoint`는 EMA가 있으면 `checkpoint['ema']`를 저장하고, optimizer step에 `accumulate_grad_batches`를 곱해 Lightning batch progress를 교정한다. MDLM은 sampler의 `random_state`도 보존한다. BD3는 여기에 `sampling_eps_min/max`를 넣고, load 때 `torch.compile`이 붙인 `_orig_mod.` prefix를 제거한다. 즉 상태 전이는 `optimizer progress → batch cursor`, `sampler RNG → 다음 표본`, `sampling epsilon → 다음 time/noise 좌표`, `EMA → 평가·sampling weight` 네 갈래다.
-
-짧은 원문인 `completed = optimizer_steps * accumulate_grad_batches`가 필요한 이유는 framework의 기본 batch counter가 한 iteration 뒤처질 수 있기 때문이다. 그러나 accumulation 설정을 resume 때 바꾸면 같은 optimizer step에서도 다른 batch cursor가 만들어진다. `_orig_mod.` 제거 역시 key 호환을 복구할 뿐 tensor 값·optimizer slot·새 compile graph의 동등성을 증명하지 않는다.
-
-최초 불일치와 장애 주입을 고정한다. 복구 비교 순서는 `global_step → optimizer progress → derived batch progress → sampler random_state → next SampleID → sampled t/epsilon → corruption checksum → EMA checksum`이다. BD3에서 `sampling_eps_min/max`를 누락하면 최초 차이는 time sampler에, MDLM에서 sampler state를 누락하면 SampleID 또는 corruption RNG에 생긴다. EMA만 빠지면 training loss가 같아도 첫 evaluation output이 갈라질 수 있다.
-
-변형 실험은 checkpoint를 저장한 뒤 accumulation을 4에서 8로 바꾸는 것이다. load 성공을 복구 성공으로 세지 말고, derived batch cursor와 다음 SampleID가 기준 run과 달라지는 순간 거부해야 한다. 진단 체크리스트는 compile prefix 집합, EMA key·shape, optimizer step, 저장 당시 accumulation, epoch/batch progress, sampler state, epsilon 범위, 첫 corruption checksum을 포함한다. 이 가운데 하나라도 비교할 수 없으면 checkpoint는 읽혔을 뿐 trajectory가 복구된 것은 아니다.
-
-## 22.18 causal video token과 diffusion latent를 같은 표현으로 오인하지 않는다
-
-continuous AutoencoderKL latent는 mean/log-variance posterior에서 sample한 실수 tensor이고 discrete video tokenizer는 index stream을 낸다. 이름에 MAGVIT이 들어간 Diffusers autoencoder가 MAGVIT-v2의 LFQ token을 구현한다고 단정할 수 없다. downstream diffusion이 기대하는 scaled latent와 autoregressive LM이 기대하는 integer vocabulary는 저장 schema와 loss가 다르다.
-
-temporal causality는 문서 문구가 아니라 prefix invariance로 시험한다. 같은 앞부분과 서로 다른 미래 frame을 넣었을 때 앞 token이 같아야 한다. full clip과 chunk encode의 index, overlap state, first-frame policy와 seam도 비교한다. tiled decode의 영상 seam test는 temporal causal encode를 자동 증명하지 않는다.
-
-공개 shape·chunk 시험은 특정 구현의 tensor 계약을 고정할 뿐 논문의 reconstruction FID·LPIPS, sampling 품질, token rate와 GPU throughput을 재현하지 않는다. training code·dataset mixture·distributed codebook state가 공개되지 않은 기법은 해당 빈칸을 `NegativeEvidence`로 유지한다.
+시간 방향 반전, sigma/timestep off-by-one, RNG 미복원, solver state 누락과 checkpoint 직후 재표본화를 주입한다. 기준 trajectory와 최초 다른 `(t,state,prediction,target,loss)`가 detector다. BD3/MDLM은 data cursor뿐 아니라 corruption schedule·sampling chain을 저장한다. video latent와 causal video token은 좌표·objective가 다르므로 21장의 media trace를 그대로 diffusion state라 부르지 않는다. 다음 23장에는 변화 대상과 보존 집합의 평가 방법을, 24장에는 trajectory subject와 stochastic uncertainty를 넘긴다.

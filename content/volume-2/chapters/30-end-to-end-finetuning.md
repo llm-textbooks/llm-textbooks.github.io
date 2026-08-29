@@ -1,25 +1,66 @@
 # 30장 SFT·RL·배포 golden lab: 하나의 변경을 끝까지 책임진다
 
-마지막 장은 여러 framework의 명령을 한데 모으지 않는다. base checkpoint가 SFT adapter와 preference update, online rollout, merge·quantization을 거쳐 배포되면 같은 prompt도 단계마다 다른 tensor와 정책을 통과한다. 최종 응답만 비교해서는 어느 변경이 차이를 만들었는지 알 수 없다. 이 장은 각 artifact의 parent와 경계별 출력을 연결해 최초 divergence를 찾고, 실패한 후보에서 안전한 parent로 돌아가는 과정까지 설명한다.
+마지막 장은 여러 framework의 명령을 한데 모으지 않는다. 이 장에서는 `GR-001`이라는 **하나의 실행**을 붙잡는다. 두 개의 짧은 대화가 같은 tokenizer와 collator를 지나 한 번의 optimizer update를 만들고, 그 update가 adapter checkpoint·merge·평가·release candidate로 이어지는 과정을 실제 식별자와 tensor로 추적한다. 이후의 대규모 SFT·DPO·온라인 RL·분산 실행은 이 기준 실행에서 무엇이 달라지는지를 설명하는 가지다.
+
+독자는 아래 그림에서 현재 위치를 잃지 않아야 한다. 각 화살표는 단순한 처리 순서가 아니라 **소유자가 입력을 읽고 새로운 상태를 commit하는 경계**다. 뒤에서 어떤 기법을 만나더라도 먼저 이 그림의 어느 화살표를 바꾸는지 찾는다.
 
 ```mermaid
-flowchart TD
-  D[data and split digest] --> L[SFT adapter]
-  B[base digest] --> L
-  T[tokenizer and template digest] --> L
-  L --> P[preference or RL policy]
-  P --> M[merged BF16]
-  M --> Q[quantized artifact]
-  M --> S[serving BF16]
-  Q --> SQ[serving quantized]
-  T --> S
-  T --> SQ
-  S --> PE[parity EvalID]
-  SQ --> PE
-  PE --> G{release gates}
-  G -->|pass| R[release manifest]
-  G -->|fail| X[rollback checkpoint]
+flowchart LR
+  R[SourceRowID<br/>대화 2행] --> T[SampleID<br/>template·tokenize]
+  T --> C[BatchID<br/>collate·mask]
+  C --> F[ForwardID<br/>logits]
+  F --> L[LossID<br/>sum / valid tokens]
+  L --> B[BackwardID<br/>A.grad·B.grad]
+  B --> U[UpdateID<br/>optimizer commit]
+  U --> K[CheckpointID<br/>adapter+resume state]
+  K --> M[MergedID<br/>W+sBA]
+  M --> E[EvalRunID<br/>parity·quality·safety]
+  E --> G{release gate}
+  G -->|통과| P[ReleaseID]
+  G -->|실패| X[부모 CheckpointID로 복귀]
 ```
+
+### GR-001의 작은 실제값
+
+`GR-001`은 거대한 학습 성능을 재현하려는 benchmark가 아니다. 복잡한 실행에서 사라지기 쉬운 의미를 손으로 대조하기 위한 deterministic fixture다. 대표 모델은 [`Qwen/Qwen2.5-0.5B-Instruct` 모델 카드 revision `7ae5576…`](https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct/blob/7ae557604adf67be50417f59c2c2f167def9a775/README.md)와 같은 작은 decoder-only Qwen 계열로 고정하고, [`config.json`](https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct/blob/7ae557604adf67be50417f59c2c2f167def9a775/config.json)·tokenizer·weight 파일 digest를 함께 기록한다. 대화 두 행을 길이 `T=16`으로 padding했다고 가정하면 collator의 핵심 출력은 다음처럼 작아서 사람이 직접 검사할 수 있다. 이 revision은 설명의 재현 좌표이며 “현재 최신”이라는 뜻이 아니다.
+
+| 식별자·상태 | 예시 값 | shape·dtype·device | 이 값을 만드는 owner | 다음 consumer |
+|---|---|---|---|---|
+| `SampleID=S0,S1` | role span과 assistant span | 가변 길이, CPU metadata | chat template·tokenizer | data collator |
+| `BatchID=B0/input_ids` | token ID 두 행 | `[2,16]`, `int64`, CPU→CUDA | collator | model forward |
+| `B0/labels` | prompt·padding은 `-100` | `[2,16]`, `int64`, CUDA | collator | causal-LM loss |
+| `ForwardID=F0/logits` | vocabulary별 점수 | `[2,16,V]`, BF16, CUDA | decoder+LM head | shifted CE |
+| `LossID=L0` | `loss_sum / 9 valid tokens` | scalar FP32 accumulation | loss function | autograd |
+| `BackwardID=G0` | LoRA A/B gradient | module별 `[r,d_in]`, `[d_out,r]` | autograd | optimizer |
+| `UpdateID=U0` | A/B와 Adam state 변화 | parameter별 FP32/BF16 | optimizer step | checkpoint writer |
+| `CheckpointID=C0` | adapter, optimizer, RNG, cursor | file/shard digest | save transaction | clean-process resume |
+
+이 표의 숫자는 실행 결과를 꾸며 낸 것이 아니다. 실제 run에서는 `V`, 유효 token 수, dtype과 device를 manifest에서 읽어 표를 다시 생성한다. 중요한 것은 `loss=...` 한 줄이 아니라 `L0`의 분자와 분모가 `B0/labels`에서 재계산되고, `U0`의 parameter delta가 바로 그 `L0`에서 비롯됐음을 증명하는 것이다.
+
+### 실제 코드에서 닫히는 호출 경로
+
+Transformers의 고정 revision `550d7b3834670483a4df436541272c055dc364bf`에서 [`Trainer._inner_training_loop`](https://github.com/huggingface/transformers/blob/550d7b3834670483a4df436541272c055dc364bf/src/transformers/trainer.py#L1456-L1889)는 dataloader iteration, accumulation, optimizer commit과 logging clock을 소유한다. 한 microbatch는 [`training_step`](https://github.com/huggingface/transformers/blob/550d7b3834670483a4df436541272c055dc364bf/src/transformers/trainer.py#L1892-L1963)을 거쳐 [`compute_loss`](https://github.com/huggingface/transformers/blob/550d7b3834670483a4df436541272c055dc364bf/src/transformers/trainer.py#L1965-L2052)로 들어간다. optimizer와 scheduler는 각각 [`create_optimizer`](https://github.com/huggingface/transformers/blob/550d7b3834670483a4df436541272c055dc364bf/src/transformers/trainer.py#L1168-L1242)와 [`create_scheduler`](https://github.com/huggingface/transformers/blob/550d7b3834670483a4df436541272c055dc364bf/src/transformers/trainer.py#L1244-L1274)에서 생성된다.
+
+```mermaid
+sequenceDiagram
+  participant DL as DataLoader/Collator
+  participant TR as Trainer
+  participant MD as Qwen model
+  participant AG as Autograd
+  participant OP as Optimizer
+  participant CK as Checkpoint writer
+  DL->>TR: B0 input_ids·labels·mask
+  TR->>MD: compute_loss(model, B0)
+  MD-->>TR: logits, loss_sum/valid_count
+  TR->>AG: backward(scaled loss)
+  AG-->>TR: adapter parameter.grad
+  TR->>OP: clip / step / scheduler.step
+  OP-->>TR: U0 또는 overflow skip
+  TR->>CK: model+optimizer+scheduler+RNG+cursor
+  CK-->>TR: C0 publication commit
+```
+
+이 호출 그래프는 함수 이름을 나열하려는 것이 아니다. `gradient_accumulation_steps`, mixed-precision overflow, resume cursor 같은 옵션이 어느 화살표를 바꾸는지 찾는 지도다. 예를 들어 overflow로 step이 건너뛰어졌다면 backward가 끝났다는 사실만으로 `UpdateID`를 발급하면 안 된다. optimizer state와 parameter가 실제로 commit된 경우에만 `U0`가 생긴다.
 
 ## 30.1 마지막 장의 읽기 계약: 점수가 아니라 변경의 책임을 추적한다
 
@@ -1717,902 +1758,104 @@ data 단계에는 중복 family의 split 침투, 잘못된 chat template, assist
 
 선택하지 않은 대안과 남은 uncertainty도 유지해 이후 traffic·규정·비용 조건이 바뀔 때 동일한 evidence에서 판단을 다시 구성한다.
 
-## 30.7 프로젝트 정의와 학습 입력을 고정한다
+## 30.7 GR-001 규범 trace — 입력 계약에서 committed update까지
 
-실행 계획의 첫 단계는 GPU 수가 아니라 문제, 데이터 계보, tokenizer와 objective의 경계를 고정하는 일이다.
+30.5와 30.6의 recipe·인계 규칙은 이제 이 trace를 기준으로 읽는다. 프로젝트 charter, data contract, tokenizer, objective와 launcher 설명은 각각 별 원장이 아니라 `GR-001`의 입력을 확정하는 단계다. 같은 ArtifactID·UpdateID·DecisionID를 다시 정의하는 문단은 이 절의 표로 합친다.
 
-### 프로젝트 정의를 metric보다 먼저 쓴다
+```mermaid
+flowchart LR
+    P[Gate 0<br/>problem + hard constraints] --> D[Gate 1<br/>family split + data lineage]
+    D --> T[Gate 2<br/>token/template/mask]
+    T --> G[GoldenBatch B117]
+    G --> U[Update U0042<br/>optimizer+scheduler commit]
+    U --> K[Checkpoint CK43<br/>next-update oracle]
+    K --> X[merge / quantize / export]
+    X --> E[EvalID + red-team]
+    E --> R[ReleaseDecision RD7]
+    R --> C[canary / rollback rehearsal]
+```
 
-파인튜닝을 시작할 때 “정확도를 올린다”는 문장은 불충분하다. 어떤 사용자·업무에서 어떤 입력을 받아 어떤 출력·tool action을 내고, 무엇을 절대 악화시키지 않아야 하는지 쓴다. latency·cost·privacy·안전과 rollback 요구도 같은 수준의 제약이다.
+| gate | 반드시 고정할 입력 | 최초 mutation·출력 | 반증·중단 조건 |
+|---|---|---|---|
+| 0 문제 | 사용자·업무·출력 계약, latency·cost·privacy·safety hard limit | ProjectGeneration | retrieval·prompt·guard가 더 적합하거나 baseline 실패가 재현되지 않음 |
+| 1 데이터 | acquisition·rights, family lineage, split, filter·dedup·mixture revision | SourceRow/FamilyID와 draw ledger | train/eval descendant 교차, 권리·privacy 불명 |
+| 2 좌표계 | tokenizer·template digest, special IDs, truncation, assistant mask | TokenFixtureID, valid-token denominator | training/eval/serving token 또는 mask 불일치 |
+| 3 update | model·adapter surface, objective, optimizer, scheduler, dtype, topology | `U0042` parameter·moment delta | NaN, rank decision 불일치, scheduler 선행 |
+| 4 durability | canonical FQN, RNG·scaler·cursor, global tensor ranges | `CK43(COMMITTED)` | partial generation, next sample/update 불일치 |
+| 5 변환 | base+adapter parents, merge/quant/export config·runtime | 새 immutable subject | missing key, fallback, logits·decode parity 실패 |
+| 6 판정 | exact subject, EvalID, judge·harness, hard gates·uncertainty | `RD7` | contamination, critical safety, 미검증 subject |
+| 7 운영 | approved digest, cohort, loaded runtime, rollback parent | ReleaseGeneration | wrong digest, cache isolation, sustained budget 위반 |
 
-성공 기준은 target tasks, counter-slices, capability floor, safety 강제 관문s와 운영 SLO로 나눈다. 평균 score 하나에 합치지 않는다. 각 metric의 dataset·evaluator revision과 최소 효과·uncertainty를 사전 등록한다.
+Gate마다 `owner, input digest, code/config revision, mutation, output digest, oracle, evidence location, rollback parent` 여덟 칸만 쓴다. W&B run, 파일명, `latest` alias와 dashboard URL은 보조 locator이지 identity가 아니다. 중복된 “원장을 남긴다”는 문장은 이 schema를 참조하고, 해당 단계의 고유 필드만 덧붙인다.
 
-baseline은 current production bundle과 적절한 prompt/RAG-only 대안, base model, SFT/adapter candidate를 포함한다. model training 없이 해결할 수 있는 문제인지부터 본다. label·retrieval·tool policy 버그를 파인튜닝으로 가리지 않는다.
+## 30.8 GR-001 실행 — 작은 기준선에서 분산 commit까지
 
-ProjectSpec은 owner, decision date, data rights, compute budget와 stop conditions를 가진다. 요구가 바뀌면 같은 run의 설명을 소급 수정하지 않고 새 DecisionGeneration을 만든다.
+실행은 단일 GPU의 B117에서 시작한다. raw messages→rendered bytes→token IDs→labels/mask→loss numerator·denominator→gradient→parameter delta를 손계산 oracle과 맞춘다. 짧은 overfit은 학습 가능성만 증명하며 일반화 근거가 아니다. LoRA/QLoRA라면 injection inventory, trainable ParameterID, base immutability, adapter save/reload와 merge parity를 함께 본다.
 
-**모델 선택은 크기보다 failure hypothesis에서 시작한다**
+그다음 규모만 바꾼다. nominal batch보다 update별 valid tokens를 보존하고, `(per-device batch, accumulation, DP world size, packing)`이 denominator와 scheduler clock을 어떻게 바꾸는지 기록한다. FSDP·ZeRO·TP·PP·EP를 선택하면 parameter·gradient·optimizer·activation의 global shape, local shard, dtype와 bytes, group membership, collective ordinal을 먼저 계산한다. 실제 logical payload와 fabric wire byte를 구분한다.
 
-base model은 license, tokenizer·context, language/domain, architecture, tool/multimodal support, hardware fit와 공개 training evidence를 비교한다. leaderboard 최고 점수만 보지 않는다. 실제 processor/template와 runtime compatibility를 확인한다.
+관측의 최소 join은 `(RunID, AttemptID, UpdateID, BatchID, rank, phase, ObjectID)`다. loss·gradient norm·LR·overflow·valid tokens, step time, collective tail, HBM, data wait를 같은 UpdateID에서 비교한다. 높은 utilization 자체는 성공이 아니고 objective denominator, parameter delta와 checkpoint lag가 동시에 정상이어야 한다.
 
-같은 family의 dense·MoE, base·instruct와 quantized variants는 다른 parent다. instruct model은 이미 alignment prior가 있어 작은 SFT에 유리할 수 있지만 target style·safety와 충돌할 수 있다. base model은 더 많은 alignment data와 비용이 필요할 수 있다.
+| 실행 mutation | 최초로 틀려야 할 증거 | 안전한 terminal |
+|---|---|---|
+| assistant mask 한 칸 이동 | B117 valid-token set·loss numerator | data generation 거부 |
+| rank 하나 `found_inf` | rank finite-vote ledger | 전 rank U0042 skip |
+| collective ordinal 누락 | group generation+ordinal trace | communicator 폐기, last commit 복귀 |
+| accumulation 마지막 microbatch kill | AttemptID와 gradient buffer | U0042 미공개, microbatch 전체 replay |
+| scheduler 이중 step | applied LR/ClockGeneration | parameter generation 승인 금지 |
 
-parameter 수가 커지면 memory·throughput·checkpoint와 serving cost가 늘고, 작은 모델은 capacity ceiling이 있다. representative golden samples에서 zero/few-shot, prompt/RAG baseline과 small adaptation을 비교한다. 실제 large training 전 early evidence를 모은다.
+단일 GPU 기준선은 [golden run](../labs/28-single-gpu-golden-lab.md), rank·collective fault는 [멀티노드 장애 실습](../labs/29-multinode-failure-lab.md), NaN/OOM/hang은 각각 [NaN](../playbooks/01-nan.md)·[OOM](../playbooks/05-oom.md)·[rank hang](../playbooks/06-rank-hang.md) 플레이북으로 재현한다. launcher, mixed precision, FSDP/ZeRO backend 조합은 실제 실행한 support-matrix cell만 PASS로 둔다. 다른 조합은 이름이 비슷해도 `NOT_RUN`이다.
 
-선택한 Hub/repository revision, config, tokenizer, template, remote-code policy와 digest를 고정한다. model card 주장을 source·artifact와 분리하고 접근하지 못한 recipe를 추정으로 채우지 않는다.
+## 30.9 GR-001 durability — checkpoint에서 변환 산출물까지
 
-### data contract는 row보다 family를 소유한다
+checkpoint 요청, snapshot, shard write, manifest와 catalog publish는 서로 다른 사건이다. `CK43`에는 model/adapter, optimizer moments·step, scheduler, scaler, RNG, sampler/data cursor, canonical config와 source topology가 같은 `U0042`를 가리켜야 한다. clean process가 next BatchID B118을 읽어 uninterrupted reference와 같은 loss·gradient·moment·parameter delta를 내야 복구가 끝난다.
 
-한 원문에서 여러 chunks, paraphrases, translations와 synthetic answers가 나오면 같은 FamilyID에 연결한다. train/validation/test split은 파생 전에 family 기준으로 한다. random row split은 leakage를 만든다.
+merge·quantize·export는 배포 준비 옵션이 아니라 각각 새 artifact subject를 만드는 변환이다. merge는 `W'=W+sBA`의 orientation·scale·dtype와 tied storage를, quantization은 group/scale/zero-point·packing·calibration과 selected kernel을, export는 source→target tensor key·axis·shard mapping과 tokenizer/template/runtime schema를 보존한다. 매 edge에서 parent/input digest, tool revision, output digest와 first-divergence tensor를 기록한다.
 
-row에는 source, license/consent, language/domain, timestamps, transforms, labels, quality, privacy와 eligibility가 있다. dedup·filter·packing 뒤에도 origin으로 역추적한다. raw text를 넓게 복사하지 않고 stable IDs와 restricted evidence를 사용한다.
+| edge | 고유 oracle | 대표 실패 |
+|---|---|---|
+| save→load | next sample·next update equality | partial shard, cursor·scheduler 세대 불일치 |
+| adapter→merged | 같은 tokens의 layer/logit parity | scale/orientation, target 누락, double apply |
+| merged→quantized | layer error+top-logit margin+target kernel | group metadata, outlier, dequant fallback |
+| quantized→exported | key/shape/dtype coverage와 load parity | transpose/QKV split, tokenizer 누락 |
+| exported→serving | rendered IDs, prefill, first decode, cache generation | RoPE/mask/KV layout, mixed replica |
 
-target behavior에 필요한 positive examples뿐 아니라 ambiguous, refusal/clarification, hard negatives와 capability preservation data를 둔다. sampling weight는 configured와 realized sample/token/loss mass로 회계한다.
+complete marker 이전 generation은 catalog에 보이지 않아야 한다. checkpoint·export 중 kill, shard truncation과 stale selector를 주입해 이전 complete parent로만 fallback하는지 본다. 부분 checkpoint는 [partial-checkpoint 플레이북](../playbooks/09-partial-checkpoint.md), 전체 artifact 연결은 [SFT·RL·배포 종합 실습](../labs/30-sft-rl-deploy-golden-lab.md)으로 확인한다.
 
-dataset generation은 immutable manifest, transformation source, counts·dispositions와 content hash를 가진다. mutable folder listing을 run input으로 쓰지 않는다. 삭제·권리 변경은 descendants를 stale로 돌린다.
+## 30.10 GR-001 판정 — evaluation에서 release transaction까지
 
-**annotation을 measurement system으로 설계한다**
+evaluation은 exact artifact subject를 utility·safety·robustness·cost에서 판정한다. dataset/harness/prompt/template/decoding/scorer revision, denominator, seed·confidence와 selection history를 고정한다. final untouched set을 보고 recipe를 바꾸면 새 experiment generation이다. 평균 score는 critical safety·privacy·license·schema·recovery hard fail을 상쇄하지 못한다.
 
-rubric은 desired action, allowed alternatives, disallowed behavior와 uncertainty를 정의한다. annotator가 필요한 context·tool/media를 실제로 볼 수 있는지 확인한다. missing evidence를 forced label로 만들지 않는다.
+preference와 RL 산출물은 추가 좌표를 요구한다. preference row에는 chosen/rejected lineage, policy/reference digest, 네 log-probability와 valid-pair denominator를 둔다. rollout에는 policy generation, token/logprob, reward/verifier generation, queue attempt와 completion을 둔다. duplicate·partial·stale rollout은 learner denominator에서 제외한다. red-team 결과는 AttackID, 대상 subject, policy category, 재현 조건, judge/human disposition과 mitigation parent를 가진다.
 
-independent labels, adjudication, tie/disagreement와 order·length bias를 기록한다. preference pair는 same prompt·state를 공유한다. chosen/rejected가 서로 다른 media·tool result를 보면 답변 선호가 아니다.
+`RD7`은 자동 metric이 아니라 `(subject digest, evidence-index digest, policy generation, selected/rejected candidates, residual risks, reviewer)`의 서명된 DecisionEvent다. build·evaluate·approve·promote 권한을 분리한다. promotion은 alias generation compare-and-swap이며 replica는 actual loaded digest를 보고한다. quantized/merged variant는 parent와 support matrix가 다르므로 base model card의 승인을 자동 상속하지 않는다.
 
-quality metric은 agreement 하나가 아니다. category·language·difficulty별 confusion, reviewer calibration과 edit history를 본다. policy revision이 바뀌면 old labels의 eligibility를 재평가한다.
+## 30.11 GR-001 운영 — canary·rollback·feedback 폐회로
 
-annotator rights·privacy와 exposure protection도 pipeline state다. raw sensitive data 접근을 최소화하고 training/private evaluation split을 분리한다. human label이 자동 gold가 아니라 근거 있는 measurement임을 유지한다.
+canary는 model, system, product 신호를 분리한다. model 신호는 schema/tool validity·refusal·quality slice, system 신호는 load·TTFT·prefill/decode·memory·error, product 신호는 task completion·retry·fallback이다. cohort·언어·길이·tool·candidate exposure denominator를 기록하고 actual model·template digest와 fallback reason을 join한다. candidate가 아닌 fallback 응답을 candidate 성과로 세지 않는다.
 
-### tokenizer와 template를 첫 모델 layer로 취급한다
+rollback은 과거 alias로 돌아가는 동작이 아니라 새 transaction이다. target predecessor의 현재 signature·revocation·runtime compatibility를 다시 검사하고, traffic·replica뿐 아니라 adapter slot, tokenizer/template, prefix/KV cache namespace와 monitor subject를 복원한다. in-flight stream과 tool side effect 처리도 명시한다. 모든 replica가 target digest를 보고하고 sentinel과 hard gate를 통과해야 완료다.
 
-raw conversation을 rendered bytes, IDs, role spans, labels와 stop tokens로 변환한다. special token collision, BOS/EOS 중복, assistant prefix와 tool JSON을 golden fixtures에서 확인한다. serving과 training template를 맞춘다.
+최종 rehearsal은 아래 세 사건을 서로 다른 runbook으로 수행한다.
 
-assistant-only loss라면 prompt labels는 ignore index고 valid completion count가 분모다. multi-turn에서 이전 assistant turns를 학습할지 마지막만 학습할지 정책을 둔다. all-ignore·truncation을 disposition한다.
+1. 데이터 family 오염: descendant를 격리하고 affected checkpoint·evaluation·export graph를 역추적한다.
+2. 분산 partial update: incomplete generation과 communicator를 폐기하고 last committed UpdateID에서 재생한다.
+3. 배포 cache 격리 실패: model rollback과 별개로 cache namespace·in-flight owner를 drain한다.
 
-tokenizer fertility, unknown/byte behavior와 language별 lengths는 compute와 effective context를 바꾼다. 같은 character corpus도 token mass가 다르다. mixture·batch budget을 tokens와 valid targets로 본다.
+각 rehearsal은 detection latency, evidence capture, decision, restore, first healthy request, lost UpdateID·sample·rollout과 영향 request를 측정한다. 정상 재생만 반복하거나 세 사건을 모두 “재실행”으로 끝내면 실패다. [sample-repeat](../playbooks/03-sample-repeat.md), [partial-checkpoint](../playbooks/09-partial-checkpoint.md), [multinode failure](../labs/29-multinode-failure-lab.md)의 terminal 조건을 사용한다.
 
-tokenizer/template upgrade는 data cache, embeddings와 optimizer state를 무효화할 수 있다. raw golden conversations의 old/new diff와 vocabulary migration을 별도 release로 검증한다.
+feedback·incident output은 자동 학습 queue로 보내지 않는다. eligibility, rights·privacy, family lineage와 untouched holdout 독립성을 재심사하고, 겨냥한 실패 가설·counter-slice·최소 intervention을 Gate 0의 새 ProjectGeneration으로 만든다. 이전 release의 선택하지 않은 대안, 미검증 support cell과 residual risk를 지우지 않는다.
 
-**SFT recipe를 수식과 state로 고정한다**
+## 30.12 최종 인수 — 다음 날 다시 실행할 최소 묶음
 
-SFT objective는 valid assistant targets의 next-token cross-entropy다. loss numerator, denominator, shift와 label smoothing을 적는다. microbatch means를 평균하는지 global token mean인지 actual trainer에서 확인한다.
+독자는 `GR-001` evidence만으로 다음 순서를 실행할 수 있어야 한다.
 
-config는 batch, accumulation, sequence/packing, optimizer groups, LR·schedule, precision, checkpointing와 seeds를 가진다. 각 option의 effective value와 runtime branch를 기록한다. sample, microstep, successful update와 token clocks를 분리한다.
+1. immutable base·data·tokenizer/template와 B117을 resolve한다.
+2. 단일 GPU에서 loss·gradient·U0042 delta를 재생한다.
+3. target topology에서 같은 denominator와 collective commit을 확인한다.
+4. CK43을 clean process에 복원해 B118/U0043을 비교한다.
+5. merge→quantize→export→serving 각 edge의 first-divergence oracle을 실행한다.
+6. exact deployment subject에 evaluation·red-team hard gate를 적용한다.
+7. canary fault와 rollback rehearsal을 수행하고 새 complete generation을 봉인한다.
 
-small overfit, two-step golden과 checkpoint resume부터 통과한다. target module gradients, clipping·overflow와 next update를 손으로 검산한다. 장기 run 전에 data·math·optimizer 경계를 닫는다.
-
-training curve는 loss만 아니라 valid targets, data mixture, gradient/update norms, LR, throughput·memory와 eval sentinels를 같은 UpdateID에 둔다. tracker는 관찰자이고 checkpoint/ledger가 권위다.
-
-**full fine-tuning과 PEFT의 선택표**
-
-full fine-tuning은 모든 또는 넓은 parameters를 바꿔 capacity가 크지만 optimizer memory, compute와 forgetting risk가 크다. LoRA는 selected low-rank deltas로 비용·rollback을 줄이지만 target modules와 rank가 표현 가능한 변화의 범위를 제한한다.
-
-선택은 data 규모, domain shift, latency/export, multi-tenant adapters, privacy·rollback과 hardware에서 한다. 작은 data라고 무조건 LoRA, 큰 data라고 full FT라는 규칙은 없다. controlled pilot에서 target/counter metrics와 cost를 본다.
-
-LoRA는 actual matched module names, rank·alpha·scaling, initialization, dropout와 modules-to-save를 inventory한다. rsLoRA, DoRA, PiSSA, LoftQ 같은 변형은 수식·state가 다르다. 이름만으로 효과를 이식하지 않는다.
-
-QLoRA는 quantized frozen base, dequantization compute, adapter gradients·optimizer와 metadata를 분리한다. memory는 file size가 아니라 activations/workspace까지 계산한다. merge·requantize는 별도 artifact다.
-
-**optimizer와 scheduler를 프로젝트 목표에 맞춘다**
-
-AdamW는 parameter별 first/second moments와 decoupled decay를 가진다. no-decay, adapter·head와 newly unfrozen groups의 LR·state를 명시한다. fused·foreach dispatch와 dtype을 기록한다.
-
-Muon 같은 matrix optimizer는 2D weights의 update geometry와 orthogonalization을 바꾸며 bias/norm·embedding을 다른 optimizer로 보낼 수 있다. parameter routing, scale와 distributed communication을 검증한다. 최신 유행만으로 선택하지 않는다.
-
-LR range, warmup, decay와 total updates는 global batch·valid tokens와 연결한다. overflow skip·accumulation에서 scheduler clock을 확인한다. group별 LR과 update-to-weight ratio를 본다.
-
-pilot은 one-factor 또는 사전 계획한 design으로 비교한다. 여러 knobs를 동시에 바꾸고 optimizer 효과라고 하지 않는다. trials, compute와 selection bias를 보고한다.
-
-**장기 run 시작 전 Gate 0**
-
-Gate 0은 source/environment/data/model/objective의 immutable identity, rights와 threat model을 확인한다. golden batch의 bytes→tokens→loss→gradient→two-step과 checkpoint round trip이 통과해야 한다.
-
-required storage, checkpoint interval, retention, failure budget와 operator access를 검토한다. last-complete parent와 rollback command가 실제로 존재하는지 본다. monitoring heartbeat와 alert owner를 지정한다.
-
-evaluation private set과 contamination controls, stop criteria를 동결한다. metric·judge가 바뀌면 model curve와 분리할 generation을 만든다. baseline artifacts를 보존한다.
-
-Gate 0 실패를 장기 run으로 “확인”하려 하지 않는다. 작은 경계에서 수정하고 negative fixture를 추가한다. 미실행 cluster·kernel cell을 명시한다.
-
-**data mixture를 GPU seconds까지 정산한다**
-
-configured sample weights는 실제 objective contribution이 아니다. source별 sampled rows, input tokens, valid targets, padding, skipped, loss sum/count와 GPU seconds를 누적한다. multimodal·long examples는 sample당 비용이 다르다.
-
-curriculum은 step에 따라 source, length, quality·difficulty와 task weights를 바꾼다. scheduler state와 checkpoint를 연결한다. resume 뒤 같은 phase·realized mixture를 재현한다.
-
-hard-example mining은 current model/judge score에 의존해 non-stationary하다. scorer generation, delay, cap와 noisy label review를 둔다. evaluation/private rows를 mining pool에 넣지 않는다.
-
-mixture가 목표와 맞는지 target·capability gradients와 eval slices로 본다. source 비율만 보고 인과를 확정하지 않고 ablation을 한다. data removal·rights change가 denominator와 schedule에 미치는 영향을 기록한다.
-
-## 30.8 규모 확장부터 배포 복구까지 운영 경계를 잇는다
-
-단일 GPU에서 닫힌 불변식을 분산 소유권, checkpoint, serving parity와 rollback까지 확장한다.
-
-### scaling 전에 cost model을 만든다
-
-memory는 weights, gradients, optimizer, activations, temporary workspace와 checkpoint staging으로 나눈다. PEFT·quantization·checkpointing option별 예상과 single-GPU measured peak를 비교한다.
-
-compute는 valid token, sequence shape, model FLOPs estimate, data processing와 evaluation/checkpoint overhead를 포함한다. tokens/s 하나로 long-context·multimodal mixture를 비교하지 않는다.
-
-cluster cost에는 accelerator hours, host/network/storage, failed/replayed work와 human operation이 있다. checkpoint 간격은 I/O와 expected lost work의 tradeoff다. failure rate를 숨기지 않는다.
-
-pilot에서 scaling model을 calibration하고 uncertainty를 둔다. vendor peak나 single-GPU speed를 linear extrapolate하지 않는다. target topology에서 실제 scale evidence 전에는 estimate로 표시한다.
-
-### 분산 plan은 tensor ownership 표다
-
-DP/FSDP/ZeRO는 replicas·parameter/gradient/optimizer shards, TP는 layer tensor axes, PP는 layers/microbatches, CP는 sequence, EP는 experts를 나눈다. world size만 적지 않고 global/local shapes와 process groups를 표로 둔다.
-
-loss numerator/count, gradient reduction와 optimizer owner를 수식으로 연결한다. 28장의 single-GPU concatenated oracle와 비교한다. local means를 평균하지 않는다.
-
-topology는 GPU-NVLink/NVSwitch, PCIe/NUMA, NIC/RDMA와 storage를 포함한다. logical mesh가 physical links에 어떻게 놓이는지 기록한다. measured communication·stall 전에는 성능을 주장하지 않는다.
-
-launch, rank/host identity, collective ordinal, timeout·async error와 checkpoint consistent cut를 29장의 failure matrix로 검증한다. partial update를 publish하지 않는다.
-
-### 관측성은 decision을 위한 최소 사슬이다
-
-UpdateID에 data IDs·valid counts, forward/loss, gradients, collectives, optimizer commit, checkpoint와 evaluation을 연결한다. Prometheus metrics는 aggregate, traces는 exemplar, object artifacts는 상세 evidence를 담당한다.
-
-metric cardinality를 통제한다. SampleID·raw prompt를 label에 넣지 않고 restricted trace로 연결한다. clock은 wall, sample, microstep, successful update와 tokens를 구분한다.
-
-alerts는 NaN, OOM, hang, straggler, data drift, throughput, checkpoint age와 eval regression별 owner·runbook이 있다. missing telemetry를 정상으로 세지 않는다. heartbeat와 synthetic canary를 둔다.
-
-instrumentation overhead와 privacy를 측정한다. W&B/TensorBoard·OTel은 관찰자이고 core run state를 바꾸지 않아야 한다. tracker outage policy를 명시한다.
-
-**checkpoint를 복구 계약으로 설계한다**
-
-complete checkpoint는 model, optimizer, scheduler, scaler/FP8, RNG, data/sampler/curriculum cursor와 config·source identities를 가진다. temporary shards 뒤 root manifest와 commit marker를 공개한다.
-
-kill matrix로 각 save phase에서 process를 종료한다. loader가 partial child를 무시하고 last complete parent를 고르는지 본다. object store visibility와 idempotent retry를 검증한다.
-
-resume는 restored loss 한 번이 아니라 next SampleIDs, augmentation/dropout, gradient와 optimizer update를 uninterrupted run과 비교한다. exact/numerical 등급을 명시한다.
-
-export-only merged/quantized weights와 resumable checkpoint를 구분한다. rollback parent는 rights floor와 descendants를 고려한다. model만 복구하고 tokenizer/template·cache를 섞지 않는다.
-
-**evaluation을 release decision과 분리한다**
-
-evaluation runner는 target model bundle, dataset/render, judge·metric generations를 고정한다. raw outputs, parser·normalization과 denominator를 보존한다. training tracker의 latest score를 release 근거로 쓰지 않는다.
-
-paired baseline/candidate, cluster uncertainty, multiple slices와 contamination을 본다. capability·safety 강제 관문s, calibration, multimodal/tool와 production-like latency를 별도 축으로 둔다.
-
-checkpoint selection에 validation을 반복 사용하면 selection bias가 생긴다. tuning/selection/final test를 분리하고 후보 수를 기록한다. final 결과 뒤 threshold를 바꾸지 않는다.
-
-release decision은 evidence와 policy를 결합하는 DecisionEvent다. metric이 자동으로 배포를 승인하지 않는다. 선택하지 않은 후보와 이유, residual risks를 보존한다.
-
-**adapter merge를 검증하는 세 경계**
-
-첫째 adapter-on runtime과 base+effective delta의 selected weight·layer output을 비교한다. 둘째 merge dtype·order 뒤 full weights와 logits를 비교한다. 셋째 serving quantization 뒤 golden prompts와 metrics를 비교한다.
-
-LoRA `BA` scaling이 target weight layout과 맞는지 확인한다. multiple adapters, modules-to-save와 tied weights를 처리한다. merge 후 adapter를 다시 중복 활성화하지 않는다.
-
-merge는 irreversible 원본 overwrite가 아니라 child artifact다. base와 adapter digests, tool revision과 output digest를 기록한다. rollback은 parent bundle을 사용한다.
-
-허용오차는 dtype/kernel에 맞게 사전 정의한다. full-precision evaluation을 quantized deployment에 상속하지 않는다. unsupported layers·fallback을 support matrix에 둔다.
-
-**quantization release는 새 모델 행동이다**
-
-weight-only 4/8-bit, activation quantization과 FP8은 scale·group·calibration·kernel이 다르다. stored dtype, compute/accumulator/output dtype와 metadata를 operator별로 적는다.
-
-calibration data가 필요하면 training/test leakage와 representativeness를 관리한다. group size, clipping와 outlier handling을 고정한다. quantized bytes만으로 의미를 재현할 수 없다.
-
-평가는 target/capability/safety, long-context, rare tokens·languages, tool JSON과 latency·memory를 deployment runtime에서 한다. numerical layer oracle와 behavior를 연결한다.
-
-quantization error가 adapter·edit delta를 삼키거나 unrelated block scale을 바꿀 수 있다. merge 순서와 requantization을 비교한다. release certificate는 exact kernel/hardware scope를 가진다.
-
-**serving parity는 request에서 response까지 본다**
-
-training/eval과 serving의 tokenizer/template, special IDs, system prompt, adapter, quantization, decode·stop를 비교한다. 같은 raw request의 rendered bytes·IDs와 first logits를 단계별로 맞춘다.
-
-continuous batching, prefix/KV cache, speculative decoding와 tensor parallel은 serving-specific state다. stale cache namespace와 mixed model generations를 차단한다. training checkpoint PASS가 serving parity를 보장하지 않는다.
-
-streaming response는 stop token, chunk boundary와 tool parser가 offline generation과 다를 수 있다. full response뿐 아니라 first-token and terminal reason을 본다. actual side effects는 sandbox/authorization trace로 확인한다.
-
-canary는 traffic·tenant뿐 아니라 tool permission·data sensitivity를 제한한다. parent/candidate telemetry와 rollback bundle을 준비한다. missing metrics를 zero incident로 세지 않는다.
-
-**canary promotion을 단계와 권한으로 설계한다**
-
-첫 단계는 offline replay와 shadow traffic이다. candidate response를 사용자에게 노출하지 않고 parent와 paired 비교한다. shadow도 실제 민감 data를 처리하므로 권리·retention과 access를 지킨다.
-
-둘째 단계는 내부·허용 cohort와 read-only tools다. traffic 1%만으로 안전하지 않다. irreversible write permission을 제한하고 rate·context·adapter를 좁힌다. 각 단계의 최소 observations·duration과 강제 관문s를 사전 정의한다.
-
-promotion은 utility, safety, latency·timeout, cost와 operational errors를 함께 본다. judge/detector outage와 missing telemetry가 있으면 hold한다. aggregate improvement가 critical slice failure를 상쇄하지 않는다.
-
-각 stage는 ReleaseGeneration, active bundle, start/end, owner와 rollback parent를 가진다. rollback rehearsal과 cache/session drain이 통과해야 다음 단계로 간다. manual override도 reason과 expiry를 남긴다.
-
-**rollback은 model 파일 하나를 바꾸는 일이 아니다**
-
-release bundle에는 model weights, adapter composition, tokenizer/template, quantization runtime, system prompt, guard, retrieval/index, tool policy와 cache namespace가 있다. parent의 complete bundle로 원자 전환한다.
-
-in-flight requests, sessions, prefix/KV cache와 speculative draft는 old/new generation을 섞을 수 있다. lease·drain 또는 mismatch rejection을 적용한다. candidate가 예약한 tool actions와 credentials도 취소·회수한다.
-
-rollback 뒤 golden request, safety/tool canary, telemetry heartbeat와 evaluator를 실행한다. parent의 known limitations는 다시 활성화될 수 있어 containment를 별도 둔다. rollback success를 alias 변경 한 번으로 세지 않는다.
-
-incident 동안 수집한 feedback·outputs를 quarantine한다. candidate failure를 normal training queue로 자동 유입하지 않는다. triage·rights·split 검토 뒤 다음 generation의 input으로 승인한다.
-
-## 30.9 평가·정렬·고급 변경의 승인 기준을 세운다
-
-점수 하나로 승인을 대신하지 않고 효용·안전·강건성·비용·변경 위험을 서로 다른 축으로 보존한다.
-
-### 비용·품질·위험의 Pareto front를 남긴다
-
-full FT, LoRA/QLoRA, prompt/RAG와 다른 base sizes는 품질, latency, GPU hours, serving memory, rollback과 risk가 다르다. weighted score 하나로 사라지게 하지 않고 Pareto-dominated candidates와 tradeoffs를 표로 둔다.
-
-비용은 successful training만 아니라 failed runs, hyperparameter search, evaluation, checkpoint storage, human annotation·review와 operation을 포함한다. serving은 average·tail latency, throughput, energy와 tool cost를 본다.
-
-품질은 target·capability·safety·calibration과 uncertainty다. risk에는 unverified cells, supply chain, privacy·rights와 recovery readiness가 있다. decision policy가 어떤 constraint를 강제 관문로 두었는지 기록한다.
-
-traffic·hardware 가격·규정이 바뀌면 같은 evidence에서 decision을 다시 계산할 수 있어야 한다. 선택하지 않은 후보와 이유를 삭제하지 않는다. 이전 선택이 당시 조건에서 합리적이었는지 보존한다.
-
-### 하이퍼파라미터 탐색을 실험 설계로 다룬다
-
-learning rate, batch/tokens, epochs, warmup, rank·alpha, dropout와 mixture를 모두 무작위로 많이 돌리면 selection bias와 비용이 커진다. failure hypothesis와 sensitivity가 큰 변수부터 고른다.
-
-pilot fidelity는 model/data/steps를 줄일 수 있지만 ranking이 full scale에서 유지된다는 보장은 없다. low/high fidelity overlap runs로 상관과 reversals를 본다. short run의 early loss만으로 final safety·generalization을 선택하지 않는다.
-
-trial마다 immutable config, seed, data order와 compute를 기록한다. early stop, failed/invalid와 metric missing을 disposition한다. best trial만 보고하지 않는다.
-
-final test는 tuning 과정과 격리한다. 여러 metrics·trials의 multiple comparisons를 고려하고 effect/uncertainty를 보고한다. chosen config의 independent rerun을 요구한다.
-
-**epoch 대신 exposure를 추적한다**
-
-mixture·streaming datasets에서는 epoch가 모호하다. 출처 계열별 unique rows, repeats, valid targets와 optimizer contributions를 누적한다. synthetic variants도 parent family exposure에 연결한다.
-
-작은 high-quality set은 여러 번 반복돼 memorization과 style overfit이 생길 수 있다. repeat histogram, train-val neighbor leakage와 held-out performance를 본다. random augmentation이 다르다고 원 family 반복을 숨기지 않는다.
-
-curriculum으로 source weights가 바뀌면 effective epochs가 source마다 다르다. stop criterion을 global step 하나가 아니라 target exposure·eval plateau와 risk에 연결한다. deleted/ineligible rows는 denominator에서 제거한다.
-
-checkpoint resume와 data replay는 exposure ledger를 유지한다. at-least-once 소비를 exactly-once로 쓰지 않는다. duplicate contribution이 있으면 objective mass와 privacy accounting에 반영한다.
-
-**forgetting과 capability drift를 조기에 찾는다**
-
-target loss가 좋아져도 parent abilities가 떨어질 수 있다. training 중 작은 sentinel suites로 language, reasoning, code, safety, calibration과 text-only/multimodal capability를 본다. full final eval을 매 step 실행하지 않는다.
-
-sentinel은 tuning data와 격리하고 evaluator drift를 관리한다. score 변화가 noise인지 paired items와 interval로 본다. catastrophic slice는 hard stop을 가질 수 있다.
-
-gradient/update norms와 parameter subspace를 target/capability batches에서 비교해 conflict hypothesis를 만든다. data replay, LR, adapter scope나 freeze를 조정하는 controlled intervention을 한다. correlation을 원인으로 확정하지 않는다.
-
-forgetting이 나타나면 무조건 더 많은 generic data를 넣지 않는다. tokenizer/template, evaluation, optimizer와 sampling changes부터 diff한다. first divergent generation을 찾는다.
-
-### safety와 alignment를 후처리로 미루지 않는다
-
-data collection부터 unsafe/ambiguous cases, privacy·rights와 tool authority를 고려한다. SFT target은 refusal뿐 아니라 safe completion·clarification을 포함한다. preference/RL은 over-refusal과 reward hacking controls를 둔다.
-
-red-team family split과 private evaluation을 training 전에 만든다. incident exact cases와 transformed held-out siblings를 구분한다. judge·classifier calibration과 human review를 연결한다.
-
-tool/RAG safety는 model weights만으로 해결하지 않는다. deterministic authorization, sandbox와 content trust boundary를 둔다. model-only와 full-stack ablation을 한다.
-
-safety gate는 release 끝의 한 score가 아니라 data→objective→evaluation→canary→incident response의 사슬이다. residual risk와 untested threat model을 공개한다.
-
-**preference 단계로 갈지 판단하는 기준**
-
-SFT가 desired response format과 knowledge를 충분히 학습했지만 response ranking·style·safety tradeoff가 남을 때 preference learning을 검토한다. label ambiguity와 pair quality가 낮으면 알고리즘보다 annotation을 고친다.
-
-DPO/IPO/KTO/ORPO/SimPO 등은 statistic, reference, beta/margin, normalization이 다르다. objective name이 아니라 problem·data schema와 compute에 맞춘다. 19장의 canonical pair를 손계산한다.
-
-preference training이 chosen lexical/length shortcut을 학습하지 않는지 controls를 둔다. SFT/capability regression과 calibration을 본다. reference identity와 tokenizer/template를 고정한다.
-
-online RL은 environment·verifier와 exploration이 실제로 필요한 경우에만 간다. 운영 복잡성과 reward hacking risk가 크다. offline preference baseline과 cost를 비교한다.
-
-**online RL로 갈 때 추가되는 운영 주체**
-
-actor, queue, reward/verifier, reference, learner와 policy publication이 생긴다. trajectory는 policy version, sampling config, environment state, rewards와 terminal reason을 가진다. learner loss와 actor generation을 연결한다.
-
-stale policy, duplicate trajectory, reward outage와 partial update를 상태 기계로 처리한다. queue lag와 policy version distance를 관측한다. same score라도 오래된 actor data는 다른 on-policy 의미다.
-
-hard tool constraints와 soft reward를 구분한다. unsafe side effect는 sandbox가 막는다. reward components, KL·entropy와 capability를 본다. 모든 prompt 거절이 높은 safety reward가 되는 것을 막는다.
-
-rollout/learner를 분리 배치하면 GPU·network·checkpoint consistency가 추가된다. 20·29장의 failure injection과 publication rollback을 통과한다. fixed trajectory golden부터 확인한다.
-
-**멀티모달 프로젝트의 추가 Gate**
-
-raw media checksum, decode/processor, crop/PTS, feature cardinality, placeholder/cross-attention, positions와 masks를 보존한다. image/audio/video/interleaved golden samples를 둔다. processor bundle이 model generation 일부다.
-
-mixture는 samples가 아니라 pixels/seconds/features/valid targets와 GPU seconds로 정산한다. variable shapes, buckets와 distributed empty-modality ranks를 검증한다. feature cache는 encoder freeze·generation과 묶는다.
-
-evaluation은 perception, grounding, temporal/audio, reasoning과 protocol을 분리한다. media swap·region deletion·frame reorder와 text-only counterfactual을 쓴다. processor policy와 benchmark normalization을 고정한다.
-
-privacy·prompt injection과 tool side effects는 media channel까지 본다. raw sensitive payload와 derived features의 권리·retention을 관리한다. 21·25장의 support matrix를 가져온다.
-
-**model editing·unlearning 요구가 생길 때**
-
-fact update, personalization, privacy deletion과 safety containment을 구분한다. retrieval/memory, adapter, ROME/MEMIT/Engram, unlearning/retraining은 state·scope와 rollback이 다르다.
-
-request authority, evidence, effective time와 대상 산출물를 admission한다. direct, paraphrase, neighbor, multi-hop, privacy attacker와 relearning을 평가한다. “답이 안 나옴”을 exact deletion으로 쓰지 않는다.
-
-raw→shard→checkpoint→adapter→merge→quantize→distill descendants를 찾아 revoke/rebuild한다. optimizer/EMA·cache·replicas도 본다. rights floor가 rollback보다 우선한다.
-
-편집 result는 ChangeID와 child generation으로 release bundle에 들어간다. subsequent training/merge가 edit를 보존하는지 재검증한다. 23장의 certificate를 사용한다.
-
-**장애 예산과 checkpoint 간격**
-
-checkpoint interval이 짧으면 I/O·storage가 늘고 실패 시 lost work가 줄어든다. observed failure/restart distribution, save duration과 durability에서 expected cost를 계산한다. 단순 매 N steps 관습을 복사하지 않는다.
-
-preemption·spot, GPU/NIC/storage와 software hang은 failure mode와 detection 시간이 다르다. checkpoint만으로 in-flight queue·external state가 복구되는지 확인한다. online RL과 data workers는 별도 cursor가 있다.
-
-lost/replayed samples, rollouts와 updates를 계량한다. policy가 at-least-once라면 duplicate effects를 ledger에 둔다. exact replay가 필요하면 consistent cut 비용을 감수한다.
-
-recovery SLO는 detection, evidence, decision, restore와 first healthy update를 나눈다. 평균 MTTR 하나로 tail·repeated failure를 숨기지 않는다. 29장의 fault matrix로 검증한다.
-
-## 30.10 변경 통제와 학습 도구의 권한을 검증한다
-
-편리한 trainer와 recipe framework를 도입할수록 누가 batch, loss, optimizer와 checkpoint를 소유하는지 다시 확인해야 한다.
-
-### 장기 run 중 change control
-
-source, data, config, dependency와 hardware를 run 중 임의 변경하지 않는다. emergency patch가 필요하면 parent RunGeneration을 닫고 child로 전환한다. 변경 전후 consistent checkpoint와 decision reason을 보존한다.
-
-data hotfix는 future batches만 바꿀 수 있어 run 내 objective가 시간에 따라 달라진다. eligibility generation, effective UpdateID와 consumed exposure를 기록한다. 과거 오염 영향과 descendant를 평가한다.
-
-LR·loss weight·batch 변경은 experiment intervention이다. metric을 보고 즉흥 조정하면 selection bias가 생긴다. 사전 stop/adjust rule 또는 explicit DecisionEvent를 둔다.
-
-cluster repair·replacement GPU가 환경 fingerprint를 바꾸면 affected kernel/numerical cells를 확인한다. 동일 SKU 이름만으로 evidence를 상속하지 않는다.
-
-### completion 전에 clean-room 재생
-
-새 environment에서 source/dependency lock, immutable data subset와 command만으로 golden run을 재생한다. 개인 cache, mutable branch와 hidden credentials에 의존하지 않는다. actual loaded libraries와 dispatch를 확인한다.
-
-checkpoint를 복원해 next batch/update를 실행하고, selected artifact를 원천 행까지 역추적한다. export를 서빙 실행 환경에 로드해 golden responses·tool sandbox를 확인한다.
-
-evaluation summary를 raw outputs·metric code로 재계산한다. release decision의 강제 관문s와 residual risks가 같은 결과를 내는지 본다. missing artifacts를 추정하지 않는다.
-
-clean-room 차이는 first-divergence 순서로 조사한다. bitwise가 불가능한 kernel은 선언한 numerical/behavioral 범위로 판정한다. 설명되지 않은 차이를 “환경”으로 닫지 않는다.
-
-**프로젝트의 최종 상태표**
-
-행은 requirements, data, model/template, SFT/PEFT, preference/RL, distributed run, checkpoint, evaluation, safety, export/serving, canary, rollback와 governance다. 열은 identity, owner, evidence, gate status, residual risk와 next trigger다.
-
-PASS는 정상과 meaningful negative fixture, resume/rollback을 포함한다. `NOT_RUN`, unsupported와 inaccessible을 구분한다. 전체 평균이나 단어 수가 빈 셀을 채우지 않는다.
-
-각 PASS에서 source function, artifact와 DecisionEvent로 이동할 수 있다. 사람이 최신 file을 추정하면 transaction이 아니다. resolver가 active bundle과 parent를 반환해야 한다.
-
-weakest unverified cell을 release note 앞에 둔다. mitigation, owner와 validation plan을 적는다. 완성은 모르는 것을 숨기는 상태가 아니라 이미 검증한 것과 다음 실험을 정확히 분리하는 상태다.
-
-**한 명령어 recipe의 숨은 전제**
-
-`train.py --model ... --dataset ...` 같은 명령은 간편하지만 소스 리비전, model/tokenizer bundle, dataset generation, template, effective defaults와 environment를 숨길 수 있다. 실행 문자열만 보존하지 않고 resolved RunSpec을 출력한다.
-
-CLI parser가 unknown option을 무시하는지, config·environment·CLI의 precedence가 무엇인지 source에서 확인한다. auto batch/device, mixed precision과 adapter targets가 runtime에서 어떻게 해석됐는지 기록한다.
-
-launcher가 torchrun, Accelerate, DeepSpeed나 Slurm을 감싸면 world size, ranks·hosts, rendezvous와 process env를 보존한다. wrapper 문서의 예시를 실제 call path로 오인하지 않는다.
-
-recipe는 command를 복사하는 것이 아니라 input·state·output invariants를 재현하는 일이다. framework migration 시 option 이름보다 valid targets/update, trainable set, loss·clock과 checkpoint coverage를 맞춘다.
-
-**Transformers Trainer를 읽는 최소 호출 사다리**
-
-고정 revision에서 argument resolution, dataset/collator, `Trainer.train`, inner loop, `training_step`, `compute_loss`, optimizer/scheduler creation과 save/load를 연결한다. subclass와 model override가 어느 symbol을 바꾸는지 실제 loaded class를 기록한다.
-
-`remove_unused_columns`, label names, gradient accumulation, mixed precision와 best-model loading은 data schema·clock·state를 바꾼다. option help만 복사하지 않고 guard branch와 artifact를 찾는다.
-
-model `forward(labels=...)`가 반환한 loss를 쓰는지 trainer가 logits에서 재계산하는지 본다. auxiliary loss와 num_items_in_batch 같은 denominator path를 확인한다. callback scalar를 objective로 오인하지 않는다.
-
-save가 model-only, optimizer/scheduler/RNG와 trainer state 중 무엇을 포함하는지 artifact kind를 구분한다. PEFT wrapper와 sharded strategy가 serialization path를 바꿀 수 있다.
-
-대표적으로 `num_items_in_batch` 하나를 끝까지 추적해 보자. `_run_epoch`는 gradient accumulation 묶음에 들어갈 microbatch들을 먼저 모은다. `_get_num_items_in_batch`는 각 label tensor의 원소 수가 아니라 실제 loss에 남는 표적을 센다. causal LM이면 첫 위치를 제외하도록 `labels[..., 1:]`를 사용하고, padding이나 prompt mask로 표시된 `-100`도 제외한다. 네 microbatch의 유효 토큰 수가 각각 31, 17, 29, 9라면 이 update의 분모는 batch size 4가 아니라 86이다. 길이가 다른 문장을 padding한 정도가 달라도 같은 토큰 평균 objective를 유지하려는 선택이다.
-
-`average_tokens_across_devices`가 켜진 분산 실행에서는 이 count를 rank 사이에서 gather한 뒤 합한다. 여기서 numerator와 denominator의 통신 계약을 따로 읽어야 한다. 각 rank가 로컬 mean을 만든 뒤 DDP가 그것들을 평균하면, 유효 토큰이 80개인 rank와 8개인 rank가 같은 가중치를 얻는다. 반대로 로컬 loss sum을 전역 유효 토큰 수로 나누고 backward 과정의 rank 평균을 상쇄하는 world-size scale을 적용하면, 목표는 `(모든 rank의 token loss 합)/(모든 rank의 유효 token 수)`가 된다. tensor parallel rank가 같은 batch를 복제해 본다면 process 수를 그대로 곱할 수 없으므로 코드가 `tp_size`를 다시 나누는지도 확인해야 한다.
-
-그 분모는 `compute_loss`에서 모델 또는 사용자 손실 함수로 전달된다. causal model의 기본 손실은 label을 오른쪽에 `ignore_index`로 pad하고 한 칸 shift한 다음 `[tokens, vocabulary]` logits와 표적을 평탄화한다. `fixed_cross_entropy`는 분모가 없으면 일반 mean reduction을 쓰지만, 분모가 있으면 먼저 sum reduction을 하고 명시적 count로 나눈다. 사용자 `compute_loss_func`가 이 인수를 받는다고 선언하고도 무시하면 Trainer는 이미 정확한 평균을 만들었다고 가정하므로, 문서의 옵션 이름보다 실제 함수 signature와 reduction 코드를 확인해야 한다.
-
-마지막으로 `training_step`은 모델이나 사용자 손실이 분모 계약을 소비하지 않은 경로에서만 loss를 현재 accumulation 묶음 크기로 나눈다. 이어 `accelerator.backward`가 backend별 scale과 동기화를 맡는다. 따라서 “gradient accumulation을 켰더니 loss가 달라졌다”는 문제는 `training_step` 한 줄에서 끝나지 않는다. 동일한 고정 token batch에 대해 shift 뒤 유효 표적 수, 로컬 loss sum, 전역 count, backward 직전 scalar와 첫 optimizer update를 차례로 기록해야 최초 분기점을 찾을 수 있다. 이 사다리는 option→상태→수식→통신→update를 한 번에 잇는 디버깅 단위다.
-
-**Accelerate loop의 권한 경계**
-
-Accelerate는 prepare, accumulation, backward, clipping, gather와 save/load를 추상화하지만 user loop가 data/loss/step 순서를 소유한다. `Accelerator.prepare` 뒤 wrapped model·optimizer/dataloader identities와 device placement를 기록한다.
-
-accumulation context가 loss scaling과 sync timing을 어떻게 처리하는지 source에서 확인한다. user가 또 `1/K`를 나누어 double scaling하지 않는지 golden fixture로 본다. last incomplete accumulation policy도 검증한다.
-
-metric gather와 gradient reduce를 혼동하지 않는다. global loss numerator/count를 명시한다. main-process-only file writes와 all-rank state save의 차이를 본다.
-
-custom loop는 유연하지만 checkpoint cursor, RNG·curriculum과 callback authority를 직접 닫아야 한다. 작은 two-step·kill/resume package 없이는 간결한 code가 correctness 증거가 아니다.
-
-**TRL preference trainer를 도입할 때**
-
-TRL 계열 trainer는 chosen/rejected tokenization, reference, log-prob reduction과 DPO variants를 제공한다. selected revision의 dataset field names, collator, concatenated forward, loss symbol과 metrics를 연결한다.
-
-prompt가 pair에서 동일한지, truncation policy가 chosen/rejected에 비대칭 효과를 내는지 본다. completion token counts와 reference/policy log-probs를 canonical pair에서 손계산한다.
-
-reference-free, precomputed reference logits와 adapter switching은 서로 다른 state다. cache key에 policy parent, tokenizer/template와 objective config를 둔다. stale reference cache를 차단한다.
-
-SFT checkpoint에서 preference run으로 갈 때 optimizer·scheduler를 새로 만들지 정책화한다. trainer가 자동 resume한 state를 무조건 원하는 handoff로 간주하지 않는다. parent-child generation을 기록한다.
-
-**PEFT library option을 parameter inventory로 검증한다**
-
-PEFT config의 target modules, rank, alpha, dropout, bias와 modules-to-save는 actual parameter tree로 확인한다. regex가 0개 또는 과도하게 match하면 fail-closed한다. model family upgrade 뒤 name mapping을 review한다.
-
-adapter injection 전후 loaded class, forward branch와 trainable names·shapes를 diff한다. optimizer groups가 같은 inventory를 소유하는지 본다. frozen base에도 train mode state가 변할 수 있다.
-
-save/load는 adapter weights, config와 base digest를 포함하고 modules-to-save를 확인한다. multiple adapters의 active set·order와 scaling을 bundle에 둔다. merge는 child artifact다.
-
-initial effective delta와 first gradient를 method별로 검증한다. standard LoRA expectation을 PiSSA·LoftQ·DoRA 등에 적용하지 않는다. 실제 수식·소스 분기를 따른다.
-
-**Unsloth·고속 경로를 인수하는 법**
-
-고속 wrapper는 model patching, fused kernels, gradient checkpointing와 data preparation을 바꿀 수 있다. 빠르다는 claim보다 어떤 functions/modules가 교체되고 fallback 조건이 무엇인지 고정 source와 runtime에서 확인한다.
-
-동일 canonical rows로 tokens/masks, logits/loss, selected gradients, two-step update와 checkpoint adapter를 baseline stack과 비교한다. exact parity가 불가능하면 tolerance와 원인을 적는다.
-
-지원 model, dtype, GPU·sequence와 objective를 support matrix에 둔다. unsupported branch가 baseline으로 fallback했는지, silent semantic change가 있는지 본다. 실행하지 않은 speedup을 쓰지 않는다.
-
-upgrade는 patched source와 generated kernels, base Transformers/PyTorch revisions를 함께 고정한다. wrapper version 문자열만으로 environment를 재현하지 않는다.
-
-**Axolotl·recipe framework를 읽는 법**
-
-recipe framework는 YAML을 data/model/trainer/optimizer와 distributed launcher로 변환한다. schema validation, defaults, precedence와 generated resolved config를 저장한다. 예제 YAML을 runtime truth로 쓰지 않는다.
-
-dataset type과 chat template가 collator·mask를 어떻게 선택하는지 actual dispatch를 따른다. packing, sample packing과 sequence length option이 attention boundary와 denominator를 바꾼다.
-
-DeepSpeed/FSDP, quantization와 PEFT 조합의 allowed/unsupported matrix를 확인한다. framework가 option을 clamp·replace하면 requested/effective를 기록한다. checkpoint artifact 종류를 구분한다.
-
-framework migration은 28장의 golden oracles와 overlap run으로 검증한다. config key가 같아도 underlying trainer semantics가 다를 수 있다. documentation description보다 source/state를 우선한다.
-
-## 30.11 기록·평가·환류를 다음 실행 계획으로 닫는다
-
-모델 카드와 데이터 카드는 사후 홍보물이 아니라 다음 실행이 무엇을 재사용하고 무엇을 반증해야 하는지 알려 주는 인계 문서다.
-
-### 모델 카드를 recipe로 읽지 않는다
-
-모델 카드는 architecture, intended use, evaluation과 일부 training facts를 제공할 수 있지만 전체 data mixture, optimizer, distributed state와 exact code가 공개되지 않을 수 있다. 명시된 사실과 추론을 구분한다.
-
-checkpoint config와 Transformers implementation은 forward graph를 보여줄 수 있지만 공개 모델의 original trainer를 재현한다는 뜻은 아니다. inference-only path를 training loss 존재로 확대하지 않는다.
-
-공식 blog·paper·card, source와 third-party recipe는 provenance와 claim strength가 다르다. 서로 모순하면 revision·scope를 확인하고 unknown으로 남긴다. 최신 카드 branch보다 immutable snapshot을 사용한다.
-
-우리 fine-tuning recipe는 parent checkpoint의 공개 한계를 상속한다. model card에 없는 data·safety 보장을 새로 추정하지 않는다. 새 evidence와 자체 evaluation을 별도로 둔다.
-
-**데이터 카드에 실현된 mixture를 넣는다**
-
-data card는 source·license·consent, collection dates, language/domain, cleaning·dedup, labels, risks와 limitations를 쓴다. configured source weight뿐 아니라 sampled/valid targets와 repeats를 report한다.
-
-train/validation/test family split과 contamination audit, synthetic teacher/judge generations를 포함한다. excluded/quarantined counts와 이유를 보존한다. 공개 불가능한 data는 aggregate와 controlled evidence를 둔다.
-
-curriculum·hard mining이 data distribution을 run에 따라 바꾸면 RunID별 realized card 또는 ledger를 연결한다. static dataset card만으로 actual exposure를 설명하지 않는다.
-
-삭제·rights requests와 dataset generations의 상태를 업데이트한다. old cards를 덮지 않고 historical runs가 어느 data를 사용했는지 유지한다. model release의 data claims는 이 lineage에 근거한다.
-
-### 학습 중 멈출 시점을 정한다
-
-stop은 budget 소진, target plateau, capability/safety regression, numerical·infrastructure failure와 data policy breach로 나눈다. 각각 자동·manual gate와 evidence를 가진다. loss가 계속 내려가도 overfit·forgetting이 나타나면 멈출 수 있다.
-
-evaluation noise와 multiple checkpoint selection을 고려해 patience·minimum effect를 사전 정의한다. 한 noisy dip에 즉시 stop하거나 best를 고르지 않는다. paired sentinel과 intervals를 본다.
-
-fatal data rights·partial update·checkpoint corruption이 발생하면 training continuation에 앞서 evidence를 확보하고 격리한다. retry budget과 last complete parent를 사용한다. repeated failure를 정상 비용으로 숨기지 않는다.
-
-stop 후에도 final candidate가 자동 release되는 것은 아니다. checkpoint selection, clean eval, export/serving parity와 canary gates가 남는다. run 종료와 release decision을 분리한다.
-
-**checkpoint selection의 통계와 운영 조건**
-
-best validation mean만 선택하면 여러 checkpoints를 본 selection bias가 있다. primary metric, capability/safety 강제 관문s와 earliest-within-tolerance 같은 rule을 사전 정의할 수 있다. 후보 수와 selection set을 기록한다.
-
-checkpoint마다 tokenizer/template·adapter·EMA와 eval subject가 같은지 확인한다. model path가 mutable하게 덮이지 않는다. exact digest와 generation을 고정한다.
-
-selected candidate를 final holdout에서 한 번 평가하고 export/quantization을 별도 재검증한다. final failure 뒤 다른 checkpoint를 반복 고르면 holdout이 tuning set이 된다. policy를 명시한다.
-
-운영 constraints도 selection에 들어간다. score가 미세하게 높지만 latency/memory·rollback이 hard limit을 넘으면 기각한다. Pareto table과 DecisionEvent를 남긴다.
-
-### evaluation failure를 model failure와 분리한다
-
-score 급락 시 raw prompts/outputs, parser·normalization, dataset/judge revisions와 invalid dispositions를 먼저 본다. model logits가 같은데 metric만 달라졌다면 evaluator change다.
-
-timeout·OOM이 늘어 valid denominator가 줄면 apparent score가 왜곡될 수 있다. coverage, latency와 failure counts를 함께 보고한다. missing을 0·skip 중 어떻게 처리했는지 명시한다.
-
-judge update는 parent/candidate outputs를 old/new judge에 교차 평가한다. disagreement·calibration과 human audit를 본다. judge improvement를 model improvement로 쓰지 않는다.
-
-evaluation contamination이나 split leakage가 발견되면 affected result를 revoke하고 새 generation을 만든다. expected score를 자동 보정하지 않는다. 출시 관문를 다시 연다.
-
-**deployment에서만 나타나는 수치 경계**
-
-training BF16/FP16 path와 serving quantized/fused kernels는 different logits를 낼 수 있다. first logits, selected layers와 generation behaviors를 deployment hardware에서 비교한다. tolerance와 critical decision margins를 본다.
-
-batching·padding, prefix cache와 long context가 offline single prompt와 다른 mask·position 경로를 만든다. multi-request golden fixtures와 cache-off/on을 비교한다. cross-request leakage를 sentinel로 탐지한다.
-
-speculative draft와 target revisions가 맞는지, rejection path가 policy를 보존하는지 확인한다. streaming stop·tool parsing이 final text와 다를 수 있다. side-effect trace를 본다.
-
-runtime upgrade는 weights가 같아도 새 ReleaseGeneration이다. source/container/SBOM, numerical and behavior dual-run과 canary를 거친다. training evidence를 자동 상속하지 않는다.
-
-**운영 feedback을 데이터로 환류하는 gate**
-
-thumbs-up/down, corrections, incidents와 support tickets는 noisy·selected feedback이다. user cohort, prompt distribution와 exposure bias를 기록한다. negative feedback만 모으면 objective가 왜곡될 수 있다.
-
-privacy·consent, rights와 sensitive payload를 검사하고 raw access를 제한한다. bot/spam, duplicate family와 prompt injection을 정제한다. human adjudication과 uncertainty를 보존한다.
-
-동일 cases를 training과 production regression evaluation에 쓰지 않는다. ParentCaseID로 transformed siblings를 분리한다. incident root가 runtime이면 model row로 만들지 않는다.
-
-new data generation은 hypothesis, target/counter slices와 expected effect를 가진다. 다음 run에서 actual realized exposure와 evaluation을 연결한다. feedback volume을 quality로 오인하지 않는다.
-
-**다음 세대 모델로 넘어갈 때**
-
-new base architecture/tokenizer/context는 이전 adapter·optimizer와 golden evidence를 자동 호환하지 않는다. model mapping, template·data reprocessing와 support matrix를 새로 만든다. 이전 recipe 숫자를 그대로 복사하지 않는다.
-
-old/new base를 same raw tasks, budget와 evaluation으로 비교한다. zero/few-shot, prompt/RAG, adaptation gain과 cost를 분리한다. base가 강해도 fine-tuning stability·serving support가 다를 수 있다.
-
-data labels·policy는 재사용 가능하더라도 tokenization·mask와 contamination를 다시 검증한다. preference pairs의 reference와 reward identity도 새 generation이다.
-
-migration decision은 expected benefit, conversion cost, supply chain, known limitations와 rollback을 가진다. 과거 release evidence를 보존하고 무엇이 새로 증명됐는지 명시한다.
-
-**첫 주 계획을 산출물로 바꾼다**
-
-첫날에는 문제 정의, current production baseline, target/counter metrics와 hard constraints를 동결한다. 둘째 날에는 source/model/tokenizer와 data sources의 access·rights를 확인한다. 아직 training command를 돌리지 않아도 된다.
-
-셋째 날에는 family split, canonical raw rows와 template/token golden fixture를 만든다. 넷째 날에는 model load, trainable inventory와 two-step SFT golden을 통과한다. 다섯째 날에는 checkpoint kill/resume와 small overfit을 실행한다.
-
-주말 전에 ProjectSpec, RunSpec, DataGeneration, golden report와 go/no-go DecisionEvent가 있어야 한다. loss curve screenshot만 있으면 부족하다. 다음 주 cluster pilot의 input이 immutable해야 한다.
-
-이 일정은 절대 날짜가 아니라 실패 비용이 싼 순서다. data·objective 의미를 닫기 전에 대규모 GPU를 예약하지 않는다. 발견된 blocker는 다음 gate와 owner로 연결한다.
-
-**30일 계획은 scale보다 증거를 확장한다**
-
-1주차는 single GPU correctness, 2주차는 small distributed parity·fault, 3주차는 controlled pilot와 evaluation, 4주차는 export·canary·rollback을 목표로 할 수 있다. 각 단계는 이전 artifact를 child로 확장한다.
-
-cluster pilot은 global loss/gradient/update와 checkpoint recovery를 single-GPU oracle에 맞춘다. long run은 data mixture, health·sentinels와 selection rule을 검증한다. full scale 전에 failure budget을 측정한다.
-
-evaluation은 target만 아니라 capability, safety, contamination와 uncertainty를 포함한다. export/serving은 quantization·cache/tool path를 재검증한다. canary는 권한을 제한한다.
-
-일정이 늦어져도 gate를 생략해 날짜를 맞추지 않는다. scope, model size나 feature를 줄이는 DecisionEvent를 만든다. evidence debt를 숨기지 않는다.
-
-## 30.12 결정 기록으로 모델과 실행 상태를 다시 읽는다
-
-실패 원인을 재구성하려면 실험 노트, architecture, checkpoint와 학습 곡선을 같은 DecisionEvent 계보에서 읽어야 한다.
-
-### 실패했을 때 가장 먼저 열 파일
-
-학습이 시작되지 않으면 preflight manifest, resolved config와 environment/library load를 본다. loss가 이상하면 canonical batch의 IDs·labels·mask와 loss numerator/count를 본다. gradient/update가 없으면 trainable inventory, scaler skip와 optimizer groups를 본다.
-
-hang이면 rank/host, collective ordinal과 last events, OOM이면 phase·shape·allocation, resume divergence면 checkpoint inventory·data/RNG cursor를 본다. eval regression이면 raw outputs·parser·judge generation을 본다.
-
-serving failure면 request rendering, active bundle, cache namespace, quantization kernel와 tool policy를 본다. final response부터 weight를 탓하지 않는다. first divergent boundary를 좁힌다.
-
-각 파일은 RunID·UpdateID·ReleaseID를 공유한다. 사람이 timestamp와 filename으로 최신본을 추정하지 않는다. resolver query가 없으면 운영 debt로 기록한다.
-
-### 실험 노트를 DecisionEvent로 바꾼다
-
-“LR을 낮춰 보니 좋아졌다”를 증거로 쓰려면 parent/candidate configs, hypothesis, controlled axes, metrics·uncertainty와 decision을 기록한다. data order·compute와 evaluation generation도 포함한다.
-
-여러 knobs를 바꿨다면 attribution을 제한한다. 결과가 좋더라도 어떤 변화가 원인인지 모른다고 쓴다. 다음 ablation을 만든다. 실패 trials를 삭제하지 않는다.
-
-DecisionEvent는 선택, rejected alternatives, owner·date와 revisit trigger를 가진다. traffic, hardware·policy가 바뀌면 과거 evidence로 판단을 재구성한다. 최신 결론만 남기지 않는다.
-
-자연어 note와 machine artifacts를 연결한다. 수치·config를 손으로 복사해 drift를 만들지 않는다. report 문장은 source run과 metric IDs를 가리킨다.
-
-**문체와 설명도 기술 검증을 따른다**
-
-책이나 runbook은 옵션을 나열하지 않고 “왜 필요한가→어느 상태가 바뀌는가→무엇을 관측하는가→어떻게 실패하는가” 순서로 설명한다. 추상 명사 뒤에 실제 tensor·function·artifact를 둔다.
-
-영문 용어를 무리하게 번역해 source와 단절하지 않되 첫 등장에 한국어 의미를 풀어 쓴다. 같은 개념은 일관된 용어를 사용한다. 약어는 장식이 아니라 정확한 owner·state를 가리킨다.
-
-코드 인용은 핵심 부분만 쓰고 revision·caller·shape와 의도를 설명한다. 긴 원문 복사 대신 독자가 손으로 재계산할 수 있는 수식·fixture를 싣는다. 실행하지 않은 결과를 단정하지 않는다.
-
-한 절은 결론 문장, mechanism, failure와 checklist가 이어져야 한다. 독자가 임의 페이지를 열어도 왜와 실용적 다음 행동을 얻는다. 내부 자료 구조의 존재를 본문 주제로 삼지 않는다.
-
-### model architecture를 recipe와 연결한다
-
-Llama/Qwen/Gemma 계열의 norm, attention GQA/MQA, RoPE, MLP/MoE, tied embeddings와 multimodal towers가 memory·trainable targets·checkpoint를 바꾼다. generic `q_proj` target을 모든 모델에 복사하지 않는다.
-
-model config에서 hidden, heads/KV heads, layers, intermediate, experts와 context를 읽고 parameter/memory·FLOPs를 계산한다. Transformers implementation의 actual modules와 forward branches를 확인한다.
-
-adapter target, layer freeze와 optimizer group은 architecture failure hypothesis에 맞춘다. multimodal projector·cross-attention, MoE router/expert와 output head를 별도로 검토한다. gradient coverage를 본다.
-
-서빙 실행 환경이 architecture를 지원하는지, quantization/kernel fallback과 context positions를 검증한다. training 성공만으로 export 호환성을 보장하지 않는다.
-
-**Qwen 계열 예시를 과장 없이 사용한다**
-
-한 Qwen 계열 checkpoint를 exemplar로 고르면 exact Hub/소스 리비전, config, tokenizer/template와 loaded Transformers class를 고정한다. model card의 architecture·use claim과 실제 fine-tuning recipe를 구분한다.
-
-canonical Korean/English/code/tool rows를 tokenize해 fertility·special IDs와 labels를 비교한다. module inventory에서 adapter targets와 tied/shared states를 확인한다. model family의 이름으로 module path를 추정하지 않는다.
-
-SFT two-step, DPO pair와 export parity를 같은 parent genealogy로 연결한다. 실제 large training을 실행하지 않았다면 throughput·final score는 쓰지 않는다. small fixture의 검증 범위를 명시한다.
-
-새 Qwen revision·architecture가 나오면 기존 option·소스 근거를 상속하지 않는다. config/implementation diff, migration과 support matrix를 재검증한다. exemplar는 사고법을 가르치며 보편 template가 아니다.
-
-**Gemma·Llama로 옮길 때 바뀌는 것**
-
-chat template, special IDs, sliding/local attention, norm/MLP와 multimodal processor가 다를 수 있다. 동일 raw row의 rendered tokens와 model module inventory를 새로 만든다. old tokenized shard를 재사용하지 않는다.
-
-adapter target names·shapes, tied embeddings와 quantization support가 바뀐다. PEFT matching, save/load와 서빙 실행 환경를 검증한다. instruct policy와 license·intended use도 parent constraint다.
-
-학습 hyperparameters를 그대로 복사하기보다 global valid tokens/update, optimizer scale, sequence shapes와 evaluation을 다시 calibration한다. base capability와 safety prior가 다르다.
-
-framework support table의 model 이름만 보고 모든 objectives·kernels가 검증됐다고 하지 않는다. fixed 소스 분기와 local golden/negative fixtures를 확인한다. 미실행 cell을 남긴다.
-
-**training data가 model behavior로 이어지는 인과를 제한한다**
-
-특정 source weight를 늘리고 metric이 올랐다고 그 data가 원인이라고 확정할 수 없다. optimizer trajectory, schedule와 other mixtures도 달라질 수 있다. controlled ablation과 paired seeds를 사용한다.
-
-per-source loss, gradient similarity와 attribution은 조사 신호다. data influence의 완전한 증명은 아니다. duplicate families, contamination와 evaluator overlap을 검사한다.
-
-negative result도 data가 무가치하다는 뜻이 아니다. exposure, target mask, capacity·optimization과 eval sensitivity가 부족할 수 있다. expected mechanism과 first divergence를 찾는다.
-
-report는 관측, inference와 decision을 구분한다. stronger claim에는 source·run·controls와 uncertainty가 필요하다. 독자가 재검증할 수 있게 artifacts를 연결한다.
-
-**학습 곡선을 네 시계로 읽는다**
-
-wall-clock은 운영 비용, sample/token은 data exposure, microstep은 accumulation, successful update는 optimizer·scheduler state를 설명한다. 한 x축을 다른 것으로 대신하지 않는다.
-
-loss는 numerator/count와 smoothing window, LR·gradient norms, mixture와 함께 본다. overflow skip, OOM retry와 evaluation/checkpoint pauses를 timeline에 표시한다. step 번호만 보고 plateau를 해석하지 않는다.
-
-throughput은 input/valid tokens, shapes와 phase를 분리한다. data wait, compute, communication와 checkpoint를 나눈다. speed change가 data mixture 때문인지 kernel 때문인지 본다.
-
-evaluation events는 exact checkpoint와 evaluator generation을 가리킨다. curve interpolation으로 없는 checkpoint score를 만들지 않는다. best selection rule을 사전 정의한다.
-
-**resume 후 반드시 비교할 다섯 값**
-
-첫째 다음 SampleIDs와 processed tensor, 둘째 dropout/augmentation RNG, 셋째 loss components·valid counts, 넷째 selected gradients, 다섯째 optimizer next delta다. restored weight loss 하나만 보지 않는다.
-
-scheduler LR, scaler/FP8, EMA와 curriculum phase도 state inventory에서 확인한다. distributed run이면 collective ordinal·group and sharded state를 재구성한다. rank count 변경 resume는 별도 migration이다.
-
-차이가 나면 source/environment보다 data cursor부터 boundary 순서로 비교한다. exact support가 없는 kernel은 numerical grade를 사용하되 discrete identities는 exact다.
-
-resume validation을 통과하기 전 장기 queue와 production alias를 열지 않는다. partial checkpoint를 quarantine하고 last complete parent를 보존한다. 결과를 RecoveryID에 연결한다.
-
-**모델 선택과 checkpoint 선택을 구분한다**
-
-base model selection은 architecture, license·capability·cost와 parent risk를 정한다. checkpoint selection은 같은 training generation의 trajectory에서 어느 state를 release candidate로 고르는 문제다. 두 decision의 evidence가 다르다.
-
-base 비교는 same task/data budget과 serving constraints를 사용한다. checkpoint 비교는 same model/data objective 안에서 selection metric·강제 관문s와 multiple looks를 고려한다.
-
-더 큰 base의 early checkpoint와 작은 base의 tuned checkpoint를 단일 score로만 비교하지 않는다. total compute, data exposure와 deployment artifact를 둔다. prompt/RAG alternatives도 포함한다.
-
-DecisionEvent는 parent model과 selected child checkpoint를 각각 가리킨다. release card가 둘을 혼동하지 않는다. future migration 시 어느 선택을 재검토할지 분명해진다.
-
-## 30.13 팀 간 handoff와 최종 인수 조건을 고정한다
-
-종단 recipe는 팀 경계를 넘을 때 가장 쉽게 끊긴다. 공통 식별자, risk register와 clean-room 심사를 이용해 인수 조건을 명시한다.
-
-data team은 DatasetGeneration, FamilyID, eligibility와 realized exposure를 맡는다. research team은 RunSpec, ObjectiveGeneration, UpdateID와 evaluation hypotheses를 맡는다. infrastructure는 topology, environment, checkpoint와 failure evidence를 책임진다.
-
-evaluation/safety team은 EvalGeneration, raw outputs, judge/metric와 gates를 맡는다. serving team은 ReleaseBundle, runtime config, caches/tools, canary와 rollback을 맡는다. governance는 rights/tombstones와 policy floor를 책임진다.
-
-공통 resolver가 이 identities를 연결한다. 팀마다 “latest model”의 의미가 다르면 incident가 난다. 자연어 문서와 machine ledger가 같은 IDs를 사용한다.
-
-handoff acceptance는 artifact access, checksum, runbook rehearsal와 owner acknowledgement를 포함한다. 문서 링크만 보내고 끝내지 않는다. on-call이 실제 복구를 수행할 수 있어야 한다.
-
-### risk register를 살아 있는 graph로 유지한다
-
-risk는 description, affected components, likelihood evidence, severity, current controls, owner, expiry와 validation plan을 가진다. model limitation, data rights, supply chain, infrastructure와 operational risks를 함께 관리한다.
-
-release 때 open risks를 숨기지 않는다. hard blocker와 accepted residual risk를 구분하고 authority를 기록한다. mitigation의 효과를 evaluation·monitoring artifact로 연결한다.
-
-new incident, model/dependency/policy upgrade는 dependency graph를 따라 risks와 support cells를 stale로 돌린다. closed risk도 historical evidence로 보존한다. 이름만 비슷한 새 stack에 closure를 상속하지 않는다.
-
-weakest risk와 next test를 roadmap에 둔다. risk count를 줄이는 것보다 uncertainty와 exposure를 정확히 관리하는 것이 목적이다.
-
-### 프로젝트를 종료하는 것이 아니라 generation을 봉인한다
-
-release가 끝나도 traffic drift, attacks, rights requests와 dependency updates가 온다. 이번 generation의 artifacts, claims, decisions와 limitations를 immutable하게 봉인한다. maintenance triggers를 둔다.
-
-new data/model/policy는 child generation에서 시작한다. parent metrics와 baseline을 재사용할 수 있는 범위와 stale cells를 계산한다. 이전 성공·실패를 덮어쓰지 않는다.
-
-incident feedback은 eligibility·split·privacy를 거쳐 next generation의 hypothesis가 된다. 자동 corpus injection을 금지한다. improvement loop는 근거와 review를 가진다.
-
-운영 종료·model retirement 때 aliases, credentials, caches, data/checkpoints retention와 deletion을 처리한다. archived artifact의 access·revocation을 유지한다. lifecycle 끝까지 책임을 닫는다.
-
-**작은 팀의 최소 구성**
-
-인원이 적어도 data, model/training, evaluation/safety, infrastructure/serving와 decision authority 역할은 존재한다. 한 사람이 여러 역할을 맡을 수 있지만 생성·승인 권한을 무조건 합치지 않는다. baseline 승격과 release는 독립 검토를 둔다.
-
-자동화할 것은 immutable manifest, schema·hash verification, golden tests, metric aggregation와 resolver다. 사람이 해야 할 것은 ambiguity·risk 판단, source claim review와 exceptional approval이다. 반대로 배치하지 않는다.
-
-on-call 없이 24시간 서비스할 수 없다면 scope·SLO를 현실적으로 제한한다. irreversible tools, 민감 data와 multi-tenant adapters 권한을 줄인다. 운영 능력을 model capability와 함께 설계한다.
-
-최소 문서는 ProjectSpec, RunSpec, Data/Model cards, golden report, evaluation, release/rollback runbook와 risk register다. 같은 IDs로 연결한다. 문서 수가 아니라 재생 가능성이 기준이다.
-
-### 큰 조직에서 경계가 끊어지는 흔한 지점
-
-data team의 “version 3”과 trainer가 실제 읽은 shard generation이 다를 수 있다. model team의 checkpoint와 serving의 quantized export가 다른 parent일 수 있다. evaluation은 full-precision artifact를 재고 release는 adapter composition을 바꿀 수 있다.
-
-각 handoff에서 input/output digest, schema, owner와 acceptance test를 둔다. mutable registry name만 전달하지 않는다. downstream이 transform하면 child edge를 만든다.
-
-팀별 dashboards가 같은 metric 이름에 다른 denominator를 쓸 수 있다. metric definitions와 clocks를 version한다. release meeting 전에 raw subject identities를 맞춘다.
-
-incident 때 책임을 서로 넘기지 않게 first-divergence runbook과 escalation을 공유한다. data, model, runtime와 evaluator hypotheses를 한 timeline에 둔다. 증거 없는 추측을 status로 쓰지 않는다.
-
-**notebook 실험을 production recipe로 승격하는 절차**
-
-notebook의 hidden cells, mutable variables와 manual downloads를 제거한다. code를 runner/module로 옮기고 immutable config·dependencies, fixture와 expected outputs를 만든다. kernel restart 뒤 처음부터 재생한다.
-
-데이터 경로, secrets와 external services를 명시한다. 개인 cache를 제거하고 offline/controlled mirror를 사용한다. generated intermediate의 parent digest를 남긴다.
-
-exploratory plot의 selected metric을 사전 정의된 evaluation으로 옮긴다. notebook screenshot 대신 raw outputs·metric code와 uncertainty를 보존한다. failed attempts와 selection history를 기록한다.
-
-CI golden, checkpoint kill/resume와 clean-room replay를 통과한 뒤 pilot로 간다. notebook은 설명·분석 view로 남고 baseline/alias 변경 권한을 갖지 않는다.
-
-**비용이 부족할 때 줄일 것과 줄이지 말 것**
-
-model size, trial 수, sequence, data breadth와 rollout budget은 줄일 수 있다. 그러나 family split, tokenizer/mask oracle, checkpoint completeness, safety 강제 관문와 rollback을 생략해서는 안 된다. scope를 줄이고 support 범위를 명시한다.
-
-모든 benchmarks 대신 target/counter/safety의 대표와 private slice를 선택할 수 있다. uncertainty와 missing cells를 남긴다. judge ensemble을 줄이면 human audit rate와 calibration을 조정한다.
-
-single GPU·small cluster pilot로 수학·state부터 증명한다. large-scale performance·quality는 `NOT_RUN`이다. estimate와 measured result를 구분한다.
-
-저렴한 prompt/RAG/adapter baseline이 요구를 충족하면 full FT를 하지 않는 것도 성공이다. 목표는 GPU 사용이 아니라 제한 조건 안의 검증 가능한 개선이다.
-
-**빠른 iteration과 재현성은 반대가 아니다**
-
-immutable small fixtures, cached content-addressed data와 automatic preflight는 실패를 빨리 찾는다. 긴 run 뒤 수동 디버깅하는 것보다 빠르다. manifest 생성과 source locking을 기본 경로에 넣는다.
-
-exploratory attempts도 최소 RunSpec·seed·data generation을 남긴다. 모든 trial을 production 수준으로 봉인할 필요는 없지만 선택 근거를 잃지 않는다. promotion 때 strict gates를 추가한다.
-
-baseline을 자동 덮지 않고 child artifacts를 만들면 비교와 rollback이 쉬워진다. resolver·ledger가 수동 파일 관리 시간을 줄인다. 재현성은 bureaucracy가 아니라 iteration의 좌표계다.
-
-빠르게 바꿔도 무엇이 바뀌었는지 한 축씩 추적한다. emergency combined changes는 attribution을 제한하고 후속 ablation을 예약한다. 속도가 claim 범위를 넓히지 않는다.
-
-**최종 보고서의 첫 페이지**
-
-첫 문단은 해결한 사용자 문제, active release bundle과 검증 범위를 말한다. 둘째는 target improvement와 capability/safety/cost hard constraints를 uncertainty와 함께 말한다. 셋째는 known limitations와 rollback을 말한다.
-
-표에는 parent/candidate IDs, data/model/objective, training compute·failures, selected checkpoint, deployment artifact와 evaluation generations가 있다. headline score만 쓰지 않는다.
-
-옵션 요약은 왜 선택했고 어떤 state·metric을 바꿨는지 연결한다. default·fallback과 untested 조합을 표시한다. reproducer와 소스 근거로 이동할 수 있다.
-
-가장 약한 cell, mitigation, owner와 trigger를 앞에 둔다. 독자가 안전한 사용 범위를 즉시 알 수 있어야 한다. 홍보 문장이 기술 evidence보다 넓지 않게 한다.
-
-**appendix에 넣을 machine-readable 목록**
-
-source/dependency/container/SBOM, model/tokenizer/template, data manifests, configs, parameter inventory, event ledger, checkpoints와 export DAG를 넣는다. 각 artifact는 digest, kind, parent와 access를 가진다.
-
-evaluation은 raw outputs, items, judges/metrics, exclusions와 decision. monitoring은 metric schema, dashboards, alerts/runbooks와 incident IDs. governance는 licenses/consent, tombstones와 approvals다.
-
-사람이 읽는 표와 machine ledger는 같은 identities를 사용한다. 복사된 숫자가 source와 갈라지지 않게 report generation을 검증한다. inaccessible evidence는 scope와 authorized verifier를 명시한다.
-
-목록 자체가 correctness를 증명하지 않는다. 각 gate의 verifier와 negative fixture 결과를 연결한다. orphan artifacts와 unresolved aliases를 audit한다.
-
-**책의 장들을 종단 질문으로 다시 잇는다**
-
-1~3장은 next-token·backprop과 작은 실행 oracle을 준다. 4~6장은 corpus·tokenizer·packing으로 input objective를 만든다. 7~10장은 embedding·attention·MLP/MoE와 실제 model graph를 설명한다.
-
-11~17장은 optimizer, precision/kernel, parallelism, cluster와 checkpoint를 잇는다. 18~20장은 SFT/PEFT, preference와 online RL을 잇는다. 21~23장은 multimodal·diffusion과 knowledge change를 확장한다.
-
-24~27장은 evaluation, safety, observability와 supply chain을 독립 gates로 만든다. 28은 single-GPU 좌표, 29는 distributed faults, 30은 project→release life cycle을 닫는다.
-
-각 장은 고립된 목록이 아니라 SampleID, RunID, UpdateID, CheckpointID, EvalID, ReleaseID와 ChangeID로 이어진다. 한 질문에서 관련 장으로 왕복할 수 있다.
-
-**독자 유형별 마지막 경로**
-
-연구자는 objective 수식, data interventions, gradient·evaluation와 uncertainty를 중심으로 2, 6, 11~13, 18~24, 30을 잇는다. infra engineer는 14~17, 26~30에서 CUDA·NCCL·checkpoint·fault를 잇는다.
-
-data engineer는 4~6, 23~25, 27과 30에서 family lineage, rights, contamination와 feedback loop를 본다. model engineer는 7~12, 18, 21~22, 28과 30에서 architecture·PEFT·golden을 본다.
-
-safety/evaluation 담당자는 19~25, 30에서 preference, red-team, judge·release를 본다. 운영자는 16~17, 26~30에서 scheduling, observability, supply chain, canary와 rollback을 본다.
-
-어느 경로도 final recipe 명령만 복사하지 않는다. 각자의 boundary가 upstream/downstream owner와 만나는 지점을 확인한다. 전체 system의 공통 identities를 사용한다.
-
-**독자가 실제로 가져갈 template**
-
-한 페이지 ProjectSpec, machine RunSpec, Data/Model cards, golden result, fault matrix, evaluation/safety case, ReleaseBundle과 DecisionEvent template를 가져간다. 값은 새 project에서 다시 계산한다.
-
-template의 필수 필드는 subject identity, revision/digest, state owner, invariant, evidence, status, parent와 rollback이다. `NOT_RUN`과 residual risk를 포함한다. 최신 file path 하나로 축소하지 않는다.
-
-실행 순서는 preflight→golden→pilot/fault→long run→evaluation→transform/serving→canary→handoff다. 실패하면 first divergence와 last complete parent로 간다. 다음 단계에서 이전 gate를 추정으로 대체하지 않는다.
-
-새 model/framework가 나와도 이 template는 이름보다 state transition을 묻는다. 그래서 기술 변화에 견딘다. 사용 후 개선 사항은 schema generation과 migration으로 보존한다.
-
-**마지막으로 하지 말아야 할 열 가지**
-
-mutable `latest`를 identity로 쓰지 않는다. row random split로 family leakage를 만들지 않는다. forward 성공을 correct loss로 여기지 않는다. sample means로 token denominator를 숨기지 않는다. seed 하나로 재현을 선언하지 않는다.
-
-full-precision evaluation을 quantized serving에 상속하지 않는다. tracker를 checkpoint 원장으로 쓰지 않는다. partial checkpoint를 publish하지 않는다. model rollback만으로 cache/tool state가 복구됐다고 하지 않는다. benchmark PASS를 모든 threat model로 확대하지 않는다.
-
-이 금지는 보수적 격언이 아니라 앞 장들의 실패 원인이다. 각각 golden negative fixture와 incident runbook을 가진다. 하나를 위반해야 한다면 reason, scope, mitigation와 expiry를 DecisionEvent에 둔다.
-
-**마지막으로 반드시 할 열 가지**
-
-raw row 하나를 loss까지 계산한다. selected gradient와 optimizer 두 step을 계산한다. checkpoint next update를 재생한다. effective config와 actual functions를 고정한다. data family와 rights를 추적한다.
-
-distributed global logical oracle를 맞춘다. evaluation subject·judge·metric을 분리한다. deployment artifact를 다시 평가한다. meaningful failure와 rollback을 rehearsal한다. strongest claim을 independent reviewer가 반증한다.
-
-열 가지가 작은 fixture에서 먼저 된다면 scale은 새 complexity만 추가한다. 되지 않으면 cluster 규모가 evidence를 만들어 주지 않는다. 실행 범위와 unsupported cells를 정직하게 남긴다.
-
-**제2권의 최종 한 문장**
-
-파인튜닝은 데이터를 model에 넣어 loss를 낮추는 명령이 아니라, 원하는 behavior를 데이터·수식·code·hardware·운영 state에 걸쳐 정의하고 그 변화가 왜 생겼는지 증명하며 잘못됐을 때 안전하게 되돌리는 전체 생명주기다.
-
-독자는 이 생명주기를 한 SampleID에서 시작해 UpdateID, CheckpointID, EvalID와 ReleaseID까지 추적한다. 어느 edge도 문서의 관습이나 최신 파일명으로 건너뛰지 않는다. source와 artifact를 확인한다.
-
-좋은 recipe는 최고의 숫자 하나보다 반증 가능한 설명, 제한된 support와 복구 능력을 가진다. 새 model·optimizer·CUDA·framework가 와도 이 사고법으로 state owners와 invariants를 다시 세운다.
-
-이 기준을 만족할 때 파인튜닝은 운 좋은 실험에서 반복 가능한 공학으로 바뀐다. 그리고 책의 마지막 페이지는 작업의 끝이 아니라 다음 generation을 더 정확하게 시작하는 좌표가 된다.
-
-**마지막 clean-room 심사표**
-
-심사자는 빈 환경에서 source·dependency와 public/authorized fixture를 확인한다. model/tokenizer bundle, resolved config와 environment fingerprint가 manifest digest와 맞아야 한다. mutable network fetch는 차단하거나 exact digest를 검증한다.
-
-canonical SFT row, preference pair와 필요하면 fixed RL trajectory를 실행한다. IDs·masks, loss sum/count, selected gradients와 two-step update를 oracle과 비교한다. checkpoint를 round trip해 next update를 재생한다.
-
-distributed package는 rank-local/global tensor, collective events와 failure recovery를 확인한다. export를 deployment runtime에 로드해 template, quantization, cache와 sandbox tool fixtures를 실행한다.
-
-evaluation raw outputs와 summary를 재계산하고 ReleaseDecision을 재구성한다. 접근하지 못한 evidence는 status를 낮추거나 authorized attestation 범위를 명시한다. 추정으로 PASS를 채우지 않는다.
-
-## 30.14 최종 실패 주입과 release rehearsal을 수행한다
-
-출판과 인수에 앞서 정상 경로를 다시 읽는 대신 의도적으로 경계를 깨뜨려 증거 사슬이 실제로 원인을 가르는지 확인한다.
-
-첫째 wrong tokenizer generation을 넣어 preflight 또는 golden IDs에서 차단한다. 둘째 adapter target을 0개로 만들어 trainable inventory가 실패하게 한다. 셋째 rank 하나의 loss denominator를 바꾸어 global oracle가 divergence를 잡게 한다.
-
-넷째 checkpoint shard를 하나 누락해 incomplete child가 publish되지 않게 한다. 다섯째 serving cache에 parent generation을 넣어 bundle fence가 거절하게 한다. 각 failure는 다른 owner·runbook을 가진다.
-
-복구 뒤 raw row→update, global gradient, checkpoint next update와 serving response를 다시 확인한다. alert만 울리고 bad state가 남으면 실패다. owner가 실제로 runbook을 수행하고 evidence를 남겨야 한다.
-
-이 다섯 개는 전 범위를 대표하지 않는다. support matrix의 high-risk cells와 recent incidents를 추가한다. framework·hardware·objective가 바뀌면 affected injections를 다시 연다.
-
-### 출판본과 실행 자료의 경계
-
-책 본문에는 mechanism, why, 수학·코드 핵심과 실용 checklist를 싣는다. exact revisions, 긴 artifact 목록과 machine ledgers는 소스 기록s·appendix에서 연결한다. 독자가 설명을 읽다가 근거로 내려갈 수 있어야 한다.
-
-코드·논문 원문은 필요한 짧은 부분만 인용하고 나머지는 정확히 재서술한다. 식의 기호와 implementation tensor를 연결한다. 고정 revision 범위를 문장에 반영한다.
-
-최종 기술 설명은 옵션 이름만 나열하지 않고 원본 함수, 상태 전이, 관측값과 반증 실험을 직접 연결한다. 독자는 각 결론이 어떤 입력과 조건에서 성립하며 어느 경계부터 다시 검증해야 하는지 확인할 수 있어야 한다.
-
-출판용 EPUB은 목차, 표·code wrapping, 그림 대체텍스트, 내부 링크와 font/layout을 별도 검증한다. Markdown 감사 통과가 rendered book 품질을 자동 보장하지 않는다.
-
-**도식이 필요한 곳과 필요 없는 곳**
-
-data→training→checkpoint→evaluation→release처럼 세 개 이상 state가 이어지는 경로는 Mermaid flow가 도움이 된다. DP/TP/PP ownership, 산출물 DAG와 incident timeline도 관계를 시각화할 수 있다.
-
-도식은 source truth를 대체하지 않는다. 노드에는 실제 IDs·owners, edge에는 transformation/commit semantics를 둔다. 복잡한 그림 하나보다 작은 독립 도식을 사용한다.
-
-단일 수식, 한 option이나 간단한 checklist는 prose·table가 더 낫다. 모든 절에 장식 그림을 넣지 않는다. EPUB renderer에서 가독성과 대체 설명을 확인한다.
-
-도식 source와 rendered asset를 함께 version한다. model·workflow가 바뀌면 stale diagrams를 dependency audit로 찾는다. 색만으로 상태를 구분하지 않는다.
-
-### 최종 독자의 반증 연습
-
-책에서 가장 강한 성능·안전·재현 문장 하나를 고른다. subject model/data/environment와 revision을 찾고 supporting source·artifact·metric을 확인한다. 실행 범위와 exclusions가 문장보다 좁지 않은지 본다.
-
-같은 claim에 counterexample fixture를 설계한다. 다른 language/length, stale cache, quantized runtime, resume 또는 stronger attacker를 넣는다. 결과가 claim scope를 깨면 문장을 축소한다.
-
-그다음 option 하나를 바꾸고 영향 graph를 예측한다. 어떤 tensor, objective, checkpoint와 evaluation가 stale가 되는지 적는다. 실제 child evidence와 대조한다.
-
-이 연습을 할 수 있으면 독자는 recipe 소비자가 아니라 검토자다. 새 framework의 홍보나 논문 수치를 자신의 stack에 옮길 때 필요한 증거를 요구할 수 있다.
-
-### 다음 책으로 넘기지 않는 범위
-
-이 권은 serving에 필요한 모델 형식·quantization을 언급하지만 중심은 training/fine-tuning life cycle이다. inference scheduler·KV cache의 전체 해부는 제1권 범위와 연결한다. agent orchestration은 제3권에서 확장한다.
-
-그렇다고 training과 serving/agent 경계를 끊지 않는다. export bundle, template, tool/safety와 feedback lineage는 인수 계약으로 남긴다. downstream이 objective 의미를 잃지 않게 한다.
-
-대규모 pretraining과 full RL environment를 실제 실행하지 않은 cells는 source·설계 evidence로만 표시한다. future work를 현재 실험 결과처럼 쓰지 않는다. training book의 support 범위를 명시한다.
-
-후속 시스템은 이 identity와 evidence graph를 부모 계보로 참조하되 과거 결과를 복사해 최신 검증으로 위장하지 않는다. 새 ReleaseGeneration마다 소스 리비전, 산출물 digest와 실행 조건을 다시 검증한다.
-
-**봉인**
-
-최종 evidence bundle은 소스 기록, machine manifest, audit report와 배포 artifact를 가진다. 각각 digest, build config와 date/revision을 기록한다. 사용자가 받는 artifact가 검증한 model·tokenizer·adapter generation보다 오래된 산출물이 아니어야 한다.
-
-각 기술 gate와 산출물 완전성를 다시 실행한다. 문서 분량이나 자동 검사 하나만으로 완료를 선언하지 않는다. 실패·warning disposition과 실제 검증 범위를 검토한다.
-
-독립 검토자는 random chapters와 종단 paths를 확인하고 internal meta leakage, unsupported claims와 broken links를 찾는다. 수정 뒤 full audit와 EPUB rebuild를 반복한다.
-
-모든 required gates가 현재 artifacts에서 증명될 때만 generation을 봉인한다. 이후 변경은 child generation이다. 그때까지 목표는 활성 상태로 유지한다.
-
-**마지막 release rehearsal**
-
-rehearsal은 immutable parent와 raw canonical requests에서 시작한다. training row, checkpoint, selected candidate, merged·quantized export와 serving bundle을 차례로 resolve한다. 각 edge의 tool revision, input/output digest와 acceptance를 확인한다. 편의 alias는 조회 시작점일 뿐 identity가 아니다.
-
-첫 번째 장애는 data eligibility 변경이다. 출처 계열 하나를 revoke하고 affected shards, runs, checkpoints와 exports가 어떻게 stale/rebuild-required가 되는지 본다. serving containment와 long-term retraining·unlearning을 분리한다. rights floor 아래 parent로 rollback하지 않는다.
-
-두 번째 장애는 distributed checkpoint 중 rank 실패다. partial child가 publish되지 않고 last complete parent에서 data/RNG·next update가 정책대로 복구돼야 한다. replayed samples와 lost work를 정산한다. telemetry gap을 정상으로 세지 않는다.
-
-세 번째 장애는 serving bundle mismatch다. new model에 old tokenizer, stale adapter/cache와 wrong quantization metadata를 차례로 넣는다. preflight·generation fence가 user response 전에 거절해야 한다. rollback은 sessions, draft, tool policy와 queued side effects까지 처리한다.
-
-마지막에는 candidate의 strongest target improvement와 weakest capability/safety slice를 독립적으로 재평가한다. raw outputs, metric·judge와 uncertainty를 재계산한다. 차이가 나면 report를 고치기 전에 first divergent subject를 찾는다.
-
-## 30.15 책을 덮은 다음 날 시작할 최소 실행
-
-마지막 절은 또 하나의 선언이 아니라 독자가 자신의 모델과 데이터로 증거 사슬을 시작하는 구체적인 첫날 계획이다.
-
-자신의 project에서 가장 작은 canonical row 세 개를 고른다. 정상 target, boundary/negative와 safety·rights sensitive row다. bytes→tokens→loss→gradient→update와 checkpoint를 한 장에 펼친다. 이 artifact가 없으면 다른 작업에 앞서 만든다.
-
-현재 production 또는 target base bundle의 exact revisions와 active options를 resolve한다. 어떤 defaults와 remote dependencies가 mutable한지 찾는다. tokenizer/template·adapter와 서빙 실행 환경까지 같은 identity graph에 넣는다.
-
-그다음 실패 하나를 심는다. wrong mask, stale cache, Inf gradient 또는 partial checkpoint 중 비용이 싼 것을 선택한다. expected detector와 owner, recovery를 실행한다. 경보만 나고 안전한 parent로 돌아가지 못하면 runbook을 고친다.
-
-마지막으로 target metric 하나와 counter metric 하나를 parent/candidate paired design으로 고정한다. data family split, evaluator generation과 decision threshold를 사전 등록한다. 그 뒤에야 더 큰 training을 시작한다.
-
-이 순서가 느려 보여도 가장 비싼 실패를 앞에서 제거한다. 파인튜닝의 핵심은 많은 GPU를 서둘러 쓰는 데 있지 않다. 작은 증거가 규모가 커져도 같은 의미를 유지하도록 만들어야 한다.
-
-독자는 자신의 strongest claim을 한 문장으로 쓴다. 이어 그 문장의 subject model·data·runtime, 검증한 입력 분포, metric·uncertainty와 반증 fixture를 붙인다. 어느 항목이 없으면 claim을 줄이거나 실험을 추가한다. last complete parent와 rollback command는 실제 resolver에서 확인한다. 끝으로 다른 사람이 같은 artifacts만으로 같은 제한된 결론과 안전한 복구 경로를 얻는지 본다. 이 세 검토가 통과해야 project의 학습 결과가 개인의 기억을 넘어 팀이 운영할 수 있는 지식이 된다.
-
-이 검토 결과를 현재 release의 끝으로만 보지 않는다. 다음 데이터·objective·runtime 변경은 이 release를 immutable parent로 삼는 새 derivation edge다. 새 edge도 같은 canonical row와 failure fixture를 먼저 통과해야 한다. 이렇게 해야 이번에 얻은 지식이 문서의 결론으로 굳는 대신, 이후 세대에서 무엇이 달라졌는지를 찾아내는 살아 있는 기준선으로 남는다.
-
-### launcher와 backend 조합을 검증한 셀만 승인한다
-
-최종 run manifest에는 Transformers·Accelerate revision, effective TrainingArguments, launcher command, world/rank topology, mixed-precision dtype와 scaler, DeepSpeed/FSDP plugin 설정을 함께 둔다. `prepare`가 성공했거나 단일 GPU canonical test가 통과했다는 이유로 torchrun·Slurm·MPI, ZeRO stage, FSDP1/2와 모든 dtype 조합을 승인하지 않는다.
-
-지원 matrix의 각 셀은 prepare 전후 object identity, microstep/sync/update counter, checkpoint save/load와 next-update oracle을 가진다. 시험하지 않은 셀은 상속 추론으로 PASS를 채우지 않고 `NOT_RUN`으로 남긴다. 이 제한이 모든 TrainingArguments를 안다고 과장하는 것보다 실제 운영에서 훨씬 강한 계약이다.
-
-release manifest에는 [SourceRow에서 committed UpdateID까지](../labs/06-source-to-commit-golden-lab.md)의 ledger digest를 넣는다. 이 digest는 production 성능 증명이 아니라 SourceRow→selection→token→pack→denominator→commit→resume join이 끊기지 않았다는 schema oracle이다. 실제 stack은 같은 필드를 자기 tokenizer·sampler·optimizer state로 대체하고 next-sample/next-update parity를 다시 고정해야 한다.
+최종 인수표에는 `PASS`, 실행 환경 때문에 아직 하지 못한 `NOT_RUN`, 구조적으로 지원하지 않는 `UNSUPPORTED`를 분리한다. strongest claim은 가장 약한 cell보다 넓을 수 없다. 원전·고정 revision, machine-readable artifact ledger, decision record, runbook과 독립 reviewer가 같은 subject를 양방향으로 순회할 때 제2권의 파인튜닝 폐회로가 닫힌다.

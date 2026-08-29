@@ -6,6 +6,45 @@
 
 독자는 이후의 모든 절을 같은 네 질문으로 읽으면 된다. 첫째, 관찰된 값은 문서 수·byte·token·sample·loss-bearing token 가운데 무엇을 셌는가. 둘째, 그 값이 달라질 수 있는 최초의 상태 전이는 어디인가. 셋째, 원인을 하나씩 떼어 내는 paired replay나 고장 주입은 무엇인가. 넷째, 어느 manifest·checksum·decision record가 판정을 닫는가. “품질이 좋아졌다”, “중복이 줄었다”, “삭제했다”는 문장은 이 네 질문에 답하기 전에는 결과가 아니라 가설이다.
 
+## 4.0 GR-001 규범 trace: 원본 두 개를 학습 후보 문서로 commit한다
+
+이 장에서 GR-001은 거대한 웹 전체를 추상적으로 처리하지 않는다. 고정 fixture의 원본 객체 두 개와 중복 변형 하나를 `CorpusGenerationID=CG-004`로 만든다. 이후 절의 filter·dedup·decontamination 설명은 모두 이 trace의 전이를 확장한다.
+
+```mermaid
+flowchart LR
+  R[RawObjectID<br/>bytes + fetch metadata] --> X[Extractor rev E17]
+  X --> D[DocumentID<br/>text + byte map]
+  D --> Q[quality·language·PII decisions]
+  Q --> N[normalization rev N04]
+  N --> U[dedup cluster + survivor]
+  U --> C[CorpusGeneration CG-004]
+  C -->|5장| T[Tokenizer input rows]
+```
+
+|artifact/row|GR-001 값|shape·offset|owner·수명|
+|---|---|---|---|
+|`RAW-004-A`|UTF-8 body SHA-256 `…a41`|bytes `[0,1842)`|수집기가 immutable object store에 영구 보존|
+|`DOC-004-A`|본문·코드 블록 포함|raw byte `[318,1510)` → text char `[0,947)`|extractor `E17`; interval map과 함께 보존|
+|`DOC-004-A2`|footer만 다른 near duplicate|5-gram 188개|dedup worker; cluster member로 남고 학습 후보에서는 제외|
+|decision row|`language=ko`, `pii=redact[411,428)`|text char offset|policy `P09`; 원문을 덮어쓰지 않음|
+|survivor row|cluster `DC-77`, survivor `DOC-004-A`|ordered member IDs `[2]`|dedup coordinator; tie-break revision 고정|
+|`CG-004`|accepted IDs `[A,B]`|2 docs, 1,476 UTF-8 bytes|data registry; 5장이 소비하는 유일한 generation|
+
+정규화된 shingle 집합을 $S_i$라 하면 두 문서의 Jaccard와 LSH 후보 확률은
+
+$$J(A,B)={|S_A\cap S_B|\over|S_A\cup S_B|},\qquad P(candidate)=1-(1-J^r)^b.$$
+
+|기호|실제 상태|GR-001 값|코드 경계|
+|---|---|---|---|
+|$S_i$|normalizer `N04` 뒤 5-gram set|188, 191개|normalizer revision이 바뀌면 별도 generation|
+|$r,b$|band당 row, band 수|`4, 20`|후보 생성 설정이지 최종 중복 판결이 아님|
+|survivor|cluster의 보존 문서|`DOC-004-A`|길이·품질·ID tie-break를 명시|
+|offset map|raw↔extracted intervals|17 segments|삭제 요청을 원 bytes까지 역추적|
+
+공개 데이터 경로의 실제 shard·instance 구성 경계는 [OLMo-core `NumpyDataset`의 고정 구현](https://github.com/allenai/OLMo-core/blob/b7e9671d7ea48af94838c4f124703c3ae36f0c70/src/olmo_core/data/numpy_dataset.py#L1709-L1846)에서 확인한다. 이 링크는 구현 방식의 원전이며 GR-001 corpus의 품질을 대신 증명하지 않는다.
+
+**반증과 handoff.** `CG-004-M1`은 footer 제거 전에 hash해 A와 A2를 서로 다른 cluster로 만든다. 최초 불일치는 dedup key이며, 최종 token 수만 비교해 통과시키지 않는다. `M2`는 redaction 뒤 offset map을 갱신하지 않는다. 원 byte 왕복 시험이 실패해야 한다. `M3`는 동일 URL의 새 bytes를 기존 `RawObjectID`로 덮어쓴다. content digest identity gate가 materialize 전에 거부해야 한다. 5장에는 `{CG-004, ordered DocumentID, UTF-8 bytes, raw↔text interval map, policy decision rows}`만 넘긴다.
+
 ## 4.1 acquisition에서 학습 후보 문서까지 경계를 세운다
 
 ### 4.1.1 수집·추출·언어 판별·품질 gate를 분리한다
@@ -2267,5 +2306,4 @@ canonical split fixture는 classifier train, threshold tuning, corpus selection 
 
 이 네 domain gate를 통과한 뒤에도 최종 승인표는 언어×라이선스 상태×코드/수학 domain의 교차 셀을 본다. 각 셀의 input, survivor, emitted token, valid target과 benchmark-neighbor hit를 표시한다. 주변부 언어의 수학 문서가 전부 제거되거나 permissive 코드가 특정 언어에만 몰리는 현상은 전체 평균 하나로 보이지 않는다.
 
-[SourceRow에서 committed UpdateID까지](../labs/06-source-to-commit-golden-lab.md)는 raw hash와 normalized hash, filter reason과 duplicate parent를 같은 row에 보존한다. 작은 fixture이지만 “탈락 문서 수”가 아니라 어느 SourceRow가 이후 PackID와 UpdateID에 도달했는지 묻는 이 장의 release 계약을 끝까지 잇는다.
-평가 집합의 exact·near duplicate와 가중 분모가 어떻게 갈라지는지는 [평가·오염·불확실성 결정적 실습](../labs/24-eval-contamination-uncertainty-lab.md)에서 모델 실행 없이 검산한다.
+실행 검산은 4.0의 `CG-004`를 [SourceRow→UpdateID 실습](../labs/06-source-to-commit-golden-lab.md)으로 내려 보내고, 평가 중복은 [오염·불확실성 실습](../labs/24-eval-contamination-uncertainty-lab.md)에서 별도 분모로 확인한다.

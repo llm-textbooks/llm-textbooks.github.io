@@ -21,6 +21,48 @@
 
 따라서 logits가 다르다는 보고를 받자마자 attention kernel부터 의심하지 않는다. 위 표의 위에서 아래로 최초 불일치를 좁히면, tokenizer 불일치와 fused-kernel 오차를 같은 문제로 취급하는 일을 피할 수 있다.
 
+## 7.0 GR-001 규범 trace: BatchID의 주소를 residual 좌표로 펼친다
+
+입력은 6장의 `B-006-0001`이다. GR-001의 고정 Qwen2 계열 manifest는 `V=151936`, hidden size `C=896`, query head `14`, KV head `2`, head dimension `64`를 선언한다. 이 장은 embedding gather와 첫 RMSNorm까지를 `ForwardSpanID=FWD-007`로 고정한다. 정확한 배포 모델 revision이 바뀌면 이 숫자를 재사용하지 않고 새 manifest를 만든다.
+
+```mermaid
+flowchart LR
+  B[Batch B-006-0001<br/>ids 2×16] --> G[Embedding gather<br/>E 151936×896]
+  G --> H[hidden 2×16×896]
+  P[position_ids 2×16] --> R[RoPE cos/sin<br/>2×16×64]
+  H --> N[RMSNorm input]
+  N --> Q[normalized hidden<br/>FWD-007]
+  R -->|8장 Q/K에 적용| A[attention input contract]
+  Q --> A
+```
+
+|state|shape·dtype|owner·storage|불변조건|
+|---|---|---|---|
+|`input_ids`|`[2,16] int64`|data rank owns batch|모든 값 `0≤id<V`|
+|embedding table $E$|`[151936,896] bf16`|model rank; tied 여부 manifest|tokenizer revision과 row 의미 일치|
+|gathered hidden $X$|`[2,16,896] bf16`|activation; backward까지 또는 recompute|padding 위치도 값은 있으나 loss owner는 mask|
+|position IDs|`[2,16] int64`|batch policy|segment reset이 6장 segment map과 일치|
+|RoPE cos/sin|논리 `[2,16,64]`, 계산 FP32 여부 기록|layer에서 공유 가능|position·theta·scaling revision 고정|
+|RMS statistic|`[2,16,1] fp32` 권장|norm kernel temporary|마지막 hidden 축만 reduction|
+|normalized hidden|`[2,16,896] bf16`|8장 QKV projection 소비|finite이며 reference 오차 이내|
+
+embedding과 RMSNorm은
+
+$$X_{bt:}=E[input\_ids_{bt}],\qquad
+RMSNorm(x)=g\odot{x\over\sqrt{C^{-1}\sum_jx_j^2+\epsilon}}.$$
+
+|기호|코드 객체|shape/검산|
+|---|---|---|
+|$E$|`model.embed_tokens.weight`|`[V,C]`; gather row 주소 검사|
+|$g$|norm weight|`[C]`; broadcast 축 검사|
+|$C$|hidden size|896; token이나 batch 분모가 아님|
+|$\epsilon$|`rms_norm_eps`|resolved config 값과 kernel 값 동일|
+|position|`position_ids/cache_position`|6장 segment offset에서 유도|
+
+Qwen2 계열의 embedding→decoder→norm 실제 호출 경로는 [Transformers 고정 모델 구현](https://github.com/huggingface/transformers/blob/550d7b3834670483a4df436541272c055dc364bf/src/transformers/models/qwen2/modeling_qwen2.py#L360-L470), RoPE 구성과 적용은 [같은 고정 파일](https://github.com/huggingface/transformers/blob/550d7b3834670483a4df436541272c055dc364bf/src/transformers/models/qwen2/modeling_qwen2.py#L100-L170)에서 확인한다.
+
+**반증과 handoff.** `FWD-007-M1`은 tokenizer bundle만 바꿔 같은 정수가 다른 row 의미를 갖게 한다. shape test가 아니라 bundle compatibility가 거부해야 한다. `M2`는 position을 packed row 전체에서 연속 증가시켜 두 번째 segment의 cos/sin에서 최초 차이를 만든다. `M3`는 RMS reduction을 hidden 축 대신 token 축에 수행한다. constant-scale fixture와 FP32 reference가 즉시 실패해야 한다. 8장에는 `{FWD-007, normalized hidden[2,16,896], position/cos/sin contract, segment allowed-edge mask, dtype/stride, model revision}`을 넘긴다.
+
 ## 7.1 embedding lookup을 주소·storage·gradient로 읽는다
 
 token ID는 의미 벡터 자체가 아니라 embedding table의 row 주소다. lookup, tying과 backward scatter가 같은 storage에 남기는 효과를 추적한다.
@@ -2508,4 +2550,4 @@ return self.weight * hidden_states.to(input_dtype)
 
 `QT2-03-norm-in`과 `QT2-04-norm-out`은 `[B,S,D]`지만 제곱 평균과 reciprocal square root는 float32다. `y_i=w_i x_i/r`, `r=sqrt(D^{-1}Σ_jx_j²+ε)`이며 RMSNorm은 평균을 빼지 않는다. backward는 scale의 직접 경로와 모든 좌표가 `r`을 공유하는 결합 경로를 함께 갖는다. `QT2-P-rms`가 `w:[D]`의 gradient를 소유하고 residual 입력에는 attention branch와 identity branch의 gradient가 합쳐진다.
 
-첫 반례는 Gemma의 scaled embedding이다. Qwen2 trace에 `sqrt(D)` 곱을 끼우거나 Gemma 이식에서 이를 빼면 최초 불일치는 attention이 아니라 `QT2-01`이다. MLX-LM Qwen2는 같은 embedding shape를 만들되 `nn.RMSNorm`에 내부 연산을 위임한다. framework parity는 logits 전에 lookup·norm 출력과 dtype 정책부터 비교해야 한다. 다음 장에는 `QT2-04`, `QT2-02`, causal mask와 layer index를 넘긴다. [8장의 동일 trace](08-attention-lineage.md#817-qwen2-gqa-tensorid)와 [10장의 종단 원장](10-real-model-autopsy.md#1021-qwen2-trace-ledger-forward-backward)에서 이름을 바꾸지 않는다.
+Gemma의 embedding scale을 Qwen2에 잘못 이식하면 최초 불일치는 attention이 아니라 `QT2-01`이다. 이 반례와 RMSNorm dtype parity는 7.0의 `FWD-007-M1/M3`으로 합치며, 다음 장에는 `QT2-04`, `QT2-02`, allowed-edge mask와 layer index를 넘긴다.

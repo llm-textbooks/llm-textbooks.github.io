@@ -8,6 +8,46 @@
 
 이 장의 디버깅 원칙도 이 순서를 따른다. 출력 문장이 이상하다는 마지막 증상에서 거꾸로 추측하지 않는다. 동일한 message fixture를 training과 serving에 넣고 `rendered bytes → normalized spans → pre-token chunks → pieces → IDs → special mask → labels/positions → first logits → generated IDs와 stop reason`을 왼쪽부터 비교한다. 최초로 달라진 경계가 관찰값이며, 그 경계를 소유한 설정·함수·artifact가 원인 후보가 된다. 한 입력과 한 옵션만 바꾼 최소 재현에서 그 경계가 함께 복구되어야 원인으로 판정한다. 뒤 단계의 우연한 출력 일치는 앞 단계 호환성의 증거가 아니다.
 
+## 5.0 GR-001 규범 trace: DocumentID를 손실 좌표가 있는 token span으로 바꾼다
+
+입력은 4장의 `CG-004`다. 출력은 문자열이 아니라 `TokenizerBundleID=TB-005`와 각 token이 원문 어느 구간에서 왔는지 설명하는 `TokenSpanID`다. GR-001의 대화 fixture 한 행을 실제 값으로 고정한다.
+
+```mermaid
+flowchart LR
+  D[DOC-004-A<br/>UTF-8 bytes] --> C[Message AST]
+  C --> J[Chat template<br/>TPL-005]
+  J --> N[Normalizer + pre-tokenizer]
+  N --> I[input_ids + offsets]
+  I --> M[attention/special/assistant masks]
+  M --> L[labels<br/>-100 or target ID]
+  L -->|6장| S[TokenSpan TS-005-A]
+```
+
+|state|구체 값|shape·offset·mask|owner|
+|---|---|---|---|
+|source|`DOC-004-A`, text char `[112,156)`|raw byte `[477,536)`로 왕복|corpus registry|
+|rendered row|system/user/assistant 3 messages|UTF-8 121 bytes, rendered char `[0,93)`|template `TPL-005@sha256:…`|
+|`input_ids`|`[151644, 8948, …, 151645]`|`int64[16]`|tokenizer worker|
+|offsets|special token은 `null`, 일반 token은 interval|`interval[16]`|tokenizer bundle과 함께 보존|
+|attention mask|padding 없음|`bool[16]=1`|collator|
+|assistant mask|assistant content 위치 11–14|`bool[16]`, 합 4|template/collator 공동 계약|
+|labels|position 11–14만 다음 token ID, 나머지 `-100`|`int64[16]`, valid 4|objective compiler|
+
+token-level loss의 분모는 attention 가능한 token 수가 아니라 label mask가 허용한 수다.
+
+$$L={\sum_t m_t\,\ell(z_t,y_t)\over\sum_t m_t},\qquad m_t=\mathbf1[y_t\ne-100].$$
+
+|기호|코드 객체|검산|
+|---|---|---|
+|$z_t$|다음 장 이후의 `logits[:,t,:]`|shape `[V]`|
+|$y_t$|shift 뒤 `labels[t]`|첫 assistant target이 어느 prefix 뒤에 놓이는지 확인|
+|$m_t$|`labels != -100`|GR-001 합은 4, attention mask 합 16과 다름|
+|offset|fast tokenizer encoding span|원 text→rendered text 변환 edge를 따로 보존|
+
+실제 collator가 padding label을 `-100`으로 바꾸는 경계는 [Transformers `DataCollatorForLanguageModeling`의 고정 코드](https://github.com/huggingface/transformers/blob/550d7b3834670483a4df436541272c055dc364bf/src/transformers/data/data_collator.py#L619-L666), tokenizer 호출 계약은 [`PreTrainedTokenizerBase.__call__`](https://github.com/huggingface/transformers/blob/550d7b3834670483a4df436541272c055dc364bf/src/transformers/tokenization_utils_base.py#L2989-L3075)에서 확인한다.
+
+**반증과 handoff.** `TB-005-M1`은 train template에서 assistant delimiter 하나를 없애 serving과 token ID가 처음 갈리는 rendered byte를 잡는다. `M2`는 오른쪽 truncation으로 assistant target 네 개 중 둘을 자르면서 valid-count를 4로 남겨 mask-length invariant를 실패시킨다. `M3`는 새 special token을 추가하고 embedding resize manifest를 누락한다. 7장의 row-address gate가 forward 전에 거부해야 한다. 6장에는 `{TB-005 revision, TS-005-A input_ids[16], offsets[16], assistant/attention/special masks, labels, valid_count=4}`를 넘긴다.
+
 ## 5.1 좌표 변환기로서 토크나이저를 이해한다
 
 먼저 vocabulary·offset·template·weight가 서로 독립된 설정이 아니라 하나의 좌표 변환 사슬임을 세운다. 이 사슬을 잡아 두어야 뒤에서 algorithm, artifact와 runtime 차이를 같은 기준으로 비교할 수 있다.
@@ -2076,6 +2116,4 @@ Unigram은 먼저 Viterbi 경로에서 vocabulary에 없는 문자열을 unknown
 
 최소 실패 fixture는 여덟 축을 한 번에 섞지 않는다. NFC와 NFD 한 쌍, 일부 byte token만 있는 OOV, fused/unfused UNK, literal special marker, 빈 conversation, unknown role, 동일 content가 앞 turn에도 있는 decoy, assistant span 경계의 좌우 truncation을 각각 독립적으로 바꾼다. 단계마다 `(normalized bytes, pre-token spans, IDs, offsets, rendered role spans, assistant mask, labels, valid count)`를 저장한다. 최초 차이가 예상 단계보다 늦게 보이면 상류 state를 기록하지 않은 것이다.
 
-최종 release gate는 encode/decode 예시 몇 개가 자연스러운지 묻지 않는다. tokenizer JSON과 normalizer·pre-tokenizer·decoder·added token digest, chat-template digest, special IDs, padding/truncation side, mask algorithm revision을 하나의 BundleID로 묶는다. 4장의 token shard, 6장의 packer, 18장의 collator, 28장의 golden run과 동일 BundleID가 아니면 cache를 폐기하고 label fixture를 다시 실행한다.
-
-[SourceRow에서 committed UpdateID까지](../labs/06-source-to-commit-golden-lab.md)는 NFC·공백 정규화와 revisioned UTF-8 byte token을 일부러 단순하게 고정한다. production tokenizer의 품질을 흉내 내는 실습이 아니라, tokenizer revision이 달라졌는데 같은 PackID·checkpoint를 재사용하는 lineage 오류를 손으로 찾는 실습이다.
+release는 5.0의 `TB-005` BundleID를 그대로 사용한다. 4장의 shard, 6장의 packer, 18장의 collator와 28장의 golden run이 다른 BundleID를 읽으면 cache를 폐기하고 [SourceRow→UpdateID 실습](../labs/06-source-to-commit-golden-lab.md)의 label fixture를 다시 실행한다.

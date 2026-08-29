@@ -19,6 +19,46 @@
 
 핵심 질문은 “packing을 켰는가”가 아니라 “어느 토큰이 어떤 문맥을 보고, 어느 target이 얼마의 가중치로 전역 분모에 들어갔는가”다. 따라서 이 장에서는 공간 효율, 데이터 보존, 목적함수 보존을 서로 다른 지표로 다룬다. 13장의 scheduler는 여기서 만든 valid-token clock을 받아야 하고, 16장의 분산 재개는 sampler cursor와 열린 packing buffer까지 같은 checkpoint cut으로 묶어야 한다.
 
+## 6.0 GR-001 규범 trace: token span을 정확히 한 BatchID로 commit한다
+
+5장의 `TS-005-A`와 두 번째 span을 길이 16의 두 행에 넣어 `BatchID=B-006-0001`을 만든다. 계획 mixture와 실제 loss 질량을 구분하고, 문서 경계를 attention graph와 label mask 모두에 반영한다.
+
+```mermaid
+flowchart LR
+  T[TokenSpanID<br/>IDs + offsets] --> D[DrawID<br/>source + RNG]
+  D --> P[PackPlan PP-006]
+  P --> B[PackedSample rows<br/>B=2,T=16]
+  B --> G[segment/position/attention graph]
+  G --> L[labels + valid count]
+  L --> C[BatchCommit B-006-0001]
+  C -->|7장| E[model input]
+```
+
+|state|GR-001 값|shape·offset·mask|owner/commit 시점|
+|---|---|---|---|
+|draw ledger|`D-A, D-B, D-C`|source IDs `web,code,web`|global sampler; RNG counter 포함|
+|packed IDs|두 행|`int64[2,16]`|packer; 아직 소비 확정 아님|
+|segment map|row0 `[0,10)=A,[10,16)=B`; row1 `[0,16)=C`|source token offsets 포함|packer|
+|position IDs|segment마다 0에서 reset|`int64[2,16]`|position policy `POS-006`|
+|allowed-edge mask|causal ∩ same-segment|논리 shape `[2,1,16,16]`|mask compiler|
+|labels/valid|경계·padding·prompt 제외|`int64[2,16]`, valid 19|objective compiler|
+|commit|`B-006-0001`|segment-map SHA + tensor SHA|trainer가 update에 인수할 때|
+
+source $s$의 계획 확률 $p_s$와 실제 손실 질량은 다르다.
+
+$$\hat q_s={\sum_{b,t}m_{bt}\mathbf1[source(b,t)=s]\over\sum_{b,t}m_{bt}}.$$
+
+|기호|실제 객체|GR-001 검산|
+|---|---|---|
+|$m_{bt}$|`labels[b,t] != -100`|전체 합 19|
+|`source(b,t)`|segment map의 원천 ID|web 12, code 7 valid tokens|
+|$p_s$|mixture config|web 0.5, code 0.5|
+|$\hat q_s$|commit ledger에서 계산|web 12/19, code 7/19|
+
+실제 dataset이 instance를 구성하고 index를 복원하는 경계는 [OLMo-core 고정 `NumpyDataset` 구현](https://github.com/allenai/OLMo-core/blob/b7e9671d7ea48af94838c4f124703c3ae36f0c70/src/olmo_core/data/numpy_dataset.py#L1850-L1898), dataloader의 state 복원 경계는 [고정 loader 코드](https://github.com/allenai/OLMo-core/blob/b7e9671d7ea48af94838c4f124703c3ae36f0c70/src/olmo_core/data/data_loader.py#L995-L1018)에서 확인한다.
+
+**반증과 handoff.** `PP-006-M1`은 label 경계만 막고 cross-document attention edge를 열어 둔다. packed/unpacked logits parity가 처음 실패해야 한다. `M2`는 rank 1 valid count를 누락하고 rank loss 평균을 내 global denominator를 틀리게 한다. `M3`는 checkpoint에서 열린 pack buffer를 빼 resume의 다음 `DrawID`가 달라지게 한다. [mixture realized-mass 실습](../labs/06-mixture-realized-mass-lab.md)과 [source-to-commit 실습](../labs/06-source-to-commit-golden-lab.md)으로 검산한다. 7장에는 `{B-006-0001, input_ids[2,16], positions[2,16], allowed-edge policy, labels[2,16], valid_count=19, segment map}`을 넘긴다.
+
 ## 6.1 원문에서 유효 토큰 손실까지: 데이터 경로의 불변식
 
 ### 6.1.1 문서 경계와 packing 손실
@@ -2445,14 +2485,6 @@ DoReMi의 exponentiated-gradient 갱신처럼 scheduler가 feedback을 받는다
 
 실전 대시보드는 source별 `planned`, `drawn_documents`, `emitted`, `valid`, `committed`와 누적·최근 window를 함께 그린다. `q^{commit}-p`가 커지면 source exhaustion, 평균 길이, filter/quarantine, tail drop, mask, rank skew, failed step 순으로 분해한다. curriculum 단계가 바뀐 시점에는 weight 변화선뿐 아니라 이 다섯 분모의 변화선을 겹쳐야 loss 변화의 원인을 모델과 데이터 중 어디서 찾을지 결정할 수 있다.
 
-## Configured mixture가 실제 학습 질량은 아니다
-
-source 확률은 draw 의도일 뿐이다. 각 source에 대해 configured probability와 realized document, input token, valid target, committed weighted-loss 질량을 별도 열로 둔다. 긴 문서, truncation, supervised mask, source exhaustion, corrupt retry와 update skip 때문에 네 비율은 달라진다. packed tensor의 token마다 source UUID와 원문 offset을 되짚을 수 있어야 최종 denominator를 검산할 수 있다.
-
-DoGE의 고정 구현은 seed로 NumPy generator를 만들고 probabilities, updatable probability handle과 stopping strategy를 cycling multi-source iterator에 전달한다. 그러나 seed 하나만 다시 주는 것은 resume가 아니다. bit-generator state, 각 child iterator cursor, exhaustion·renormalization 상태, controller weight generation과 prefetch queue가 어느 generation을 받아들였는지를 함께 복원해야 다음 UUID와 PackID가 같다.
-
-작은 fixture는 길이와 supervised ratio가 다른 세 source, duplicate cluster 하나, threshold 경계 score, corrupt row 하나를 쓴다. K draw 뒤 checkpoint하고 새 process에서 이어, 다음 UUID 순서와 filter reason, PackID segment map, source별 valid-target·committed-loss 질량을 uninterrupted reference와 비교한다. configured weight만 같은 결과나 평균 survivor 수만 맞는 결과는 합격이 아니다.
-
 ## 6.14 SFT pack에서 optimizer commit까지 한 원장으로 닫는다
 
 packing은 token을 붙이는 작업과 attention을 격리하는 작업을 함께 해야 한다. packed row에는 `SegmentID`, 각 segment의 position reset, label bitmap과 causal visibility를 둔다. 다음 example의 token이 이전 example을 보거나 이전 example의 마지막 logits가 다음 example 첫 token을 예측하면 cross-example leakage다. labels가 올바르게 운반됐다는 시험만으로 attention 격리까지 증명되지는 않는다.
@@ -2479,6 +2511,4 @@ classifier의 stratified train/test split seed와 corpus interleave seed를 같�
 
 재개 시험은 K번째 draw 직후 process를 끊고 다음 source index, UUID, tokenizer output, PackID와 source별 누적 네 분모를 uninterrupted oracle과 비교한다. `all_exhausted`에서 끝난 source를 되감는 시점, corrupt row skip, quarantine 증가와 curriculum weight update가 같은 boundary에서 적용되는지도 확인한다. 최종 비율만 비슷한 것은 sequence parity가 아니며, seed만 같은 것은 state parity가 아니다.
 
-[SourceRow에서 committed UpdateID까지](../labs/06-source-to-commit-golden-lab.md)에서는 두 segment의 첫 target mask를 0으로 두고 pack별 denominator 4, global denominator 8을 독립 계산한다. segment 경계를 하나만 바꿨을 때 pack→rank→update digest가 연쇄 변경되는 모습을 보면 configured sample count와 committed target 질량을 같은 값으로 보고할 수 없는 이유가 선명해진다.
-
-[설정한 mixture가 실제 손실 질량이 되기까지](../labs/06-mixture-realized-mass-lab.md)에서는 같은 문제를 source 축으로 펼친다. 세 source가 각 두 문서를 내더라도 입력 토큰은 12/18/14, 유효 타깃은 12/12/3, 커밋 손실 질량은 8/12/0이 된다. source 소진 뒤 확률 재정규화와 curriculum 경계의 exact resume까지 정적 oracle로 검산한다.
+분모와 source 질량은 6.0의 `B-006-0001` 원장을 재사용한다. [SourceRow→UpdateID](../labs/06-source-to-commit-golden-lab.md)는 pack/global denominator를, [mixture realized-mass](../labs/06-mixture-realized-mass-lab.md)는 source별 input·valid·commit 질량과 exhaustion 뒤 exact resume를 검산한다.

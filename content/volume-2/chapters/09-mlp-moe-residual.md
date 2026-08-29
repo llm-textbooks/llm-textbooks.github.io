@@ -2196,3 +2196,32 @@ Mixtral의 고정 구현은 hidden `[N,D]`와 router weight `[E,D]`로 logits `[
 이 정상 경로만으로 capacity와 expert parallelism은 닫히지 않는다. all-token-one-expert collapse, exact router tie, NaN/Inf, zero-token expert와 capacity overflow를 작은 fixture에 넣는다. token conservation `ΣM_e=Nk`, combine weight sum, drop reason과 deterministic tie-break를 검사한다. no-drop은 손실 없음과 공짜가 같은 말이 아니다. padding·all-to-all tail과 expert memory가 늘 수 있다.
 
 load-balance aux loss와 router z-loss는 main LM loss와 분모·계수가 다른 목적함수다. 각각 gradient-check하고 padding과 rank별 valid-token 불균형을 넣는다. shared expert는 모든 token이 통과하는 dense-like 경로와 routed 경로의 출력·parameter owner를 분리한다. EP에서는 rank별 split size, expert owner, dispatch permutation과 reverse combine을 reference와 맞춘다. DeepSeek·Qwen·OLMo·Megatron의 group routing, shared expert, no-drop과 precision 정책을 Mixtral 구현에서 자동으로 일반화하지 않는다.
+
+## 9.17 GR-001 규범 trace — residual에서 routed gradient까지
+
+앞 절의 dense·MoE 변형은 이 trace의 branch로 묶는다. `GR-001`의 GoldenBatch `B117`에서 펼친 token 수를 `N=8`, hidden width를 `D=4096`, intermediate width를 `H=14336`, expert 수를 `E=8`, top-k를 `k=2`로 고정한다. 이 좌표를 벗어난 일반론은 trace의 설정을 바꾼 별 실험이다.
+
+```mermaid
+flowchart LR
+    X[QT2-12 residual<br/>X: 8×4096 bf16] --> R[router linear<br/>8×8 fp32 logits]
+    R --> T[top-k<br/>index,weight: 8×2]
+    T --> D[dispatch permutation<br/>16 token-expert rows]
+    D --> E[expert gate/up/down]
+    E --> C[weighted combine<br/>8×4096]
+    C --> Y[QT2-17 residual add]
+    Y --> B[backward: expert/router grads]
+    B --> M[10장 model-loss trace]
+```
+
+고정 Transformers revision `550d7b3834670483a4df436541272c055dc364bf`에서 [`Qwen3MoeSparseMoeBlock.forward`](https://github.com/huggingface/transformers/blob/550d7b3834670483a4df436541272c055dc364bf/src/transformers/models/qwen3_moe/modeling_qwen3_moe.py#L210-L290)는 hidden→router logits→top-k weight/index→expert combine의 실제 owner다. 수학의 `r=XW_r^T`, `(p,i)=TopK(softmax(r),k)`, `Y_t=Σ_j p_{tj}E_{i_{tj}}(X_t)`는 각각 이 함수의 router projection, softmax/top-k, expert 호출과 `index_add` 계열 combine에 대응한다. 논문의 식을 source 호출과 연결하지 않은 별도 설명은 이 규범 trace로 합친다.
+
+| state | shape·dtype | logical bytes | mutation owner·oracle |
+|---|---|---:|---|
+| input/residual `X` | `[8,4096]` bf16 | 64 KiB | 이전 attention; branch 전 checksum 불변 |
+| router weight | `[8,4096]` bf16 | 64 KiB | optimizer parameter; logits FP32 oracle |
+| router logits | `[8,8]` fp32 | 256 B | router linear; row별 finite |
+| top-k index/weight | `[8,2]` int64/fp32 | 192 B | routing; weight row sum=1 |
+| dispatched rows | `[16,4096]` bf16 | 128 KiB | permutation; `Σ_e M_e=16` |
+| combined output | `[8,4096]` bf16 | 64 KiB | reverse permutation; reference scatter와 일치 |
+
+9.12의 router 반례를 이 trace에 재등록하지 않는다. `router tie→top-k`, `expert collapse→count`, `reverse permutation→combine`의 최초 차이만 `GR-001` ledger에 연결하고 [expert imbalance](../playbooks/07-expert-imbalance.md)·[OOM](../playbooks/05-oom.md) 플레이북을 재사용한다. 10장에는 `QT2-12→17` digest, assignment, aux-loss 분모와 backward gradient를 전달한다.

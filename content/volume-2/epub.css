@@ -1,0 +1,188 @@
+@charset "UTF-8";
+
+body {
+  font-family: serif;
+  line-height: 1.65;
+  margin: 5%;
+  word-break: keep-all;
+}
+
+h1, h2, h3 {
+  line-height: 1.3;
+  page-break-after: avoid;
+}
+
+pre {
+  white-space: pre-wrap;
+  background: #f3f4f6;
+  border: 1px solid #d1d5db;
+  padding: 0.8em;
+  font-size: 0.85em;
+}
+
+.math-block {
+  margin: 1em 0;
+  overflow-x: auto;
+}
+
+.math-block code {
+  display: block;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.inline-diagram {
+  margin: 1.25em 0;
+  break-inside: avoid;
+}
+
+.inline-diagram img {
+  display: block;
+  width: 100%;
+  max-height: 75vh;
+  object-fit: contain;
+}
+
+.inline-diagram figcaption {
+  margin-top: 0.4em;
+  color: #555;
+  font-size: 0.9em;
+}
+
+.diagram-fallback {
+  margin-top: 0.5em;
+  font-size: 0.82em;
+}
+
+code {
+  font-family: monospace;
+}
+
+.claim-links {
+  border-left: 0.22rem solid #607d8b;
+  color: #455a64;
+  font-size: 0.82em;
+  margin: 0.5em 0 1.1em;
+  padding: 0.25em 0.65em;
+}
+
+.claim-entry {
+  border-top: 1px solid #cfd8dc;
+  margin-top: 1.5em;
+  padding-top: 0.5em;
+}
+
+.claim-entry dt {
+  font-weight: 700;
+  margin-top: 0.5em;
+}
+
+.claim-entry dd {
+  overflow-wrap: anywhere;
+}
+
+table {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  border-collapse: collapse;
+  margin: 1em 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  font-size: 0.88em;
+}
+
+th, td {
+  border: 1px solid #9ca3af;
+  padding: 0.4em;
+  vertical-align: top;
+  overflow-wrap: anywhere;
+}
+
+thead {
+  display: table-header-group;
+}
+
+blockquote {
+  border-left: 0.25em solid #9ca3af;
+  margin-left: 0;
+  padding-left: 1em;
+  color: #374151;
+}
+
+figure.diagram {
+  break-inside: avoid;
+  margin: 1.5em auto;
+  max-width: 100%;
+  text-align: center;
+}
+
+figure.diagram img {
+  display: block;
+  height: auto;
+  margin: 0 auto;
+  max-width: 100%;
+}
+
+figure.diagram figcaption {
+  color: #374151;
+  font-size: 0.9em;
+  margin-top: 0.6em;
+  text-align: left;
+}
+
+.draft-note {
+  color: #7c2d12;
+}
+
+.part-opener {
+  break-after: page;
+  max-width: 42rem;
+  margin: 0 auto;
+}
+
+.part-kicker {
+  color: #52606d;
+  font-size: 0.82em;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  margin-bottom: 0.35em;
+}
+
+.part-opener > h1 {
+  border-bottom: 0.18rem solid #334e68;
+  margin-top: 0;
+  padding-bottom: 0.45em;
+}
+
+.part-opener section {
+  margin: 1.35em 0;
+}
+
+.part-opener h2 {
+  color: #243b53;
+  font-size: 1.12em;
+  margin-bottom: 0.45em;
+}
+
+.part-routes {
+  border-left: 0.25rem solid #9fb3c8;
+  padding-left: 0.9em;
+}
+
+.part-route {
+  break-inside: avoid;
+  margin: 0.8em 0 !important;
+}
+
+.part-route h3 {
+  font-size: 1em;
+  margin-bottom: 0.25em;
+}
+
+.part-exit-artifact,
+.part-handoff {
+  background: #f0f4f8;
+  border-radius: 0.25rem;
+  padding: 0.75em 0.9em;
+}

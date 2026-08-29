@@ -2511,3 +2511,33 @@ tied weights면 `lm_head.weight`와 `embed_tokens.weight`는 같은 `QT2-P-embed
 GoldenBatch는 `QT2-00→01→04→05/06/07→10→12→15→17→18→19→21` 순서로 forward를, 역순으로 parameter gradient를 비교한다. token/template면 `00`, embedding scale이면 `01`, epsilon·accumulator면 `04`, head/config·RoPE면 `05–10`, mask/backend면 `10`, activation이면 `15`, tying·slice면 `19`, shift·denominator면 `20–21`이 최초 차이다. Gemma scale을 잘못 이식하면 `01`, MLX cache offset이 틀리면 `08/09`, labels를 이중 shift하면 `19`까지 합의하고 `20`에서 갈라진다.
 
 이 walkthrough는 모델 실행 결과가 아니라 pinned Transformers·MLX-LM 소스의 정적 값 흐름과 실행 가능한 실패 oracle이다. 실제 검증 때 TensorID마다 dtype·stride·device·RNG·cache·parameter generation을 채우며, kernel layout과 비공개 production recipe는 관찰 없이 추정하지 않는다.
+
+## 10.16 GR-001 규범 trace — 실제 모델을 loss와 parameter graph로 닫는다
+
+9장의 MoE branch를 포함한 layer output을 모델 전체의 한 forward/backward에 넣는다. `GR-001/B117`의 규범 순서는 `input_ids→embedding→decoder layers→final norm→LM head→shifted loss→backward`다. 모델 family별 차이는 이 순서의 각 node가 소비하는 config와 parameter mapping으로 기록한다.
+
+```mermaid
+flowchart LR
+    I[B117 input_ids<br/>2×4 int64] --> E[embed_tokens<br/>2×4×4096 bf16]
+    E --> L[decoder layer 0..L-1<br/>attention + 9장 MLP/MoE]
+    L --> N[final RMSNorm]
+    N --> H[lm_head<br/>2×4×V fp32 logits]
+    H --> CE[shift + CE numerator/denominator]
+    CE --> G[autograd gradients]
+    G --> O[11장 optimizer parameter groups]
+```
+
+Transformers 고정 revision의 [`Qwen3Model.forward`](https://github.com/huggingface/transformers/blob/550d7b3834670483a4df436541272c055dc364bf/src/transformers/models/qwen3/modeling_qwen3.py#L448-L507)는 embedding, mask/cache position과 layer loop의 owner이고, [`Qwen3DecoderLayer.forward`](https://github.com/huggingface/transformers/blob/550d7b3834670483a4df436541272c055dc364bf/src/transformers/models/qwen3/modeling_qwen3.py#L367-L410)는 attention·MLP residual mutation을 소유한다. [`Qwen3ForCausalLM.forward`](https://github.com/huggingface/transformers/blob/550d7b3834670483a4df436541272c055dc364bf/src/transformers/models/qwen3/modeling_qwen3.py#L448-L507)는 model output을 vocabulary projection과 causal loss로 연결한다. 동일 줄 범위에 wrapper가 겹치면 고정 revision의 class symbol과 caller를 함께 재검색한다.
+
+수학-코드 mapping은 `H^0=Embed(ids)`, `H^{l+1}=Layer_l(H^l,mask,pos)`, `Z=H^L W_vocab^T`, `L=Σ_i m_i[-log softmax(Z_i)_{y_i}]/Σ_i m_i`다. source에서 각각 embedding lookup, decoder loop, LM head와 loss function을 찾아 `QT2-01`, `QT2-17`, `QT2-19`, `QT2-21`로 기록한다.
+
+| object | shape·dtype | bytes 식 | parameter/state owner |
+|---|---|---:|---|
+| input IDs | `[2,4]` int64 | 64 B | tokenizer/data bundle |
+| hidden | `[2,4,4096]` bf16 | 64 KiB | current layer |
+| vocab weight | `[V,4096]` bf16 | `V×4096×2` | embed/head alias 여부 포함 |
+| logits | `[2,4,V]` fp32 | `8×V×4` | LM head/loss boundary |
+| valid-token mask | `[2,3]` bool | 6 B logical | collator/loss denominator |
+| gradient | parameter와 동일 shape | dtype별 산정 | autograd→11장 optimizer |
+
+7–9장에서 이미 정의한 mutation을 중복 실행표로 만들지 않는다. 이 장은 그 결과를 `QT2-*` 순서로 합성하고 [단일 GPU golden run](../labs/28-single-gpu-golden-lab.md)에서 model-level 회귀만 추가한다. 11장에는 canonical ParameterID, alias set, gradient shape/dtype, loss numerator/denominator와 first-divergence tensor를 넘긴다.

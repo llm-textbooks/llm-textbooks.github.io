@@ -6,6 +6,24 @@
 
 > `scalar loss` → `autograd graph` → `saved tensor와 version` → `local VJP` → `leaf .grad 누적` → `DDP reduction` → `unscale·finite 합의` → `global clip` → `optimizer commit`
 
+`GR-001`에서는 1장의 `LossID=L0`가 이 사슬을 통과해 `BackwardID=G0`와 `UpdateID=U0`를 만든다. 다음 그림의 점선은 분산 실행에서만 추가되는 경계다. 단일 GPU 기준선과 분산 실행을 한 그림에 섞어 동일한 것으로 취급하지 않는다.
+
+```mermaid
+flowchart LR
+  L[LossID L0<br/>FP32 scalar] --> AG[autograd graph<br/>saved tensors]
+  AG --> V[local VJP]
+  V --> G[leaf .grad<br/>microbatch 누적]
+  G -. DDP/FSDP .-> AR[reduce-scatter/all-reduce]
+  AR --> US[unscale·finite 합의]
+  G --> US
+  US --> CL[global norm clip]
+  CL --> C{optimizer commit?}
+  C -->|finite| U[UpdateID U0<br/>parameter+state+clock]
+  C -->|overflow| S[skip<br/>UpdateID 발급 안 함]
+```
+
+이 시각화의 핵심은 backward 완료와 update commit을 분리하는 데 있다. `.grad`가 존재해도 overflow 합의나 accumulation 경계 때문에 parameter가 바뀌지 않을 수 있다. 따라서 `U0`는 `parameter_before`, `parameter_after`, optimizer step counter와 scaler 상태가 함께 변한 경우에만 발급한다.
+
 화살표마다 값의 **단위와 소유자**가 바뀐다. loss는 token objective의 scalar이고, graph node가 운반하는 것은 upstream adjoint이며, leaf `.grad`는 여러 경로와 microbatch의 기여를 담는 mutable buffer다. DDP를 지나면 rank-local 기여가 collective 계약에 따라 합쳐지고, unscale 뒤에야 optimizer가 읽을 실제 단위가 된다. clip은 그 vector를 제약 집합으로 옮기며, optimizer step은 gradient뿐 아니라 parameter와 moment와 step counter를 함께 바꾸는 commit이다. 최종 loss가 같다는 사실만으로 이 중간 상태들이 같다고 추론하지 않는다.
 
 | 경계 | 들어오는 상태 | 나가는 상태 | 이 경계에서 처음 드러나는 오류 |
@@ -2351,10 +2369,8 @@ gradient clipping은 accumulation이 끝난 뒤 한 번 적용해야 큰 batch�
 
 expected-failure에는 microbatch mean의 단순 평균, 중간 optimizer step, microbatch별 clipping, 마지막 no-sync 누락, denominator world-size 중복 보정을 넣는다. 다섯 오류가 서로 다른 gate에서 검출되어야 한다. 그래야 accumulation factor를 바꿀 때 throughput만 달라지고 학습 의미는 보존된다는 주장을 할 수 있다.
 
-실제 리뷰에서는 accumulation factor만 기록하지 말고 `micro_batch_size`, sequence-length distribution, valid-token count, world size, reducer 평균 규칙과 committed update당 sample/token 수를 함께 적는다. 같은 effective batch라는 이름 아래 서로 다른 token objective가 숨을 수 있기 때문이다. OOM 회피를 위해 microbatch를 줄였을 때 scheduler와 warmup이 sample clock인지 token clock인지도 다시 계산한다. 처리량 개선과 수렴 변화가 동시에 보이면 먼저 이 clock과 denominator가 보존되었는지 확인한 뒤 kernel 성능을 해석한다.
+accumulation 비교는 앞의 UpdateManifest에 `micro_batch_size`, valid-token count, world size, reducer 규칙과 committed-update token 수를 한 행으로 기록한다. OOM 때문에 microbatch를 바꿨다면 scheduler의 sample/token clock과 denominator가 먼저 보존됐는지 확인한다.
 
 resume이 accumulation window 중간을 허용한다면 partial gradient, 이미 소비한 microbatch IDs, numerator/count, no-sync/reducer state와 RNG를 모두 저장해야 한다. 대부분의 시스템은 이 복잡성을 피하려고 committed update 경계에서만 checkpoint한다. 어느 정책이든 장애 직후 sample을 중복 또는 누락하는지 ledger로 검증하며, loss 곡선이 매끄럽다는 이유로 partial-window 복구를 정상 판정하지 않는다.
-
-독립 검토자는 window 경계를 하나씩 이동한 재시작 fixture로 같은 다음 parameter delta와 sample lineage가 복원되는지 확인한다. 이 시험이 accumulation의 운영 의미를 닫는다.
 
 결국 역전파의 산출물은 `.grad` tensor 하나가 아니라 손실에서 committed update까지 이어지는 사건열이다. 최초 차이가 loss·VJP·누적·collective·unscale·clip 가운데 어디서 생겼는지 말할 수 있어야 optimizer 설정을 바꿀 근거도 생긴다. 3장에서는 이 계약을 작은 GPT의 실제 batch와 checkpoint에 대입해, 한 update를 정방향으로 재생하고 장애 지점에서 역방향으로 추적한다.

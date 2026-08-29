@@ -1,5 +1,7 @@
 # 3장. 작은 GPT를 끝까지 학습한다
 
+이 장은 책 전체의 기준 실행 `GR-001`을 처음으로 닫는 곳이다. 1장의 `LossID`와 2장의 `BackwardID`를 실제 loop에 넣어 `UpdateID`와 `CheckpointID`를 만들고, 중단 없는 다음 step과 fresh-process resume의 다음 step을 비교한다. 뒤의 모든 최적화·분산·파인튜닝 기법은 이 작은 실행에서 어느 상태가 추가되거나 갈라지는지로 설명한다.
+
 ## 재개 가능한 루프는 무엇을 기억해야 하는가
 
 작은 예제는 checkpoint 파일을 읽으면 곧바로 “resume”했다고 말하기 쉽다. nanoGPT의 고정 소스를 보면 실제 inventory가 선명하다. model, optimizer, model arguments, `iter_num`, `best_val_loss`와 config를 저장하고, 재개 때 model과 optimizer를 복원한다. 반면 Python·NumPy·CPU/CUDA RNG, 데이터 sampler cursor, GradScaler와 독립 scheduler state는 그 묶음에 없다. 따라서 이 예제는 학습을 다시 **시작할 수 있음**을 보여 주지만 중단하지 않은 실행과 다음 sample·다음 update가 같다는 뜻의 exact replay를 약속하지 않는다.
@@ -2242,12 +2244,10 @@ TorchTitan의 직접 테스트는 random processor와 prefetch 한 batch가 있�
 
 전체 학습 oracle은 여기서 더 내려간다. 동일 synthetic token stream으로 K update를 연속 실행한 reference와 K-1 뒤 checkpoint·fresh process·1 update를 비교한다. 최초로 다른 SampleID와 token, packed mask, logits, loss numerator/count, 선택 parameter gradient, optimizer delta, scheduler·scaler·token clock 순으로 멈춰 기록한다. 최종 weight만 비교하면 앞 단계의 오차가 상쇄되거나 뒤늦게 커지는 지점을 잃는다.
 
-상태표의 `saved/restored`에는 Python·NumPy·torch CPU·각 CUDA device RNG, sampler와 worker seed·consumed cursor, prefetch/packing buffer, model, optimizer, scheduler, GradScaler와 accumulation phase가 들어간다. compile graph·guard, kernel/autotune·allocator cache는 `derived`로 다시 만든다. 열린 PP microbatch, rank마다 다른 checkpoint cut, unknown schema와 지원하지 않는 elastic world size는 `rejected`다. 캐시를 저장하지 않는 것과 수치 상태를 잃어버리는 것은 같은 누락이 아니다.
+상태 분류는 3.4의 checkpoint 표를 재사용한다. RNG·cursor·prefetch/packing buffer·model·optimizer·scheduler·GradScaler·accumulation phase는 `saved/restored`, compile graph·autotune·allocator cache는 `derived`, 열린 PP microbatch와 rank마다 다른 cut은 `rejected`다.
 
 ### Trainer의 microstep과 Accelerate의 update 경계를 함께 읽는다
 
 `Trainer.training_step`은 batch 하나의 loss를 얻어 backward 경계로 넘기지만, 그 호출 한 번이 곧 optimizer update 한 번이라는 뜻은 아니다. accumulation context가 gradient synchronization 여부를 결정하고 실제 optimizer step cadence에 scheduler가 맞아야 한다. custom `compute_loss_func`, label smoothing과 유효 item 수 전달은 서로 다른 loss 분기이므로 같은 accumulation 값을 썼다는 이유만으로 gradient scale이 같다고 가정하지 않는다.
 
-고정 시험은 accumulation 1과 N에서 첫 loss, gradient norm, optimizer·scheduler counter를 비교한다. 마지막 불완전 accumulation window도 따로 넣는다. scaler overflow를 주입했을 때 optimizer step이 skip되면 scheduler와 update counter도 어떤 계약으로 움직이는지 기록한다. 이 최초 차이 표가 단순한 최종 loss 비교보다 빠르게 책임 레이어를 가른다.
-
-이 장의 loop를 데이터 identity까지 확장하는 최소 oracle은 [SourceRow에서 committed UpdateID까지](../labs/06-source-to-commit-golden-lab.md)에서 검산한다. `batch`라는 익명 tensor 대신 SourceRowID·PackID·microbatch owner·UpdateID를 찍으면 첫 loss 이전의 데이터 오류와 step 이후의 commit 오류를 같은 표에서 가를 수 있다.
+accumulation 1과 N, 불완전 마지막 window, scaler overflow를 같은 사건표에서 비교한다. 데이터 identity까지의 최소 oracle은 [SourceRow에서 committed UpdateID까지](../labs/06-source-to-commit-golden-lab.md)의 SourceRowID·PackID·microbatch owner·UpdateID를 재사용한다.

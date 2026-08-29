@@ -4,6 +4,41 @@
 
 SFT의 실패는 대개 “학습이 안 됐다”가 아니라 다른 token에 loss를 걸었거나, 다른 base에 adapter를 붙였거나, merge 뒤 logits가 달라진 사건이다. 이 장에서는 한 대화 row가 adapter와 배포 artifact가 될 때까지 같은 식별자를 유지한다.
 
+## GR-001 수직 추적: 대화 한 행이 LoRA update가 되기까지
+
+이 장의 기준 표본은 `GR-001`이다. user token 네 개와 assistant token 세 개를 가진 작은 대화이며, batch size 1, LoRA rank 2, BF16 compute를 사용한다고 하자. 실제 문장보다 중요한 것은 **동일한 ID가 어느 함수에서도 사라지지 않는가**다. 이후 옵션은 먼저 이 경로에서 달라지는 한 칸을 지목한 뒤 읽는다.
+
+```mermaid
+flowchart LR
+  R[GR-001 raw messages] --> T[chat template<br/>RenderedBytes]
+  T --> K[tokenizer<br/>input_ids 1×T]
+  K --> C[TRL collator<br/>labels + masks]
+  C --> F[base + PEFT LoRA<br/>logits 1×T×V]
+  F --> L[shifted CE<br/>sum / valid targets]
+  L --> B[backward<br/>A.grad + B.grad]
+  B --> O[optimizer step<br/>UpdateID SFT-001]
+  O --> Q[adapter checkpoint]
+  Q --> E[reload + golden eval]
+```
+
+원전은 움직이는 `main`이 아니라 snapshot으로 고정한다. PEFT의 진입점은 [`get_peft_model`](https://github.com/huggingface/peft/blob/1feedf1a4b96c86e2efcdd28b84ce9b949e3732c/src/peft/mapping_func.py#L105)이고, LoRA tensor 생성은 [`LoraLayer.update_layer`](https://github.com/huggingface/peft/blob/1feedf1a4b96c86e2efcdd28b84ce9b949e3732c/src/peft/tuners/lora/layer.py#L108-L278)에서 확인한다. TRL에서는 [`DataCollatorForLanguageModeling`](https://github.com/huggingface/trl/blob/a7be897f5c8d7b52161f9f8a47d8e6242456b898/trl/trainer/sft_trainer.py#L394-L557), [`SFTTrainer`](https://github.com/huggingface/trl/blob/a7be897f5c8d7b52161f9f8a47d8e6242456b898/trl/trainer/sft_trainer.py#L790), [`compute_loss`](https://github.com/huggingface/trl/blob/a7be897f5c8d7b52161f9f8a47d8e6242456b898/trl/trainer/sft_trainer.py#L1704-L1737)을 같은 revision에서 읽는다. 행 번호는 탐색 좌표이고 계약은 commit·path·symbol로 고정한다.
+
+| 경계 | tensor·shape | dtype·device | 분모와 읽는 상태 | 쓰는 상태·관측값 |
+|---|---|---|---|---|
+| template→tokenizer | `input_ids[1,T]` | `int64`, CPU | template·tokenizer revision | token checksum, role span |
+| collator | `labels[1,T]`, `attention_mask[1,T]` | `int64`, CPU→GPU | assistant span, truncation | shifted valid-target 수 `D` |
+| LoRA forward | `X[1,T,d]`, `A[r,d]`, `B[d,r]`, logits `[1,T,V]` | BF16, CUDA; A/B trainable | frozen base digest, active adapter | base 항과 `sBA` 항의 norm |
+| causal loss | `logits[:,:-1,:]`, `labels[:,1:]` | FP32 reduction | `labels!=-100`인 위치만 `D`에 포함 | numerator, `D`, scalar loss |
+| backward | `A.grad[r,d]`, `B.grad[d,r]` | train dtype, CUDA | loss scale, accumulation phase | finite flag, grad checksum |
+| optimizer | A/B와 moment | 보통 FP32 state, CUDA | LR, clip, 이전 moment | delta와 committed `SFT-001` |
+| save/reload | adapter state dict | 파일 dtype, CPU storage | base ID, PEFT config | key/byte digest, reload logits |
+
+수식과 코드는 일대일로 붙는다. collator의 `labels`가 $m_{bt}$를 정하고 causal shift가 $x_{t+1}$과 `logits[:,t]`를 맞춘다. `compute_loss`의 reduction이 $D=\sum m$을 정한다. PEFT layer는 $W_{\mathrm{eff}}=W+sBA$를 계산하고 autograd는 loss에서 A/B까지의 경로만 연다. optimizer가 A/B와 moment를 갱신해야 비로소 `SFT-001`이 commit된다.
+
+반증 실험은 네 개다. assistant mask를 모두 `-100`으로 바꾸면 update를 거부해야 한다. target 한 token을 바꾸면 numerator와 A/B gradient가 함께 달라져야 한다. optimizer group에서 B를 빼면 delta manifest가 실패해야 한다. adapter를 새 process에서 불러온 logits는 허용 오차 안에 들어야 한다. [SFT adapter golden lab](../labs/18-sft-adapter-golden-lab.md)에서 injection·gradient·merge parity를, [단일 GPU golden lab](../labs/28-single-gpu-golden-lab.md)에서 update·checkpoint·resume을 검산한다.
+
+이 수직 추적이 주 서사다. 뒤에서 반복되는 mask·LoRA·QLoRA·merge 설명은 각각 데이터, parameter, storage/compute, artifact 경계의 확장으로 합쳐 읽는다. 동일 정의를 다시 만날 때는 `GR-001` 표에서 실제로 달라지는 행만 추가한다.
+
 ## 18.1 데이터 한 행에서 SFT loss까지
 
 SFT의 첫 번째 모델은 neural network가 아니라 데이터 protocol이다. 한 행이 chat template와 tokenizer를 지나 token·label mask가 되고, 그중 어느 위치가 loss 분모에 들어가는지 고정한 뒤에야 full fine-tuning과 adapter 방식을 공정하게 비교할 수 있다.
@@ -630,34 +665,6 @@ dataset row 삭제나 base license revoke가 생기면 contribution index와 art
 adapter는 실행 코드가 아니어도 model behavior와 공급망 artifact다. 출처 불명 adapter를 load하지 않고 tensor manifest, parent BaseID, signature와 허용 target를 검증한다. unexpected key를 무시하는 permissive loader는 격리 환경에서 검사한 뒤 승인한다.
 
 multi-tenant service에는 AdapterID 접근 정책과 cache/telemetry isolation이 필요하다. tenant A가 B adapter를 이름만 추측해 요청하거나 cache hit로 영향을 받지 않아야 한다. revoke는 새 요청을 막고 active lease가 끝난 뒤 slot/cache를 제거하며 event를 남긴다.
-
-### 18.5.3 release evidence checklist
-
-dataset revision과 split/dedup evidence가 있어야 한다. GoldenBatch의 rendered/token/mask/count가 사람이 검토돼야 한다. source commit과 selected injection/quant/loader branch가 연결돼야 한다. trainable set은 기대 target와 같고 base freeze가 검증돼야 한다.
-
-첫-step과 resume next-step bundle이 있어야 한다. runtime adapter save/load와 merge parity가 tolerance를 만족해야 한다. quantized child는 layer/logit/task error budget을 통과해야 한다. raw-message API가 direct engine과 token/stop/artifact identity에서 맞아야 한다.
-
-partial checkpoint, wrong base, wrong template, partial merge, slot reuse 장애가 forbidden state를 만들지 않아야 한다. release card와 canonical DAG가 같은 parent/options를 말해야 한다. 미실행 backend와 알려진 recovery 한계가 공개돼야 한다.
-
-이 checklist를 통과하면 adapter가 “학습됐다”를 넘어 정확히 어느 data와 base에서 어떤 변환을 거쳐 어느 API가 제공하는지 설명할 수 있다. preference 장은 이 immutable PolicyID와 template에서 chosen/rejected response를 만들 수 있다.
-
-**adapter 계보 구두 검산**
-
-인수자는 raw message 하나를 골라 template bytes, token IDs, labels mask와 valid denominator를 설명한다. 그 token이 adapter target layer를 지날 때 base output과 scaled `BAx`가 어떻게 합쳐지고, optimizer가 어느 tensor만 갱신하는지 manifest에서 찾는다. QLoRA라면 base code, quant scale, dequantized compute dtype과 adapter dtype을 각각 말해야 한다.
-
-다음으로 저장 adapter가 어떤 BaseID에 붙고 merge가 어떤 dtype·order로 materialize됐으며 quantizer가 어느 parent를 압축했는지 DAG에서 추적한다. API request의 AdapterID와 cache key, loaded artifact hash가 같은 chain을 가리켜야 한다. 파일 경로나 model 이름만으로 답하면 identity 검산을 통과하지 못한다.
-
-마지막 질문은 mismatch를 어디서 자르는가다. base→runtime, runtime→merged, merged→quantized, loader→API edge 가운데 최초 실패를 찾아 parent는 보존하고 child release만 차단한다. quantization error를 merge bug로, template mismatch를 adapter 품질로 처리하지 않는다. 각 edge의 fixture와 tolerance가 이 분리를 가능하게 한다.
-
-운영자는 revoke와 rollback도 같은 DAG에서 수행한다. active lease를 종료하고 cache를 비운 뒤 마지막 정상 parent로 routing한다. 학습 재개가 필요하면 inference export가 아니라 optimizer checkpoint를 선택한다. resume 첫 GoldenBatch와 delta가 맞아야 재개가 완료된다.
-
-이 네 설명이 source map, artifact와 실행 report로 뒷받침될 때만 “파인튜닝 모델을 배포했다”는 문장이 의미를 갖는다. 그 전에는 학습 파일과 서비스 endpoint가 우연히 같은 이름을 공유할 뿐이다.
-
-**최소 제출 파일**
-
-디버깅 좌표는 설정 이름이 아니라 선택된 함수에 고정한다. adapter 주입은 `sources/training-peft/src/peft/mapping_func.py:31`에서 시작해 모델 type과 task type에 따라 갈라지는 branch를 확인하고, LoRA layer의 실제 forward는 `sources/training-peft/src/peft/tuners/lora/layer.py:699` 부근에서 base 결과와 adapter 경로가 합쳐지는 지점을 확인한다. merge 디버깅은 `sources/training-peft/src/peft/tuners/lora/layer.py:555` 부근의 dtype·safe merge 검사까지 이어간다. 이 세 좌표에서 골든 입력의 base, adapter, merged 출력을 비교하면 “학습 실패”와 “artifact 변환 실패”를 분리할 수 있다.
-
-최종 진단 체크리스트에는 target module별 trainable parameter 수, 첫 optimizer step 전후 adapter norm, response mask 유효 token 수, merge 전후 최대 logit 오차를 남긴다. 최초 불일치가 collator면 데이터 경로를, unmerged forward면 학습 경로를, merge 뒤면 변환 경로를 조사한다. 이 순서가 없는 디버깅은 같은 현상을 여러 층에서 반복 조사하게 만든다.
 
 ## 18.6 Unsloth·Heretic·Axolotl을 code path로 비교한다
 

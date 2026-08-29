@@ -448,213 +448,9 @@ cluster 교체나 framework upgrade도 optimizer 실험이다. 동일 이름의 
 
 마지막 과제는 동일 gradient snapshot으로 AdamW와 hybrid Muon bundle을 만드는 것이다. control group delta, matrix update spectrum, state bytes, profiler trace, resume 첫 delta를 제출한다. 결과가 어느 optimizer가 더 좋다는 결론을 내지 못해도 괜찮다. 입력과 상태, 실패 범위를 정확히 닫았다면 실습의 correctness 목표는 달성한 것이다.
 
-## 11.8 optimizer 변경을 RFC와 release gate로 승인한다
+## 11.8 optimizer 변경의 단일 승인 규범
 
-한 줄짜리 optimizer 교체는 checkpoint schema, distributed ownership, 수치 기준선과 rollback 조건을 함께 바꾸는 변경이다.
-
-### 변경 요청을 검증 가능한 질문으로 바꾼다
-
-사례의 요청은 “AdamW를 hybrid Muon으로 바꾸면 더 빠르게 수렴하는가”다. 이 질문은 아직 실행할 수 없다. 빠르다는 말이 token당 validation 개선인지 wall-clock 개선인지, 같은 GPU 메모리에서 더 큰 batch를 쓰는 효과까지 포함하는지 정하지 않았기 때문이다. 승인 문서는 correctness, token efficiency, time efficiency, memory feasibility를 네 개의 독립 endpoint로 만든다.
-
-correctness endpoint는 저장 gradient에 대한 one-step reference, checkpoint resume의 다음 step, single-rank와 distributed logical delta다. token efficiency는 사전 정의한 validation loss에 도달하는 consumed valid token, time efficiency는 같은 지점까지 wall time이다. memory feasibility는 steady-state와 checkpoint overlap peak가 장비 한도 아래인지다. 한 endpoint가 좋아졌다고 다른 실패를 상쇄하지 않는다.
-
-workload는 decoder 12 layer, hidden 768인 공개 가능한 소형 configuration으로 고정한다고 가정한다. data split, tokenizer, sequence length mixture, packed batch, initialization seed를 manifest에 넣는다. 실제 실행이 없다면 이 configuration은 제안된 fixture로 남는다. 예시 수치와 실제 실행 관측을 명확히 구분하고, 독자가 자신의 환경에서 직접 측정값을 채울 result column을 둔다.
-
-### logical parameter inventory를 먼저 확정한다
-
-모델 wrapper를 적용하기 전 `named_modules`와 `named_parameters`를 순회해 logical table을 만든다. 한 행은 name, parent module type, semantic role, shape, numel, tied storage, trainable flag다. attention의 q/k/v/o, MLP gate/up/down은 hidden transform 후보이고 embedding, lm head, norm, bias는 auxiliary AdamW 후보다. 2D 여부는 보조 검사일 뿐 최종 role이 아니다.
-
-wrapper 뒤에는 physical table을 만든다. FSDP flatten이 여러 logical parameter를 하나의 storage로 묶었다면 global offset과 owner shard를 연결한다. optimizer가 flat parameter만 본다고 logical role을 잃어서는 안 된다. 서로 다른 optimizer family가 한 flat buffer 안에 섞이면 wrapping 전에 group을 분리하거나 framework가 지원하는 original parameter mode를 선택한다.
-
-partition invariant는 모든 trainable logical numel의 합과 group별 unique numel의 합이 같고 교집합이 없는 것이다. tied tensor는 logical alias와 update owner를 분리한다. frozen parameter는 optimizer에서 빠지지만 base checksum table에는 남는다. code revision이 바뀌어 module 이름이 달라지면 manifest diff가 run 시작 전에 실패한다.
-
-### gradient replay artifact를 만든다
-
-GoldenBatch forward에서 loss는 FP32 numerator와 valid token denominator로 저장한다. backward 직후 AMP unscale을 마치고 clipping 전 gradient를 저장한다. sparse gradient, `None`, zero tensor를 구분한다. 각 tensor는 logical ID, shape, dtype, content hash, norm, min/max, finite count를 가진다. artifact가 크면 immutable shard와 root manifest를 쓴다.
-
-replay loader는 새 model parameter hash가 source snapshot과 맞는지 확인한다. gradient를 name만으로 연결하지 않고 role, shape, parent model digest까지 검증한다. parameter order가 바뀌어도 logical mapping이 맞으면 허용하고, shape가 우연히 같은 다른 layer에는 연결하지 않는다. replay 직전 optimizer state가 fresh인지 checkpoint에서 왔는지도 identity에 포함한다.
-
-FP64 reference는 작은 subset에서 식을 직접 계산한다. 전체 model은 source backend의 single-tensor path를 baseline으로 삼을 수 있지만 baseline도 golden truth라고 절대화하지 않는다. scalar, vector, matrix, zero, missing-gradient fixture에서 독립 식과 맞춘 뒤 대형 replay의 비교 기준으로 승격한다.
-
-**backend parity matrix**
-
-AdamW parity 행은 single tensor, foreach, fused를 나눈다. 열은 parameter delta max/mean error, moment error, step counter, peak memory, kernel count, wall time, graph capture 여부다. dtype은 FP32, BF16 parameter와 FP32 state를 별도 행으로 둔다. tolerance는 dtype과 reduction 경로별로 실행 전에 고정한다.
-
-foreach는 tensor list 단위 연산 때문에 single path와 연산 순서가 다를 수 있다. fused는 bias correction, decay, parameter update를 하나의 kernel에 결합할 수 있다. 작은 round-off 차이는 예상되지만 특정 group만 큰 오차가 나면 unsupported dtype fallback, tensor lr, AMSGrad, capturable 조합을 확인한다. profiler의 kernel 이름과 source dispatch 조건을 함께 저장한다.
-
-CUDA graph 실습은 warmup 뒤 allocation과 pointer가 안정된 상태에서 capture한다. step tensor, lr tensor, gradient address가 replay 사이 고정되는지 확인한다. capturable 옵션을 켰다는 사실만으로 전체 training step이 capture됐다고 하지 않는다. graph break와 host synchronization을 trace하고 captured region의 parameter delta를 eager reference와 비교한다.
-
-**Muon replay를 singular direction으로 읽는다**
-
-hybrid run은 같은 gradient artifact를 읽되 hidden matrix에만 Muon update를 적용한다. 각 matrix에서 gradient SVD 전체를 대형으로 계산하기 어렵다면 작은 layer 전수와 큰 layer randomized top-k를 쓴다. raw gradient와 orthogonalized update의 singular value, Frobenius norm, cosine을 기록한다. 근사 방법과 seed도 report에 남긴다.
-
-Newton–Schulz 각 반복의 입력 norm과 finite, residual을 선택 matrix에서 hook한다. 반복 0은 normalized gradient, 반복 N은 실용 update다. tall/wide transpose, BF16 cast, polynomial coefficient를 source revision과 함께 기록한다. residual 감소가 멈추거나 증가하는 matrix의 aspect ratio와 spectrum을 보존한다.
-
-Muon update 뒤 implementation-specific scale이나 dimension 보정이 붙는지 source에서 확인한다. `UVᵀ`라는 논문 직관과 production function의 최종 delta가 정확히 같다고 가정하지 않는다. momentum buffer가 orthogonalization 전후 어느 지점에 적용되는지, Nesterov가 어떤 tensor를 읽는지 call path로 닫는다.
-
-control group은 hybrid에서도 AdamW다. embedding/head/norm의 state와 delta가 all-AdamW run과 같지 않으면 matrix 알고리즘 효과를 논하기 전에 scheduler, group order, random state, denominator를 고친다. 이 control이 하나의 장기 curve보다 강한 내부 기준선이다.
-
-**memory와 critical path를 동시에 측정한다**
-
-실험은 model load, first state initialization, steady training, evaluation, checkpoint라는 다섯 phase를 분리한다. AdamW state가 첫 gradient에서 lazy 생성되면 step 0 peak가 steady state와 다르다. Muon의 temporary matrix와 distributed gather도 optimizer 구간에만 나타날 수 있다. phase마다 allocated/reserved, host pinned, offload resident를 기록한다.
-
-timeline은 dataloader wait, forward, backward, gradient collective, unscale/clip, optimizer compute, optimizer collective, checkpoint staging을 NVTX range로 나눈다. range가 중첩되면 각 duration 합이 step wall time보다 클 수 있으므로 critical path를 따로 계산한다. kernel 시간 합과 사용자 체감 step time을 혼동하지 않는다.
-
-hybrid가 optimizer state를 줄여 microbatch를 늘릴 수 있다면 두 실험을 분리한다. 첫째 same-workload는 batch와 sequence를 고정해 알고리즘·backend 차이를 본다. 둘째 capacity-realizing은 절감 메모리를 더 큰 microbatch나 context에 사용해 system benefit을 본다. 후자의 validation 차이를 optimizer 단독 효과라고 부르지 않는다.
-
-**1-rank에서 8-rank까지 확대한다**
-
-단일 GPU replay가 통과하면 두 rank에서 동일 global batch를 분할한다. 각 rank local loss sum/count, reduction 뒤 logical gradient, clip coefficient, optimizer delta를 single reference와 비교한다. 다음에는 four/eight rank로 늘리되 world size마다 batch를 늘리는 weak scaling과 global batch를 고정하는 correctness run을 분리한다.
-
-Muon owner 방식에서 rank별 matrix 수와 numel이 불균형하면 optimizer compute straggler가 생긴다. round-robin name 배정과 numel-balanced 배정을 비교하고 owner map을 manifest에 둔다. owner 변경은 checkpoint state mapping을 바꾸므로 성능 옵션이면서 serialization schema다.
-
-collective bytes는 profiler 추정만 쓰지 않고 logical tensor size와 protocol을 계산한 expected 값과 비교한다. gradient all-reduce, optimizer reduce-scatter, parameter all-gather가 중복되는지 call trace에서 확인한다. 같은 tensor가 framework wrapper와 custom optimizer 양쪽에서 reduction되면 delta scale과 network cost가 모두 틀어질 수 있다.
-
-**checkpoint cut 네 가지를 깨뜨린다**
-
-첫 cut은 optimizer step 직전이다. gradient artifact는 있으나 state 변화가 없으므로 재개는 같은 gradient를 한 번 적용해야 한다. 둘째는 owner 일부가 state를 갱신한 직후다. atomic commit이 없다면 찢어진 checkpoint가 생기므로 loader가 거부해야 한다. 셋째는 모든 state 갱신 뒤 parameter all-gather 전이다. logical global parameter가 아직 완성되지 않았음을 marker가 표현한다.
-
-넷째는 immutable shard write 뒤 root manifest publish 전이다. object가 존재해도 discoverable checkpoint가 아니다. catalog는 commit marker가 있는 root만 반환한다. process kill을 각 지점에 주입하고 orphan shard 정리와 마지막 정상 checkpoint 선택을 확인한다.
-
-resume parity는 checkpoint hash load로 끝나지 않는다. 다음 GoldenBatch, loss sum/count, logical gradient, clip, group lr, moment before/after, delta를 uninterrupted control과 비교한다. deterministic kernel 한계가 있으면 bitwise, numerical-equivalent, behaviorally equivalent 등급을 사용한다. 어떤 등급도 data cursor가 다른 것을 숨기지 않는다.
-
-world-size change는 별 변환이다. state shard를 logical tensor로 재조립해 새 owner map으로 나누고, stack order와 padding을 검증한다. 변환 전후 moment root hash 또는 dtype tolerance report를 만든다. 지원하지 않으면 명시적으로 same-world-size만 허용하고 자동 load를 막는다.
-
-**실제 장기 run의 중간 판정**
-
-smoke gate는 100 committed update 동안 finite, update ratio, memory와 throughput을 본다. 이 단계에서 validation 우열을 선언하지 않는다. 다음 pilot는 목표 token의 5–10%를 사용해 lr 안정 범위와 scheduler를 고른다. 선택 기준과 탐색 budget은 AdamW와 Muon에 동일하게 적용하되 lr 숫자는 별도로 허용한다.
-
-full run은 token checkpoint마다 고정 validation을 실행한다. wall-clock curve에는 evaluation/checkpoint 시간을 포함한 end-to-end 버전과 순수 train 버전을 함께 싣는다. tokens-to-target에는 target을 사후 선택하지 않는다. 여러 seed가 가능하면 mean뿐 아니라 failure rate와 time-to-target 분포를 낸다.
-
-중간에 한 optimizer가 non-finite면 last finite step의 gradient/update/state를 bundle로 보존한다. lr을 낮춰 재시도한 branch는 새 RunID다. 실패 run을 통계에서 완전히 제거하지 않고 안정 영역 추정에 포함한다. hardware fault가 확인된 run은 exclusion 근거와 event를 남긴다.
-
-**결과가 모순될 때의 해석**
-
-Muon이 token당 빠르게 수렴하지만 wall-clock이 느릴 수 있다. Newton–Schulz compute와 collective가 개선된 token efficiency를 상쇄한 경우다. 반대로 token 효율은 약간 낮아도 state memory 절감으로 batch가 커져 wall-clock이 좋아질 수 있다. 어느 결과가 중요한지는 workload의 비용 함수가 정한다.
-
-validation loss는 좋아지고 downstream task는 나빠질 수 있다. data split contamination, task variance, optimizer-induced representation change를 조사하되 하나의 metric을 진실로 선택하지 않는다. 사전 primary endpoint와 safety/base regression gate를 따른다. multiple comparison을 했다면 independent confirmation이 필요하다.
-
-single GPU는 맞고 distributed만 나쁘면 알고리즘보다 reduction/owner/state mapping을 먼저 본다. fresh run은 맞고 resume만 나쁘면 scheduler, sampler, scaler, state mapping을 본다. delta parity는 맞는데 장기 curve가 갈리면 작은 round-off 누적, nondeterministic data order, optimizer의 의도된 동역학을 단계적으로 분리한다.
-
-**출판 가능한 결과 패키지**
-
-본문 표는 환경과 recipe, correctness gate, 주요 결과, failure를 압축한다. 부록 artifact에는 canonical manifest, source map, commands, raw metric, event log, profiler trace, checkpoint와 replay fixture를 둔다. 독자는 표의 한 수치에서 RunID와 source evidence로 내려갈 수 있어야 한다.
-
-코드 인용은 핵심 dispatch와 update 몇 줄로 제한하고 주변 state 소유권을 산문과 call graph로 설명한다. 원본 license와 commit link를 표시한다. line 좌표가 시간이 지나 깨지지 않도록 commit permalink를 우선한다. source를 분석한 claim과 직접 실행한 observation의 문장 시제를 구분한다.
-
-최종 승인서는 네 질문에 답한다. 식과 state transition이 기준선과 맞는가, checkpoint/분산 장애 뒤 복구 가능한가, 정해진 token·time endpoint에서 이득이 있는가, 장비와 운영 비용 안에 들어오는가. 한 질문이라도 evidence가 없으면 조건부 승인 또는 보류다.
-
-**독자 인수 시험**
-
-인수 시험 첫 명령은 제공된 gradient replay로 AdamW single/foreach/fused와 hybrid update를 생성한다. control group, matrix group, state checksum 결과가 reference tolerance를 만족해야 한다. 둘째는 scheduler overflow timeline을 재생해 committed clock을 검증한다. 셋째는 two-rank global denominator와 clipping parity다.
-
-넷째는 checkpoint 네 cut 가운데 하나를 난수로 골라 process를 죽이고 oracle이 불완전 checkpoint를 거부하는지 본다. 다섯째는 parameter 이름 순서를 바꾼 model에 state를 load해 logical mapping은 성공하고 semantic role mismatch는 실패하는지 본다. 여섯째는 profiler trace에서 실제 backend와 optimizer critical path를 찾는다.
-
-채점은 최종 loss가 아니라 invariant coverage다. parameter 누락/중복 0, control delta mismatch 0, resume 첫-step mismatch 0, partial checkpoint acceptance 0, global denominator mismatch 0이어야 한다. 성능 결과는 hardware별로 달라도 되지만 측정 구간과 workload identity가 완전해야 한다.
-
-인수자가 source revision을 올리면 기존 result에 덮어쓰지 않고 migration run을 만든다. dispatch source diff, upstream test diff, one-step replay, checkpoint load, short behavioral confirmation을 통과한 뒤 새 evidence level을 부여한다. 이렇게 해야 책의 예제가 특정 버전에 얼어붙지 않으면서도 검증되지 않은 최신성을 가장하지 않는다.
-
-**현장 참고표: 증상에서 최초 divergence까지**
-
-**loss spike를 재구성한다**
-
-step 12,480에서 loss가 급등했다면 그래프를 확대하는 것으로 끝내지 않는다. 직전 정상 step과 문제 step의 GoldenBatch, valid token, sequence length, domain mixture를 비교한다. 같은 시각의 scaler, clip coefficient, group lr, gradient와 update quantile, optimizer kernel, collective event, GPU health를 하나의 incident bundle로 묶는다.
-
-첫 분기는 forward loss sum 자체가 비정상인지다. 특정 row를 제거하면 회복된다면 data/tokenization을 조사한다. loss는 정상인데 backward 뒤 non-finite가 생기면 activation/gradient와 AMP scaling을 본다. unscaled gradient는 finite인데 optimizer state가 처음 non-finite라면 second moment, eps, fused path, state corruption을 본다.
-
-gradient와 state는 finite지만 update ratio가 급등했다면 scheduler jump, bias-correction step reset, wrong group lr, decay를 조사한다. update도 정상인데 다음 forward만 급등하면 parameter collective와 mixed shard를 확인한다. 이렇게 최초 divergence를 tensor stage로 좁혀야 무작정 lr을 낮추는 완화가 원인을 숨기지 않는다.
-
-**silent freeze를 찾는다**
-
-loss가 천천히만 변할 때 전체 grad norm이 존재한다는 사실은 모든 중요 layer가 갱신된다는 뜻이 아니다. logical role별 gradient present ratio, update nonzero ratio, `||Δθ||/||θ||`을 본다. optimizer manifest에는 있지만 wrapper에서 `requires_grad=False`가 됐거나, gradient는 생겼지만 group lr이 0이거나, overflow skip이 반복될 수 있다.
-
-conditional expert는 한 batch에서 gradient가 없는 것이 정상일 수 있다. 기간 window의 routed token과 first-seen step을 함께 본다. `grad=None` parameter가 decay와 state step을 건너뛰는 backend라면 expert별 effective optimizer age가 달라진다. 이것을 global step 하나로 해석하지 않는다.
-
-frozen base와 adapter/partial tuning에서는 update checksum allowlist를 둔다. 변경이 허용되지 않은 tensor가 한 byte라도 바뀌면 실패하고, 허용 tensor가 일정 window 동안 전혀 바뀌지 않으면 경고한다. normalization running state처럼 optimizer 밖에서 변하는 state도 별 manifest에 넣는다.
-
-**performance regression을 분해한다**
-
-framework upgrade 뒤 tokens/s가 8% 하락했다면 optimizer wall time, kernel dispatch, graph capture, memory pressure, collective overlap을 전후 trace로 비교한다. foreach에서 single path로 fallback됐는지, fused 지원 shape가 달라졌는지, scalar `.item()`이 host sync를 만들었는지 본다. profiler 자체 overhead를 통제한 짧은 trace와 장기 wall time을 함께 쓴다.
-
-reserved memory 증가가 activation checkpoint나 batch 감소로 이어졌다면 optimizer temporary의 간접 비용이다. peak 발생 시점과 live tensor를 snapshot한다. Muon NS matmul이 compute stream을 차지해 gradient collective overlap을 없앴을 수도 있다. 개별 kernel은 빨라졌지만 critical path는 길어진 경우가 timeline에 드러난다.
-
-network regression은 collective별 message size, call count, rank skew를 본다. owner assignment이 바뀌어 큰 matrix가 한 rank에 몰렸다면 balanced mapping을 재계산한다. communication compression을 도입하면 bytes뿐 아니라 reconstructed update parity를 새 correctness gate로 둔다.
-
-**optimizer recipe를 변경하는 RFC**
-
-RFC에는 문제, workload, current evidence, 제안 state diff, 예상 이익, 새 실패 모드, rollback을 쓴다. `fused=True` 변경은 dispatch와 temporary, capturable 조합을 소유한다. Muon 도입은 parameter scope, new momentum/state, NS compute와 distributed owner를 소유한다. lr 변경만 적고 이 state를 생략하지 않는다.
-
-rollout은 shadow gradient replay, 짧은 smoke, 일부 training branch, full confirmation 순서다. shadow는 production gradient를 소비하지만 parameter를 publish하지 않는다. delta와 비용을 기준선과 비교한다. smoke에서 correctness 실패가 0이어야 품질 실험으로 간다.
-
-rollback artifact는 last approved model뿐 아니라 호환 optimizer/scheduler/scaler와 data cursor를 가진다. 새 optimizer state를 old optimizer가 읽을 수 없으므로 이름만 되돌리는 것이 아니다. branch parent와 commit cut을 고정한다. rollback 뒤 첫 step parity와 validation smoke를 실행한다.
-
-**결과표의 최소 열**
-
-correctness 표에는 backend, dtype, shape class, max delta error, state error, resume error, distributed error가 있다. optimization 표에는 seed, valid token, committed update, validation, task metric, failure가 있다. system 표에는 hardware/topology, peak bytes, optimizer/step time, collective bytes, graph status가 있다.
-
-숫자에는 denominator와 interval을 붙인다. 평균 step time은 warmup과 checkpoint step을 제외했는지, validation loss는 token 수가 얼마인지, state bytes는 replicated와 sharded 중 무엇인지 밝힌다. best run에는 탐색한 후보와 selection rule을 연결한다.
-
-결측은 0이 아니다. 미실행은 `Proposed`, upstream만 실행은 assertion 범위, 로컬은 command/artifact를 쓴다. 실패도 삭제하지 않고 최초 원인과 소비 budget을 남긴다. 표가 이 원칙을 지켜야 독자가 성공 수치를 과대해석하지 않는다.
-
-**수학 연습의 정답 검증**
-
-독자는 `g=[1,10]`인 두 좌표에서 SGD와 Adam 첫 update를 계산한다. Adam 첫 step은 bias correction 때문에 eps가 작다면 크기가 비슷한 두 좌표 update를 만든다. 그러나 이어지는 gradient sequence가 다르면 second moment history가 갈린다. 한 step 직관을 장기 invariant로 확대하지 않는다.
-
-decay-only fixture는 `g=0`과 `grad=None`을 비교한다. decoupled decay 식의 expected parameter를 계산하고 backend output과 맞춘다. lr scheduler가 0이면 decay도 0인지 확인한다. cumulative shrink는 step별 lr을 곱해 계산한다.
-
-Muon fixture는 diagonal, rotated, rank-one matrix를 사용한다. exact SVD polar와 NS output, implementation final scale을 분리해 표로 쓴다. gradient를 상수 배 했을 때 normalization 뒤 update가 어떻게 변하는지 본다. weight decay와 lr가 다시 magnitude를 부여하는 단계도 포함한다.
-
-**출판 전 최종 checklist**
-
-모든 trainable parameter가 정확히 한 semantic group과 한 physical owner를 가져야 한다. gradient replay가 source parameter와 parent model digest를 검증해야 한다. AdamW backend와 hybrid control group이 tolerance를 통과해야 한다. scheduler는 committed/token clock을 선언해야 한다.
-
-memory worksheet와 실측 peak 차이가 설명돼야 한다. single/distributed one-step의 global denominator, clip, delta가 맞아야 한다. checkpoint cut 장애가 incomplete child를 publish하지 않아야 한다. resume의 다음 GoldenBatch와 state/delta가 선언한 동일성 등급을 만족해야 한다.
-
-장기 결과는 사전 endpoint, 탐색 범위, seed와 실패를 포함해야 한다. source map은 실제 selected branch와 test assertion을 구분해야 한다. 인수자는 제공 artifact만으로 one-step과 한 crash를 재생할 수 있어야 한다. 이 조건이 모두 참일 때 optimizer recipe를 다음 병렬화·checkpoint 장의 안정된 입력으로 넘긴다.
-
-**upgrade와 장기 보존**
-
-6개월 뒤 같은 실험을 재생할 때 package 이름과 config만으로는 부족하다. source commit, build option, CUDA와 driver, GPU architecture, compiler flag, selected optimizer kernel을 lockfile과 environment report에 둔다. container digest가 같아도 host driver와 fabric topology가 다르면 execution evidence가 달라질 수 있다.
-
-artifact 보존은 full checkpoint, 작은 replay fixture, canonical manifest를 계층화한다. full checkpoint가 비싸더라도 승인 기준점과 incident checkpoint는 retention한다. 작은 fixture는 매 upgrade CI에서 빠르게 실행한다. manifest와 raw metric은 장기 검색이 가능하도록 schema version과 migration을 가진다.
-
-source가 이동하거나 repository가 사라질 가능성에 대비해 license가 허용하는 범위의 핵심 source snapshot, commit hash와 permalink를 보존한다. 책의 짧은 인용은 이해를 돕고, 완전한 동작 확인은 원 revision으로 돌아간다. fork가 생기면 upstream과 local patch digest를 분리한다.
-
-**독자가 내리는 최종 선택**
-
-AdamW 유지가 합리적인 조건은 broad support, 단순 checkpoint, 충분한 품질과 system budget이다. fused/foreach 변경은 알고리즘을 유지하며 execution cost를 줄일 수 있지만 지원 조합과 parity를 확인해야 한다. Muon hybrid는 matrix geometry와 state/system 이익이 workload에서 확인되고 semantic grouping·분산 복구를 감당할 때 선택한다.
-
-선택 문장은 “Muon이 더 최신이다”가 아니다. 예를 들면 “고정 workload에서 validation target까지 valid token이 감소했고, 추가 NS compute 뒤에도 wall time이 개선됐으며, control delta·8-rank parity·resume gate를 통과했으므로 hidden matrix에 한해 승인한다”처럼 evidence와 scope를 포함한다. 조건이 하나 빠지면 조건부 승인이다.
-
-실패 결론도 가치 있다. state peak는 줄었지만 collective straggler 때문에 wall time이 나빠졌다면 owner balancing 연구로 넘긴다. token efficiency가 seed마다 불안정하면 더 큰 confirmation 없이는 배포하지 않는다. source/test는 닫혔지만 multi-node crash가 미실행이면 해당 복구 보장은 제한한다.
-
-최종적으로 optimizer는 loss 아래 숨은 한 줄이 아니라 parameter role, 장기 state, clock, kernel, collective, checkpoint를 연결하는 subsystem이다. 이 연결을 보존해야 다음 장에서 sharding이나 mixed precision이 바뀌어도 어떤 수학적 update를 실제로 실행했는지 설명할 수 있다.
-
-**마지막 구두 검산**
-
-인수자는 임의 parameter 하나를 골라 gradient가 어느 loss denominator에서 왔고, 어느 reduction과 clipping을 거쳐 어떤 optimizer 식과 state를 읽었으며, 어느 kernel이 delta를 썼는지 설명해야 한다. 이어 checkpoint에서 그 parameter의 moment owner와 다음 scheduler lr을 찾아야 한다. manifest와 trace를 보면서 이 경로를 복원하지 못하면 자동 test가 통과해도 운영 설명 가능성이 부족하다.
-
-두 번째 질문은 옵션 하나를 바꾸면 무엇이 달라지는가다. `fused`는 실행 경로와 temporary를, `amsgrad`는 state schema와 denominator를, `capturable`은 scalar/state 위치를, optimizer family는 update geometry를 바꾼다. 기대 diff 밖의 변화는 configuration drift다. diff report가 이를 layer와 field 수준에서 보여줘야 한다.
-
-세 번째 질문은 실패 시 어디까지 되돌리는가다. parameter 파일 하나가 아니라 optimizer/scheduler/scaler, data cursor, group/owner manifest가 호환되는 consistent cut을 선택한다. 다음 GoldenBatch replay가 맞아야 rollback 완료다. 이 세 질문에 artifact로 답할 수 있으면 장의 수학, 코드와 운영이 하나의 계약으로 닫힌다.
-
-**최소 제출 파일**
-
-최종 제출 디렉터리는 `run-manifest`, `parameter-groups`, `gradient-replay`, `one-step-report`, `checkpoint-manifest`, `failure-events`, `source-map`을 가진다. 파일 이름은 관례이고 각 파일의 schema version과 content digest가 identity다. report가 가리키는 digest와 실제 artifact가 맞지 않으면 인수를 중단한다.
-
-`one-step-report`는 group마다 gradient, state-before, delta, state-after의 요약과 reference error를 가진다. `failure-events`는 주입 위치, 기대 terminal, 실제 terminal과 oracle 판정을 가진다. `source-map`은 commit/function, selected branch, upstream assertion, local execution을 구분한다.
-
-작은 replay fixture는 CI에서 매 변경마다 실행하고 대형 profiler/checkpoint fixture는 release candidate에서 실행한다. 두 계층 모두 같은 logical parameter ID와 recipe digest를 사용한다. 빠른 test와 실제 workload가 서로 다른 optimizer를 검사하지 않게 하는 연결점이다.
-
-인수 결과에는 최종 선택뿐 아니라 기각한 backend와 이유도 남긴다. unsupported option, tolerance 초과, memory peak, 불안정 또는 미실행을 구분한다. 이후 hardware나 source revision이 바뀌었을 때 어느 조건부터 다시 검증할지 이 기록이 결정한다. 성공한 설정만 남기면 같은 실패 탐색을 반복하게 된다.
-
-이 기록은 다음 재검증의 출발점이다.
-
-**이 장이 넘기는 것.** `ParameterGroupManifest`, group별 optimizer-state checksum, `OptimizerStep=1`, 예상 parameter delta.
-
-**다음 장에서 깨질 수 있는 것.** 행렬 optimizer가 scalar·embedding·sparse table까지 무차별로 받으면 기하학적 가정이 깨진다.
-
-**검증 체크포인트.** uninterrupted 2-step과 1-step 저장 후 resume 1-step의 parameter 및 optimizer state를 비교한다.
+반복적인 승인 문서는 한 행으로 줄인다. `gradient artifact → parameter-group manifest → one-step delta/state → distributed owner → resume delta`가 같은 revision과 `OptimizerStepID`로 연결되고, correctness·token efficiency·wall time·peak memory를 각각 통과할 때만 후보를 승인한다. 어느 한 열도 다른 열의 개선으로 상쇄하지 않는다.
 
 ## 11.9 고정 소스에서 AdamW step을 끝까지 전개한다
 
@@ -2115,3 +1911,31 @@ legacy OLMo 고정 revision `090253dac6688f2532509daa7aa2eb5fae50e956`의 `olmo/
 하지만 이 test는 `decay_norm_and_bias`와 `decay_embeddings`의 모든 조합, tied parameter 중복, adapter/custom module의 미분류, checkpoint group migration을 parameter별 oracle로 검사하지 않는다. 필요한 negative fixture는 네 가지다. 첫째 각 옵션을 한 비트씩 바꾸고 group membership diff를 고정한다. 둘째 zero-gradient step에서 decay 대상만 정확히 한 번 수축하는지 본다. 셋째 미지원 trainable module을 넣어 coverage assert가 실패하는지 확인한다. 넷째 단일→이중 group checkpoint migration 뒤 다음 update가 uninterrupted reference와 같은지 비교한다.
 
 이렇게 읽으면 optimizer config는 YAML의 취향표가 아니다. module type 분류가 parameter ownership을 정하고, ownership이 update 식과 persistent state를 바꾸며, 그 결과가 checkpoint migration과 다음 delta까지 이어지는 실행 계약이다.
+
+## 11.16 GR-001 규범 trace — gradient를 AdamW state mutation으로 바꾼다
+
+10장에서 받은 gradient는 아직 새 model generation이 아니다. `GR-001/A0042`에서 unscale·clipping·finite 판정과 AdamW mutation이 모두 끝나야 `U0042` 후보가 된다.
+
+```mermaid
+flowchart LR
+    G[ParameterID + grad] --> U[unscale / finite]
+    U --> C[global norm clip]
+    C --> M[m,v,step update]
+    M --> W[decoupled weight decay + parameter update]
+    W --> V[delta oracle]
+    V --> X[12장 optimizer branch<br/>또는 13장 scheduler clock]
+```
+
+PyTorch revision `3691693263d2b66a68867e39b7449876844e06cf`의 [`Adam.step`](https://github.com/pytorch/pytorch/blob/3691693263d2b66a68867e39b7449876844e06cf/torch/optim/adam.py#L213-L269)은 parameter group에서 gradient와 state를 수집해 functional Adam을 호출하는 owner다. OLMo-core revision `b7e9671d7ea48af94838c4f124703c3ae36f0c70`의 [`AdamW`](https://github.com/allenai/OLMo-core/blob/b7e9671d7ea48af94838c4f124703c3ae36f0c70/src/olmo_core/optim/adamw.py#L1-L240)는 clipping·group policy를 비교할 고정 구현이다.
+
+수학의 `m_t=β1m_{t-1}+(1-β1)g_t`, `v_t=β2v_{t-1}+(1-β2)g_t²`, `θ_t=(1-ηλ)θ_{t-1}-η m̂_t/(sqrt(v̂_t)+ε)`는 코드의 first/second moment mutation, bias correction, decoupled decay와 parameter add에 각각 대응한다. epsilon이 sqrt 안/밖인지, decay가 gradient에 결합됐는지는 이름이 아니라 고정 함수의 연산 순서로 판정한다.
+
+| state | 예시 shape·dtype | bytes/parameter | mutation oracle |
+|---|---|---:|---|
+| parameter `θ` | `[8192,4096]` bf16 | 64 MiB | expected delta와 비교 |
+| gradient `g` | 같은 shape fp32 | 128 MiB | unscale·clip 전후 digest |
+| first moment `m` | 같은 shape fp32 | 128 MiB | beta1 recurrence |
+| second moment `v` | 같은 shape fp32 | 128 MiB | nonnegative·finite |
+| step | scalar int64/group 또는 parameter | 8 B 이상 | exactly once/U0042 |
+
+zero gradient+decay, 한 parameter NaN, tied parameter 중복 등록, group reorder와 checkpoint에서 `m/v` swap을 주입한다. 정상 control은 FP64 scalar oracle의 `θ,m,v`와 다음 delta를 비교한다. NaN은 [NaN 플레이북](../playbooks/01-nan.md), plateau는 [plateau 플레이북](../playbooks/02-plateau.md)으로 보낸다. Muon·Lion·Shampoo로 갈아타면 12장이 같은 ParameterID와 gradient에서 state shape·bytes·direction을 비교하고, AdamW를 유지하면 13장이 `U0042` commit 뒤 scheduler를 전진시킨다.

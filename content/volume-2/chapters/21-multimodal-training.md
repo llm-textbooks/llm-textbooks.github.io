@@ -2,6 +2,23 @@
 
 텍스트 모델에 이미지를 붙인다고 입력이 “조금 더 길어지는” 것은 아니다. JPEG의 가변 길이 바이트, 음성의 시간축, 영상의 공간·시간축을 Transformer가 소비할 수 있는 일정한 tensor로 바꾸는 순간부터 표본의 의미와 손실 분모가 달라진다. 이 장은 `MediaSampleID` 하나가 decoder의 loss-bearing token이 될 때까지를 추적한다.
 
+책의 기준 실행 `GR-001`에서는 text `SampleID`가 곧바로 embedding row를 가리켰다. 이 장은 그 계약을 `GR-001/MM-021`로 fork한다. 달라지는 부분은 media decoder·processor·encoder·projector이며, 이후 `BatchID → ForwardID → LossID → UpdateID`의 commit 규칙은 그대로 유지한다.
+
+```mermaid
+flowchart LR
+  M[MediaSampleID<br/>bytes·PTS] --> D[decoder/processor<br/>pixels·waveform·frames]
+  D --> E[modality encoder<br/>patch·audio·video features]
+  E --> P[projector/resampler<br/>language-width rows]
+  T[text SampleID] --> J{fusion contract}
+  P --> J
+  J --> B[MM BatchID<br/>mask·position·labels]
+  B --> F[ForwardID]
+  F --> L[modality loss sums/counts]
+  L --> U[UpdateID]
+```
+
+도식의 핵심은 “이미지가 token이 된다”는 비유가 아니라 loss 분모의 소유권이다. placeholder를 feature row로 치환하면 text sequence 길이와 encoder row 수가 언제 일치해야 하는지, cross-attention이면 어느 mask가 media memory를 가리는지 실제 shape 표로 판정한다.
+
 먼저 한 줄의 상태 사슬을 세운다. 이 장의 모든 구현과 장애는 다음 사슬의 어느 화살표가 의미를 바꾸었는지 찾는 문제다.
 
 ```text
@@ -2261,72 +2278,24 @@ release reviewer는 임의 행 하나를 골라 raw bytes부터 processor tensor
 
 이 완료선은 새 modality가 추가돼도 변하지 않는 검증의 중심축이 된다. 독자는 지원하려는 modality마다 정상 표본 하나와 의미가 깨진 표본 하나를 골라, 두 표본의 최초 divergence가 예상한 processor·fusion·loss 경계에서 검출되는지 직접 증명해야 한다. 그 결과가 있어야 위의 원장이 설명문을 넘어 다음 release에서 재사용할 수 있는 회귀 계약이 된다.
 
-## 21.16 Janus가 이미지 자리를 언어 embedding으로 치환하는 순간
+## 21.16 GR-001/MM fork — modality bytes에서 loss-bearing token까지
 
-`prepare_inputs_embeds`를 shape와 상태 전이로 읽는다.
+후반의 Janus·Llama 4·VQ/LFQ/FSQ·오디오·비디오 증보는 다음 실행 trace의 branch로 합친다. 고유 architecture를 같은 tokenizer라고 부르지 않고, 모든 branch가 `SampleID→processor output→placeholder/token coordinates→encoder/projector→fusion→loss numerator→U0042`를 제출하게 한다.
 
-Janus의 `prepare_inputs_embeds`는 `input_ids [B,T]`, `pixel_values [B,N,3,H,W]`, 두 boolean mask를 받아 `[B,T,D]`를 돌려준다. 핵심은 `images = rearrange(..., "b n c h w -> (b n) c h w")`, `images_embeds = self.aligner(self.vision_model(images))`, `inputs_embeds[images_seq_mask] = images_embeds[images_emb_mask]` 세 줄이다. vision tower와 aligner가 만든 `[B,N·T₂,D]` 행을 언어 embedding의 이미지 placeholder 위치에 대입한다. 음수 placeholder ID를 0으로 바꾸는 것은 lookup 오류를 피하기 위한 임시 상태일 뿐, 최종 의미는 mask 치환이 소유한다.
+```mermaid
+flowchart LR
+ A[image/audio/video bytes] --> P[processor + geometry/time ledger]
+ P --> E[encoder or discrete codec]
+ E --> F[projector/interleave/cross-attention]
+ F --> L[LM/modality loss + denominator]
+ L --> U[GR-001 U0042]
+```
 
-이 설계는 decoder가 별도 image branch를 알지 않아도 하나의 embedding sequence를 받게 한다. 대신 `sum(images_seq_mask)==sum(images_emb_mask)`가 깨지면 assignment cardinality가 처음 실패한다. 두 합은 같지만 media 순서가 다르면 shape 검사는 통과하고 의미가 뒤바뀐다. 진단 순서는 `(B,N,H,W) → tower T₂ → aligner D → flattened media order → 두 mask의 true index → 치환 직후 checksum`이다. 최초 불일치가 tower 출력 전이면 processor·vision 경계, T₂/D에서면 aligner, true index에서면 placeholder compiler의 책임이다.
+| fork | 최소 shape·state | 보존 oracle | 대표 mutation |
+|---|---|---|---|
+| vision | pixels, patch/grid, placeholder count, projector dtype | grid tokens=placeholder span | crop/grid mismatch |
+| audio | samples→frames→Mel/RVQ indices, sample rate | time span과 label clock 일치 | resample rate drift |
+| video | frame timestamps, temporal patches, causal visibility | frame/token ordering | frame drop·stride 변경 |
+| discrete codec | encoder state, codebook size·revision, indices | decode/reconstruction+usage | dead code·index offset |
 
-사고실험으로 같은 크기의 이미지 두 장을 서로 바꾸되 text placeholder 순서는 고정해 보자. cardinality와 output shape는 그대로지만 치환 행 checksum이 첫 placeholder에서 달라져야 한다. 달라지지 않으면 media identity를 잃었고, 마지막 답변만 비교한다면 오류를 너무 늦게 발견한다. 체크리스트에는 mask dtype, 음수 ID 원본 보존, media 순서, T₂ 예측값, aligner gradient, 치환 전후 checksum과 resume 뒤 processor generation을 남긴다.
-
-## 21.17 Llama 4의 builder 한 줄에서 expert gradient까지 내려간다
-
-구조 선언과 token별 실행을 분리해 읽는다.
-
-torchtune의 고정 revision `bd2a0fc…a1`에서 Scout builder의 68~84행은 decoder를 48개 층, query head 40개, KV head 8개, expert 16개와 shared expert 하나로 만든다. `attention_chunk_size=8192`와 `skip_rope_interval=4`도 같은 호출에서 굳어진다. 이 수치는 모델 카드의 장식이 아니다. GQA의 KV cache·projection shape, attention mask의 지역성, expert checkpoint key와 어느 parameter에 adapter를 붙일 수 있는지를 동시에 제한한다. 바로 앞 56~66행의 vision encoder는 14픽셀 patch, 최대 16개 tile과 4096차원 projection을 만들고, 85~95행의 `EarlyFusionModel`이 `<|patch|>` token과 encoder trainability를 연결한다.
-
-하지만 `num_experts=16`만 보고 “각 token이 16개 FFN을 모두 지난다”고 쓰면 틀린다. Meta reference revision `0e0b8c…301`의 `MoE.forward()` 181~191행에서는 먼저 `router_scores = x @ W_router`를 계산하고 token별 top-k index만 고른다. 선택되지 않은 칸을 음의 무한대로 덮은 뒤 sigmoid를 적용한다. 이어 입력을 expert 축으로 복제·정렬하고 선택 weight를 곱해 local expert에 보낸다. 따라서 한 token의 routed loss가 만드는 gradient는 적어도 router weight, 선택된 expert와 shared expert 경로로 갈라진다. 선택되지 않은 expert가 그 token에서 0 gradient인 것은 optimizer 고장이 아니라 dispatch 결과일 수 있다.
-
-이 지점에서 LoRA 옵션의 의미도 달라진다. Scout LoRA builder는 decoder, encoder, fusion에 각각 `full`, `lora`, `frozen` 상태를 받고 `apply_lora_to_mlp`가 켜지면 text decoder의 MoE 경로까지 대상으로 삼는다. `target_modules=[q_proj,v_proj]`만 기록해서는 expert 쪽 학습 용량을 재현할 수 없다. release manifest에는 세 하위 그래프의 resolved mode, 실제 adapter parameter key, expert별 gradient 유무, router와 shared-expert의 trainability를 펼쳐야 한다.
-
-가장 작은 정적 walkthrough는 다음 인과열을 보존한다. `YAML component → llama4_scout_17b_16e() → llama4_decoder(num_experts=16) → MoE.forward()의 router matmul → top-k index → sigmoid weight → 선택 expert output → loss → adapter/base gradient`다. 각 화살표에는 config 소비 행, tensor shape와 checkpoint key를 붙인다. builder source는 구조를 입증하고 reference forward는 dispatch 수식을 입증하지만, 두 저장소가 동일 checkpoint 변환과 분산 expert placement를 종단 보장한다고 확대하지 않는다.
-
-실행 가능한 소형 fixture를 설계할 때는 expert 셋, token 넷과 `top_k=2`로 줄인다. router logit을 손으로 정해 선택 index와 sigmoid weight를 계산하고, 선택되지 않은 expert의 해당-token gradient가 0인지 확인한다. expert 두 개의 점수가 동률인 사례에는 tie-breaking과 dtype을 기록한다. 한 expert weight를 손상시키는 negative fixture는 그 expert가 선택된 token에서만 최초 divergence가 나야 하며, shared expert가 모든 차이를 가리는지도 따로 본다. 이 책의 자료 수집에서는 대규모 Llama 4 학습을 실행하지 않았으므로 실제 throughput·expert load balance 수치는 장비 실행 전까지 미검증으로 남긴다.
-
-## 21.18 VQ·LFQ·FSQ의 gradient와 code ownership을 구분한다
-
-VQ는 encoder latent에서 최근접 code vector를 고르고 codebook loss와 commitment loss의 stop-gradient 방향을 반대로 둔다. `z + (z_q-z).detach()` 같은 straight-through estimator는 이산 선택을 미분한 것이 아니라 encoder에 대리 gradient를 흘린다. EMA codebook이면 cluster count·embedding average·dead-code replacement와 rank 간 동기화가 checkpoint state다.
-
-LFQ는 explicit lookup table 없이 factorized binary/sign-like code를 만들 수 있고 entropy·utilization 항이 collapse를 제어한다. FSQ는 각 scalar를 유한 level로 양자화해 Cartesian index를 만든다. 따라서 FSQ에 VQ의 EMA dead-code lifecycle을 그대로 요구하거나 LFQ의 utilization loss를 commitment loss와 같은 것으로 부르면 안 된다.
-
-TiTok처럼 2D token sequence로 압축하는 방식, MAGVIT-v2류 LFQ, Cosmos와 TokenFlow의 video token stream은 같은 질문으로 비교한다. latent와 index shape, causal 여부, chunk state, reconstruction objective, LM handoff, checkpoint state와 공개 training code 범위를 채운다. 빈 칸은 모델 이름으로 추정하지 않는다.
-
-## 21.19 오디오·비디오의 서로 다른 시계를 하나의 학습 계약으로 묶는다
-
-오디오나 비디오를 “토큰으로 바꾼다”는 문장은 변환 결과만 말하고 변환의 책임을 감춘다. 한 음성 표본에는 원본 sample index, STFT frame, encoder frame, codec의 `(codebook,time)`, 언어열의 placeholder와 supervised target이라는 서로 다른 좌표가 있다. 영상에는 container timestamp, presentation timestamp, sampled frame, patch·tubelet, pooling 뒤 feature와 언어 위치가 더해진다. 이 좌표들을 모두 `token position`으로 뭉개면 padding이나 frame sampling 하나가 바뀌었을 때 무엇이 학습 신호를 바꿨는지 역추적할 수 없다.
-
-따라서 표본 원장에는 raw asset digest와 sample rate·time base, decoder revision, resample·crop 정책, frontend 설정, 유효 길이, feature shape, placeholder span, label mask와 update ID를 별 열로 둔다. 각 경계에는 정수 길이식을 둔다. 길이식이 예측한 feature 수와 실제 tensor row, placeholder occurrence가 같아야 한다. 값이 우연히 같아도 media 순서가 다를 수 있으므로 각 segment의 identity와 순서 checksum도 확인한다.
-
-Qwen2-Audio의 placeholder를 convolution 길이식에서 재구성한다.
-
-Transformers revision `35acfa…57a`의 `Qwen2AudioProcessor.__call__`은 prompt 안 `<|AUDIO|>` 개수와 전달된 audio 개수를 먼저 비교한다. feature extractor에는 attention mask와 최대 길이 padding을 강제하고, 유효 Mel 길이 `L`을 읽는다. 이어 `L₁=floor((L-1)/2)+1`, `L₂=floor((L₁-2)/2)+1`을 계산해 단일 audio marker를 `L₂`개로 확장한다. 이 산술은 문자열 편집 편의가 아니다. encoder가 두 단계로 줄인 유효 시간축과 language embedding의 빈자리를 같은 수로 만드는 컴파일 단계다.
-
-`Qwen2AudioEncoder.forward`는 입력 Mel 길이가 `max_source_positions × stride₁ × stride₂`인지 fail closed로 검사한다. convolution 두 번, encoder layer, 평균 pooling을 지난 feature를 projector가 text hidden 차원으로 옮긴다. model 쪽에서는 유효 길이 mask로 padding feature를 버린 뒤 audio marker 수와 feature row 수가 다르면 예외를 낸다. 마지막 `masked_scatter`가 audio vector를 text embedding 자리에 삽입한다. 따라서 `feature_attention_mask`는 단순 padding 보조 정보가 아니라 문자열 확장, feature 선택과 LM position을 잇는 상태다.
-
-손으로 검산할 때는 길이가 서로 다른 audio 두 개를 한 배치에 둔다. 각 `L→L₁→L₂`를 계산하고, prompt별 marker run, 유효 encoder row와 scatter 대상 true count를 비교한다. audio 순서를 바꾸고 text 순서를 고정한 음성 fixture에서는 shape가 같아도 첫 feature checksum이 달라져야 한다. `labels=-100`을 audio marker와 user prompt에 적용했는지, assistant target만 남았는지도 확인한다. 이 검사는 audio understanding 품질을 증명하지 않지만 잘못된 음성과 정답이 조용히 결합되는 오류를 optimizer 전에 막는다.
-
-학습 단계 정책도 명시한다. audio tower를 고정하면 projector와 LM에만 gradient가 흐르는지 parameter별 norm으로 확인한다. tower를 풀면 frontend padding과 layer-drop RNG까지 checkpoint·resume 상태에 들어간다. 음성 길이가 긴 batch가 더 많은 LM 위치를 차지하므로 sample 평균과 유효 target 평균은 다른 objective다. audio frame 수, assistant target 수와 sample 수를 모두 보고해 어느 분모를 사용했는지 숨기지 않는다.
-
-MusicGen의 RVQ stream을 인과 순서와 loss 분모로 읽는다.
-
-neural codec의 `K`개 RVQ codebook은 같은 물리 시간 `t`에 `K`개의 정수를 낸다. 이를 단순히 `[tK,(tK+1),…]`로 평탄화하면 앞 codebook이 뒤 codebook을 보는 순서와 생성 지연이 임의로 결정된다. MusicGen의 delay pattern은 codebook `k`를 시간축에서 지연시켜 한 transformer가 여러 stream을 생성하되 미래 codec symbol을 보지 않도록 한다. `build_delay_pattern_mask`가 만든 BOS·PAD 영역과 생성 가능 영역은 곧 attention 이전의 인과 그래프다.
-
-구현의 `MusicgenForCausalLM.forward`는 `[B,T,K]` labels를 codebook별로 꺼내고 대응 logits를 `[B·T,C]`로 평탄화해 cross entropy를 더한다. pad ID는 `-100`으로 바뀐다. 여기에서 세 가지를 구분해야 한다. 첫째, codebook별 CE 합은 평균과 다르다. 둘째, 각 stream의 유효 target 수가 다르면 같은 샘플도 loss 기여가 달라진다. 셋째, delay mask의 BOS·PAD 위치와 label ignore 위치가 어긋나면 실행은 되면서 잘못된 시각을 예측한다.
-
-최소 oracle은 `K=3`, 물리 frame 네 개로 만든다. 원 codec matrix에 서로 다른 숫자를 넣고 delay pattern 뒤 각 autoregressive 위치의 정답을 손으로 쓴다. 모든 유효 칸에서 `sum(loss_k)`, `sum(valid_k)`와 global mean을 재계산한다. 한 stream의 마지막 frame을 pad로 바꿨을 때 해당 분자·분모만 줄어야 한다. stereo라면 좌우 codebook이 interleave되는 순서도 별 좌표로 보존한다. 생성 waveform의 청감만 비교하면 stream swap이나 한-frame shift를 너무 늦게 발견한다.
-
-평가는 codec와 LM을 분리한다. codec에는 bitrate, reconstruction spectral distance, intelligibility·speaker 보존과 streaming boundary를 둔다. LM에는 token NLL·codebook별 accuracy, 조건 일치와 장기 구조를 둔다. 최종 audio에는 자동 metric과 blind human protocol을 함께 둔다. FAD나 CLAP 계열 점수 하나로 발음, 화자, 음질과 prompt 일치를 모두 설명하지 않는다. decoder·codec checkpoint가 달라지면 같은 integer code가 다른 waveform을 뜻하므로 LM checkpoint만으로 release를 복구할 수 없다.
-
-비디오 frame budget을 학습 데이터와 평가의 일부로 취급한다.
-
-Transformers의 `LlavaNextVideoProcessor.__call__`은 한 frame의 image token 수를 구하고 평균 pooling 비율에 맞춰 4로 나눈 뒤 frame 수를 곱해 `<video>` marker를 확장한다. 즉 `N_video = N_patch,pool × F`다. 여기서 `F`는 원본의 총 frame 수가 아니라 decode와 sampling을 거쳐 실제로 선택된 frame 수다. FPS, 균등 sampling, scene-aware sampling 또는 최대 frame cap을 바꾸면 같은 파일도 다른 LM sequence와 gradient budget을 만든다.
-
-영상 fixture에는 variable-frame-rate와 scene cut을 반드시 넣는다. frame index만 저장하지 말고 container time base와 presentation timestamp를 보존한다. 목표 timestamp에서 decoder가 반환한 frame, resize·crop 좌표, vision layer와 pooling 뒤 row 범위를 기록한다. 같은 `F`라도 선택 시각이 다르면 의미가 다르다. audio가 함께 있다면 sampled video PTS와 audio sample 구간의 오차를 밀리초로 계산하고 허용 범위를 넘으면 AV supervision에서 제외하거나 별 상태로 보낸다.
-
-학습 비용은 `video 개수`가 아니라 `decode pixels + vision patches + LM positions + valid targets`로 계측한다. 긴 영상이 frame cap에 자주 걸리면 corpus의 시간 분포가 잘리고, 짧은 clip을 반복 pad하면 특정 장면이 과대표집된다. realized ledger에는 source duration bin별 선택 frame 수, drop·decode failure, patch와 target token을 남긴다. rank마다 media 길이가 달라 생기는 straggler와 empty-media rank도 관측한다.
-
-평가는 질문 유형을 시간 민감도별로 나눈다. 정적 물체 인식, 사건 순서, 짧은 동작, 장기 변화, audio-visual 동기와 자막 의존을 같은 평균에 숨기지 않는다. frame order를 뒤집기, 핵심 frame 제거, audio shift, caption 제거와 distractor frame 삽입 같은 counterfactual을 둔다. 원본과 교란본 답이 같다면 모델이 실제 시간 증거를 사용하지 않았을 수 있다. benchmark score만으로 grounding을 선언하지 않고 attention·feature attribution은 보조 증거로만 사용한다.
-
-마지막 출시 관문는 한 audio-video 표본을 raw bytes에서 update까지 왕복한다. `sample/PTS → frontend frame → codec 또는 patch 좌표 → projector row → LM position → label mask → loss numerator/count → gradient owner → optimizer update`의 모든 화살표가 고정 revision의 함수와 manifest를 가리켜야 한다. source test가 통과한다는 사실은 이 연결의 구현 근거이지 실제 데이터 mixture의 품질이나 GPU 처리량을 증명하지 않는다. 그런 수치는 동일 recipe·dataset·hardware에서 실행하기 전까지 `NOT_RUN`으로 남긴다.
+Janus의 embedding 치환, Llama 4의 expert branch와 VQ/LFQ/FSQ gradient estimator는 이 표에 architecture-specific source symbol, parameter owner와 backward oracle을 추가한다. 서로 다른 clock을 단순 sequence length로 합산하지 않는다. zero modality, placeholder ±1, wrong processor revision과 rank별 modality imbalance를 주입하고 최초 다른 processor/tensor/loss 좌표를 남긴다. 결과는 22장에는 continuous/discrete trajectory state로, 24장에는 modality별 EvalID·denominator로 넘긴다.
