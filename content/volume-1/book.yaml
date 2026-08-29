@@ -1,0 +1,313 @@
+# Canonical publication manifest for the 78-chapter Korean reader spine.
+# This is intentionally separate from book.yaml and its legacy EPUB output.
+title: "CUDA로 내려가며 읽는 LLM 추론 서버"
+subtitle: "요청·스케줄러·KV 캐시·분산 실행·CUDA 커널을 원본 소스로 추적하기"
+series: "LLM 시스템 메커니즘"
+volume: 1
+subjects:
+  - "대규모 언어 모델 추론"
+  - "GPU·CUDA 프로그래밍"
+  - "분산 시스템과 모델 서빙"
+lang: ko-KR
+edition: next-spine-preview-0.1
+date: 2026-08-23
+rights: "Draft — source citations and licenses are tracked per chapter"
+description: "HTTP 요청과 tokenizer에서 scheduler, KV cache, model forward, CUDA kernel, GPU network 및 운영 진단까지 소스와 공식 문서를 따라 추적하는 한국어 기술서"
+include_ontology_catalog: false
+output: cuda-llm-serving-ko-next-spine-preview.epub
+toc_title: "목차"
+
+# chapters가 78개 canonical 장의 단일 원본이다. parts는 같은 장을 같은 순서로
+# 정확히 한 번씩 묶고, EPUB 빌드에서 각 묶음 앞에 독자 계약 page를 생성한다.
+# Part page는 출판 spine item이지만 canonical chapter 수에는 포함하지 않는다.
+parts:
+  - title: "I부. 왜 추론 서버가 필요한가"
+    question: "한 요청은 왜 단순한 model.forward 호출이 아니라 여러 소유자와 대기열을 지나는가?"
+    promise: "지연·처리량·goodput을 같은 숫자로 뭉개지 않고, 요청의 전 구간에서 비용과 최초 불일치를 찾는다."
+    prerequisites: ["LLM API를 한 번 호출해 본 경험", "기본적인 CPU·GPU 구분"]
+    routes:
+      straight: "1장부터 5장까지 읽으며 요청 여정, TTFT·ITL, goodput, prefill/decode 비용과 소스 읽기 원칙을 차례로 세운다."
+      operations: "2장과 3장을 먼저 읽고 SLO·queue·goodput 판정표를 만든 뒤 1장과 4장으로 원인을 역추적한다."
+      source_digging: "5장의 claim→source→measurement 방법을 먼저 익힌 뒤 1장과 4장의 경계를 실제 함수 좌표에 연결한다."
+    exit_artifact: "요청 한 건의 단계·소유자·시각·비용을 적은 request journey ledger"
+    next_handoff: "이제 같은 문자열이 실제로 어떤 token IDs와 첫 hidden state가 되는지 II부에서 추적한다."
+    chapters: &part01
+      - next/chapters/01-request-journey.md
+      - next/chapters/02-ttft-itl-tension.md
+      - next/chapters/03-goodput-over-throughput.md
+      - next/chapters/04-prefill-decode-physical-cost.md
+      - next/chapters/05-reading-source-doc-measurement.md
+  - title: "II부. 문자열이 모델 입력이 되기까지"
+    question: "같아 보이는 대화가 왜 다른 token·position·embedding 입력이 되는가?"
+    promise: "문자열부터 첫 layer 입력까지 normalization, template, special token, padding과 position의 최초 차이를 복원한다."
+    prerequisites: ["I부의 request journey", "Unicode·배열 index의 기초"]
+    routes:
+      straight: "6→9장 순서로 문자열 경계, prompt compiler, sequence 좌표와 embedding을 따라간다."
+      operations: "7·8장의 template/padding 사고를 먼저 보고 6장 offset과 9장 OOR·position probe를 연결한다."
+      source_digging: "각 장의 rendered bytes→IDs→mask/position→first hidden checkpoint를 구현별 source card에 채운다."
+    exit_artifact: "rendered bytes, token IDs, mask, positions와 first hidden을 잇는 input identity record"
+    next_handoff: "III부는 이 first hidden이 attention·MLP와 LM head를 지나 다음 token이 되는 계산을 이어받는다."
+    chapters: &part02
+      - next/chapters/06-tokenizer-boundaries.md
+      - next/chapters/07-chat-template-prompt-compiler.md
+      - next/chapters/08-special-token-padding-truncation.md
+      - next/chapters/09-embedding-position-first-step.md
+  - title: "III부. 한 token이 transformer layer를 통과하는 법"
+    question: "한 token의 hidden state는 layer 안에서 어떤 tensor와 state를 거쳐 다음 token score가 되는가?"
+    promise: "residual, norm, QKV, attention, RoPE, MLP/MoE와 sampling을 수식·shape·코드 consumer로 함께 읽는다."
+    prerequisites: ["II부의 token·position 계약", "행렬곱과 softmax의 기초"]
+    routes:
+      straight: "10→18장을 순서대로 읽어 한 forward와 token commit을 완주한다."
+      operations: "16→18장의 logits·sampling 증상에서 시작해 최초 divergence에 따라 10→15장으로 되돌아간다."
+      source_digging: "각 연산에서 logical tensor, physical layout, producer, consumer와 허용 오차를 한 행씩 기록한다."
+    exit_artifact: "input row부터 committed token까지의 tensor/state checkpoint ledger"
+    next_handoff: "IV부에서는 이 계산을 외부 API 요청과 engine lifecycle이 어떻게 감싸는지 비교한다."
+    chapters: &part03
+      - next/chapters/10-residual-stream-first-forward.md
+      - next/chapters/11-normalization-projection.md
+      - next/chapters/12-qkv-head-partition.md
+      - next/chapters/13-causal-attention-mask-coordinates.md
+      - next/chapters/14-rope-gqa-mla-cache-shape.md
+      - next/chapters/15-mlp-moe-gdn-ssm-serving.md
+      - next/chapters/16-lm-head-next-token.md
+      - next/chapters/17-logits-to-probability.md
+      - next/chapters/18-sampling-constraints-stop-order.md
+  - title: "IV부. API와 엔진의 경계"
+    question: "HTTP 호환처럼 보이는 네 stack은 요청·stream·취소 책임을 어디에 두는가?"
+    promise: "OpenAI 표면, LiteLLM gateway와 네 engine의 request lifecycle을 같은 의미 좌표로 비교한다."
+    prerequisites: ["I부의 request identity", "II·III부의 입력과 token commit 경계"]
+    routes:
+      straight: "19→25장 순서로 wire contract에서 각 engine의 ingress·generation·slot lifecycle로 내려간다."
+      operations: "19·20장의 retry/disconnect 계약을 먼저 정한 뒤 실제 사용하는 engine 장의 cancel·cleanup 경로를 읽는다."
+      source_digging: "route literal→DTO→render→engine submission→frame assembly→terminal/free를 동일 request ID로 잇는다."
+    exit_artifact: "네 stack의 accepted·normalized·executed·serialized·lifecycle-safe capability matrix"
+    next_handoff: "V부는 engine 안에서 여러 request가 batch와 시간 예산을 어떻게 나누는지 다룬다."
+    chapters: &part04
+      - next/chapters/19-openai-api-contract.md
+      - next/chapters/20-litellm-routing-retry-budget.md
+      - next/chapters/21-vllm-ingress-asyncllm-lifecycle.md
+      - next/chapters/22-sglang-tokenizer-manager-request-ingress.md
+      - next/chapters/23-transformers-classic-generate-lifecycle.md
+      - next/chapters/24-transformers-continuous-manager-lifecycle.md
+      - next/chapters/25-llamacpp-server-slot-task-lifecycle.md
+  - title: "V부. scheduler가 시간을 나누는 법"
+    question: "동시에 들어온 서로 다른 길이의 요청 가운데 누가 언제 GPU work를 얻는가?"
+    promise: "continuous batching, token budget, preemption, priority와 async future state를 상태 전이로 설명한다."
+    prerequisites: ["IV부의 request lifecycle", "TTFT·ITL·goodput의 구분"]
+    routes:
+      straight: "26→32장으로 batching의 출발부터 네 scheduler 비교까지 읽는다."
+      operations: "28·30장의 waiting/running/preemption 상태에서 queue incident를 분기하고 29·31장의 effective branch를 확인한다."
+      source_digging: "admission→budget→selection→batch mutation→commit/requeue의 consumer chain을 option별로 추적한다."
+    exit_artifact: "request별 generation, state, scheduled tokens, preemption과 terminal을 기록한 scheduler ledger"
+    next_handoff: "VI부는 scheduler가 할당하는 KV state의 물리 주소와 수명주기를 이어서 본다."
+    chapters: &part05
+      - next/chapters/26-static-to-continuous-batching.md
+      - next/chapters/27-token-sequence-budget.md
+      - next/chapters/28-waiting-running-finished-state-machine.md
+      - next/chapters/29-chunked-prefill-decode-priority.md
+      - next/chapters/30-preemption-fairness-priority-scheduling.md
+      - next/chapters/31-async-scheduling-future-state.md
+      - next/chapters/32-four-scheduler-comparison.md
+  - title: "VI부. KV cache는 메모리이자 수명주기다"
+    question: "KV cache의 logical token은 어떤 block·page·tier를 소유하며 언제 안전하게 재사용되는가?"
+    promise: "byte 계산에서 block table, prefix sharing, eviction, offload와 corruption까지 lifetime contract로 묶는다."
+    prerequisites: ["III부의 K/V shape", "V부의 scheduler state"]
+    routes:
+      straight: "33→39장으로 크기 계산부터 wrong-answer incident까지 진행한다."
+      operations: "39장의 miss/leak/wrong-answer 증상에서 시작해 37장 refcount, 35장 hash, 38장 tier generation을 역추적한다."
+      source_digging: "logical block→physical page→refcount/generation→tier transfer→free의 producer와 terminal을 잇는다."
+    exit_artifact: "KV block의 identity, bytes, owner, generation, tier와 terminal evidence 원장"
+    next_handoff: "VII부에서는 이 state와 tensor가 실제 CUDA launch와 memory hierarchy에서 어떻게 소비되는지 내려간다."
+    chapters: &part06
+      - next/chapters/33-kv-tensor-shape-byte-calculation.md
+      - next/chapters/34-paged-kv-block-table.md
+      - next/chapters/35-prefix-sharing-hash-partial-block.md
+      - next/chapters/36-sliding-hybrid-cache-physical-address.md
+      - next/chapters/37-allocation-refcount-eviction-rollback.md
+      - next/chapters/38-cpu-offload-hierarchical-cache.md
+      - next/chapters/39-cache-miss-leak-wrong-answer.md
+  - title: "VII부. CUDA에서 실제 일이 벌어지는 곳"
+    question: "request shape는 어떻게 grid·CTA·warp와 HBM transaction으로 번역되는가?"
+    promise: "CUDA hierarchy, memory flow, synchronization, binary compatibility와 attention·quant kernel을 source 단위로 읽는다."
+    prerequisites: ["III부의 tensor shape", "VI부의 KV layout", "CUDA thread hierarchy의 기초"]
+    routes:
+      straight: "40→47장으로 launch geometry에서 first-divergence kernel 조사까지 읽는다."
+      operations: "47장의 느림·race·wrong-answer 분기에서 시작해 40~46장의 shape, byte, ordering, artifact checkpoint로 이동한다."
+      source_digging: "Python wrapper→native binding→launcher→scheduler/indexing→store predicate와 selected binary를 한 call graph에 고정한다."
+    exit_artifact: "request shape에서 native symbol·grid·resource·memory transaction까지의 launch record"
+    next_handoff: "VIII부는 어떤 model artifact와 quant/adapter 설정이 이 실행 형태를 선택하는지 설명한다."
+    chapters: &part07
+      - next/chapters/40-grid-cta-warp-request-shape.md
+      - next/chapters/41-register-shared-l2-hbm-byte-flow.md
+      - next/chapters/42-cache-line-sector-coalescing-alignment.md
+      - next/chapters/43-barrier-stream-event-cuda-graph.md
+      - next/chapters/44-ptx-sass-cubin-cuda12-13.md
+      - next/chapters/45-flashattention-flashinfer-online-softmax.md
+      - next/chapters/46-marlin-quant-gemm-moe-kernels.md
+      - next/chapters/47-kernel-bottleneck-race-first-divergence.md
+  - title: "VIII부. 모델을 적재하고 실행 형태를 고르는 법"
+    question: "같은 model 이름 아래 어떤 class, tensor format, quantization, adapter와 backend가 실제로 선택되는가?"
+    promise: "config부터 loader, packing, scale, LoRA isolation과 fallback까지 requested/effective 상태를 분리한다."
+    prerequisites: ["III부의 architecture tensor", "VII부의 kernel selection 경계"]
+    routes:
+      straight: "48→53장 순서로 config resolution에서 backend fallback까지 읽는다."
+      operations: "53장의 requested/effective mismatch에서 출발해 48·49장 identity, 50장 scale, 51장 adapter generation을 확인한다."
+      source_digging: "artifact metadata→class resolver→module construction→weight mapping/packing→selector→native consumer를 잇는다."
+    exit_artifact: "model generation별 config·artifact·shape·quant·adapter·effective backend manifest"
+    next_handoff: "IX부는 이 실행을 여러 GPU와 node의 topology·collective·network path로 확장한다."
+    chapters: &part08
+      - next/chapters/48-config-architecture-tensor-shape.md
+      - next/chapters/49-safetensors-gguf-shard-loading.md
+      - next/chapters/50-gptq-awq-fp8-nvfp4-scale-packing.md
+      - next/chapters/51-adapter-lora-loading-batching-isolation.md
+      - next/chapters/52-qwen35-gemma4-llama-moe-vertical-comparison.md
+      - next/chapters/53-backend-quant-kernel-fallback-selection.md
+  - title: "IX부. 한 GPU를 넘어서는 순간"
+    question: "tensor와 KV bytes는 CPU·GPU·rank·NIC 사이에서 어떤 group과 edge를 통과하는가?"
+    promise: "PCIe/NUMA/HBM, TP·PP·DP·EP, NCCL, NVLink와 RDMA를 ordered operation과 topology로 설명한다."
+    prerequisites: ["VII부의 CUDA ordering", "VIII부의 tensor shard와 layout"]
+    routes:
+      straight: "54→59장으로 host-device path에서 collective hang 조사까지 진행한다."
+      operations: "59장의 hang matrix에서 reporter rank와 first broken edge를 가르고 55~58장의 group·stream·topology·registration을 확인한다."
+      source_digging: "rank group→shard producer→collective tuple→CUDA stream→channel/peer 또는 MR/descriptor terminal을 추적한다."
+    exit_artifact: "rank·group·shard·collective sequence·topology edge·completion을 담은 distributed operation ledger"
+    next_handoff: "X부는 이 network path를 이용해 prefill, decode와 cache tier를 서버 사이에서 나눈다."
+    chapters: &part09
+      - next/chapters/54-cpu-pcie-numa-hbm-byte-path.md
+      - next/chapters/55-tp-pp-dp-ep-groups-shards-collectives.md
+      - next/chapters/56-nccl-communicator-enqueue-stream-completion.md
+      - next/chapters/57-nvlink-nvswitch-pcie-topology.md
+      - next/chapters/58-rdma-registration-nixl-gpu-network.md
+      - next/chapters/59-collective-hang-rank-imbalance.md
+  - title: "X부. cache와 계산을 서버 사이에서 나누기"
+    question: "prefill과 decode를 나누면 언제 이득이며 KV transfer와 remote cache의 실패는 누가 책임지는가?"
+    promise: "break-even부터 P/D protocol, LMCache, Mooncake, HiCache/NIXL과 배포 복구를 같은 generation 계약으로 비교한다."
+    prerequisites: ["VI부의 KV lifetime", "IX부의 network registration과 completion"]
+    routes:
+      straight: "60→65장으로 경제성 계산, protocol, 세 cache/connector와 deployment recovery를 읽는다."
+      operations: "65장의 deployment incident에서 시작해 61장 commit semantics와 사용 중인 cache/connector 장의 residue를 역추적한다."
+      source_digging: "P compute→KV identity→register/transfer/store→D commit→lease/eviction→cleanup을 request generation으로 잇는다."
+    exit_artifact: "P/D request의 cost, KV generation, transfer/store state, commit과 recovery terminal dossier"
+    next_handoff: "XI부에서는 지금까지의 모든 state를 metric·trace·log와 incident evidence로 관측한다."
+    chapters: &part10
+      - next/chapters/60-prefill-decode-break-even.md
+      - next/chapters/61-pd-kv-transfer-protocol-failure-semantics.md
+      - next/chapters/62-lmcache-lookup-promotion-eviction-lifecycle.md
+      - next/chapters/63-mooncake-transfer-store-boundary.md
+      - next/chapters/64-hicache-nixl-connector-comparison.md
+      - next/chapters/65-pd-deployment-failure-recovery.md
+  - title: "XI부. 관측에서 원인까지"
+    question: "대시보드의 이상을 어떻게 한 request의 최초 잘못된 state와 owner로 좁히는가?"
+    promise: "metric·exemplar·trace·log를 시간과 identity로 잇고 queue, memory, kernel, NCCL/P-D 사건을 닫는다."
+    prerequisites: ["I부의 latency 좌표", "V~X부의 state owner와 terminal"]
+    routes:
+      straight: "66→72장으로 telemetry contract에서 실험·회귀·복구 종료까지 읽는다."
+      operations: "현재 증상에 맞는 68~71장 incident를 먼저 고르고 66·67장의 label, exemplar, clock과 packet contract를 채운다."
+      source_digging: "metric producer→exemplar→trace context→structured event→local/partial order→falsifier와 rollback predicate를 잇는다."
+    exit_artifact: "증상·관측·가설·최초 불일치·owner·검증·rollback을 담은 bounded evidence packet"
+    next_handoff: "XII부는 이 조사법을 새 release와 아직 읽지 않은 source에 스스로 적용하게 한다."
+    chapters: &part11
+      - next/chapters/66-metric-types-label-cardinality.md
+      - next/chapters/67-prometheus-trace-log-timeline.md
+      - next/chapters/68-ttft-itl-queue-incident.md
+      - next/chapters/69-oom-fragmentation-cache-incident.md
+      - next/chapters/70-graph-fallback-kernel-wrong-answer.md
+      - next/chapters/71-nccl-pd-network-hang.md
+      - next/chapters/72-experiment-regression-recovery-closure.md
+  - title: "XII부. 스스로 새 버전을 파고드는 법"
+    question: "책에 없는 새 release·option·binary에서도 어디서부터 어떻게 source를 파고들 것인가?"
+    promise: "15분 지도, 2시간 option trace, 2일 ABI audit와 supply-chain·source ledger를 반복 가능한 방법으로 제공한다."
+    prerequisites: ["앞선 편 중 조사 대상과 관련된 state ledger", "명령줄 검색과 diff의 기초"]
+    routes:
+      straight: "73→78장으로 짧은 조사에서 release·binary·공식 문서 ledger까지 확장한다."
+      operations: "73장의 15분 map으로 owner를 찾고 74장 option trace 또는 75·76장 release/binary audit로 필요한 깊이만 선택한다."
+      source_digging: "77장의 네 stack atlas와 78장의 claim→source→counterexample→gap ledger로 새 증거를 고정한다."
+    exit_artifact: "새 문제 하나를 claim, immutable source, counterexample, observation gap과 rollback으로 닫은 investigation ledger"
+    next_handoff: "이제 독자는 특정 framework 이름이 아니라 의미 좌표와 증거 계약으로 다음 버전을 계속 읽을 수 있다."
+    chapters: &part12
+      - next/chapters/73-api-to-cuda-15-minute-map.md
+      - next/chapters/74-option-consumer-two-hour-trace.md
+      - next/chapters/75-release-diff-abi-two-day-audit.md
+      - next/chapters/76-binary-wheel-container-supply-chain.md
+      - next/chapters/77-four-stack-searchable-source-atlas.md
+      - next/chapters/78-official-doc-paper-source-reading-ledger.md
+
+chapters:
+  - next/chapters/01-request-journey.md
+  - next/chapters/02-ttft-itl-tension.md
+  - next/chapters/03-goodput-over-throughput.md
+  - next/chapters/04-prefill-decode-physical-cost.md
+  - next/chapters/05-reading-source-doc-measurement.md
+  - next/chapters/06-tokenizer-boundaries.md
+  - next/chapters/07-chat-template-prompt-compiler.md
+  - next/chapters/08-special-token-padding-truncation.md
+  - next/chapters/09-embedding-position-first-step.md
+  - next/chapters/10-residual-stream-first-forward.md
+  - next/chapters/11-normalization-projection.md
+  - next/chapters/12-qkv-head-partition.md
+  - next/chapters/13-causal-attention-mask-coordinates.md
+  - next/chapters/14-rope-gqa-mla-cache-shape.md
+  - next/chapters/15-mlp-moe-gdn-ssm-serving.md
+  - next/chapters/16-lm-head-next-token.md
+  - next/chapters/17-logits-to-probability.md
+  - next/chapters/18-sampling-constraints-stop-order.md
+  - next/chapters/19-openai-api-contract.md
+  - next/chapters/20-litellm-routing-retry-budget.md
+  - next/chapters/21-vllm-ingress-asyncllm-lifecycle.md
+  - next/chapters/22-sglang-tokenizer-manager-request-ingress.md
+  - next/chapters/23-transformers-classic-generate-lifecycle.md
+  - next/chapters/24-transformers-continuous-manager-lifecycle.md
+  - next/chapters/25-llamacpp-server-slot-task-lifecycle.md
+  - next/chapters/26-static-to-continuous-batching.md
+  - next/chapters/27-token-sequence-budget.md
+  - next/chapters/28-waiting-running-finished-state-machine.md
+  - next/chapters/29-chunked-prefill-decode-priority.md
+  - next/chapters/30-preemption-fairness-priority-scheduling.md
+  - next/chapters/31-async-scheduling-future-state.md
+  - next/chapters/32-four-scheduler-comparison.md
+  - next/chapters/33-kv-tensor-shape-byte-calculation.md
+  - next/chapters/34-paged-kv-block-table.md
+  - next/chapters/35-prefix-sharing-hash-partial-block.md
+  - next/chapters/36-sliding-hybrid-cache-physical-address.md
+  - next/chapters/37-allocation-refcount-eviction-rollback.md
+  - next/chapters/38-cpu-offload-hierarchical-cache.md
+  - next/chapters/39-cache-miss-leak-wrong-answer.md
+  - next/chapters/40-grid-cta-warp-request-shape.md
+  - next/chapters/41-register-shared-l2-hbm-byte-flow.md
+  - next/chapters/42-cache-line-sector-coalescing-alignment.md
+  - next/chapters/43-barrier-stream-event-cuda-graph.md
+  - next/chapters/44-ptx-sass-cubin-cuda12-13.md
+  - next/chapters/45-flashattention-flashinfer-online-softmax.md
+  - next/chapters/46-marlin-quant-gemm-moe-kernels.md
+  - next/chapters/47-kernel-bottleneck-race-first-divergence.md
+  - next/chapters/48-config-architecture-tensor-shape.md
+  - next/chapters/49-safetensors-gguf-shard-loading.md
+  - next/chapters/50-gptq-awq-fp8-nvfp4-scale-packing.md
+  - next/chapters/51-adapter-lora-loading-batching-isolation.md
+  - next/chapters/52-qwen35-gemma4-llama-moe-vertical-comparison.md
+  - next/chapters/53-backend-quant-kernel-fallback-selection.md
+  - next/chapters/54-cpu-pcie-numa-hbm-byte-path.md
+  - next/chapters/55-tp-pp-dp-ep-groups-shards-collectives.md
+  - next/chapters/56-nccl-communicator-enqueue-stream-completion.md
+  - next/chapters/57-nvlink-nvswitch-pcie-topology.md
+  - next/chapters/58-rdma-registration-nixl-gpu-network.md
+  - next/chapters/59-collective-hang-rank-imbalance.md
+  - next/chapters/60-prefill-decode-break-even.md
+  - next/chapters/61-pd-kv-transfer-protocol-failure-semantics.md
+  - next/chapters/62-lmcache-lookup-promotion-eviction-lifecycle.md
+  - next/chapters/63-mooncake-transfer-store-boundary.md
+  - next/chapters/64-hicache-nixl-connector-comparison.md
+  - next/chapters/65-pd-deployment-failure-recovery.md
+  - next/chapters/66-metric-types-label-cardinality.md
+  - next/chapters/67-prometheus-trace-log-timeline.md
+  - next/chapters/68-ttft-itl-queue-incident.md
+  - next/chapters/69-oom-fragmentation-cache-incident.md
+  - next/chapters/70-graph-fallback-kernel-wrong-answer.md
+  - next/chapters/71-nccl-pd-network-hang.md
+  - next/chapters/72-experiment-regression-recovery-closure.md
+  - next/chapters/73-api-to-cuda-15-minute-map.md
+  - next/chapters/74-option-consumer-two-hour-trace.md
+  - next/chapters/75-release-diff-abi-two-day-audit.md
+  - next/chapters/76-binary-wheel-container-supply-chain.md
+  - next/chapters/77-four-stack-searchable-source-atlas.md
+  - next/chapters/78-official-doc-paper-source-reading-ledger.md

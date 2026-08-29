@@ -1,0 +1,30 @@
+site:
+  title: "LLM Textbooks"
+  description: "LLM의 서빙·훈련·에이전트 메커니즘을 코드, 수학, 시스템으로 연결하는 공개 교과서"
+  url: "https://llm-textbooks.github.io"
+  language: "ko-KR"
+
+books:
+  - id: volume-1
+    number: 1
+    status: published
+    short_title: "서빙 메커니즘"
+    manifest: content/volume-1/book.yaml
+    content_root: content/volume-1
+    download: /downloads/volume-1-cuda-llm-serving-ko.epub
+    accent: "#3b82f6"
+  - id: volume-2
+    number: 2
+    status: published
+    short_title: "트레이닝·파인튜닝 메커니즘"
+    manifest: content/volume-2/book.yaml
+    content_root: content/volume-2
+    download: /downloads/volume-2-finetuning-mechanisms-ko.epub
+    accent: "#8b5cf6"
+  - id: volume-3
+    number: 3
+    status: planned
+    short_title: "멀티 에이전트 메커니즘"
+    title: "어떻게 활용할 것인가"
+    subtitle: "에이전트를 구성하고 지속적으로 개선하기"
+    accent: "#14b8a6"

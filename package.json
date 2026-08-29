@@ -1,0 +1,38 @@
+{
+  "name": "llm-textbooks.github.io",
+  "version": "1.0.0",
+  "description": "LLM 시스템 메커니즘 공개 교과서 정적 사이트",
+  "private": true,
+  "scripts": {
+    "clean": "rm -rf _site",
+    "build:html": "node scripts/build.mjs",
+    "build:search": "pagefind --site _site --glob '**/*.html'",
+    "build": "npm run clean && npm run build:html && npm run build:search",
+    "verify": "node scripts/verify.mjs",
+    "test": "npm run build && npm run verify"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/llm-textbooks/llm-textbooks.github.io.git"
+  },
+  "keywords": [],
+  "author": "Jioh L. Jung <jung@jioh.net>",
+  "license": "UNLICENSED",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/llm-textbooks/llm-textbooks.github.io/issues"
+  },
+  "homepage": "https://github.com/llm-textbooks/llm-textbooks.github.io#readme",
+  "dependencies": {
+    "highlight.js": "^11.12.0",
+    "katex": "^0.18.4",
+    "marked": "^18.0.11",
+    "marked-katex-extension": "^5.1.12",
+    "mermaid": "^11.17.2",
+    "yaml": "^2.9.0"
+  },
+  "devDependencies": {
+    "cheerio": "^1.2.0",
+    "pagefind": "^1.5.2"
+  }
+}

@@ -1,0 +1,212 @@
+title: "파인튜닝 메커니즘"
+subtitle: "데이터·최적화·분산 학습·정렬을 코드와 수학으로 잇는 완전한 안내서"
+series: "LLM 시스템 메커니즘"
+volume: 2
+subjects:
+  - "대규모 언어 모델 학습과 파인튜닝"
+  - "딥러닝 최적화와 분산 학습"
+  - "정렬·평가·학습 운영"
+lang: ko-KR
+edition: draft-0.1
+date: 2026-08-27
+rights: "Draft — 인용·라이선스·출처 좌표는 장별 원고와 출처 원장으로 관리"
+description: "문자열이 학습 신호가 되는 순간부터 멀티노드 학습, SFT, 선호학습, 온라인 RL, 평가와 배포까지 실제 텐서·상태·소스 코드·장애 복구를 하나의 실행 경로로 추적하는 기술서"
+include_ontology_catalog: false
+output: llm-finetuning-mechanisms-ko.epub
+toc_title: "목차"
+completion_exclude_prefixes: ["labs/", "playbooks/"]
+fonts:
+  - id: font-noto-sans-kr-vf
+    path: fonts/NotoSansKR-VF.ttf
+    href: fonts/NotoSansKR-VF.ttf
+    media_type: font/ttf
+
+parts:
+  - title: "I부. 학습이라는 계산을 손으로 붙잡기"
+    question: "다음 토큰 loss는 어떤 텐서와 상태를 거쳐 실제 파라미터 변화가 되는가?"
+    promise: "작은 GPT 한 실행을 forward부터 resume까지 손으로 대조한다."
+    prerequisites: ["행렬곱과 미분의 기초", "Python 코드를 읽어 본 경험"]
+    routes: {straight: "1장부터 순서대로 계산한다.", operations: "2장의 NaN 진단에서 시작한다.", source_digging: "3장의 작은 GPT 구현부터 역추적한다."}
+    exit_artifact: "golden batch의 loss·gradient·parameter delta·checkpoint 원장"
+    next_handoff: "II부가 이 batch를 만든 문서와 tokenizer 상태를 복원한다."
+    chapters:
+      - chapters/00-preface.md
+      - chapters/00-reading-routes.md
+      - chapters/01-next-token.md
+      - chapters/02-backprop-step.md
+      - chapters/03-small-gpt-run.md
+  - title: "II부. 데이터가 학습 신호가 되기까지"
+    question: "원문 한 줄은 어떤 선택과 변환을 거쳐 loss를 부담하는 token이 되는가?"
+    promise: "수집·정제·토큰화·packing·mixture의 숨은 분모를 드러낸다."
+    prerequisites: ["I부의 golden batch", "문자열과 확률의 기초"]
+    routes: {straight: "4장부터 데이터 흐름을 따른다.", operations: "6장의 realized mixture에서 시작한다.", source_digging: "5장의 tokenizer와 template 코드를 추적한다."}
+    exit_artifact: "DocumentID에서 loss mask까지 이어지는 데이터 계보 기록"
+    next_handoff: "III부가 같은 token을 embedding과 Transformer 내부로 운반한다."
+    chapters:
+      - chapters/04-web-corpus.md
+      - chapters/05-tokenizer-template.md
+      - chapters/06-packing-mixture.md
+  - title: "III부. Transformer 내부의 실제 계산"
+    question: "token ID는 실제 모델의 어느 모듈과 텐서를 지나 logits가 되는가?"
+    promise: "embedding·attention·MLP/MoE·LM head를 shape와 backward까지 해부한다."
+    prerequisites: ["I부의 역전파", "II부의 token·mask 계약"]
+    routes: {straight: "7장부터 layer 순서로 읽는다.", operations: "9장의 expert imbalance 진단에서 시작한다.", source_digging: "10장의 실제 모델 factory에서 호출 경로를 따라간다."}
+    exit_artifact: "token row에서 logits·saved tensor·gradient까지의 tensor ledger"
+    next_handoff: "IV부가 이 gradient를 optimizer update와 저정밀 kernel로 변환한다."
+    chapters:
+      - chapters/07-embedding-position-norm.md
+      - chapters/08-attention-lineage.md
+      - chapters/09-mlp-moe-residual.md
+      - chapters/10-real-model-autopsy.md
+  - title: "IV부. 최적화와 수치 안정성"
+    question: "같은 gradient가 optimizer·scheduler·dtype에 따라 왜 다른 update가 되는가?"
+    promise: "상태 바이트, 기하학, 합산 순서와 overflow를 함께 계산한다."
+    prerequisites: ["I부의 gradient snapshot", "III부의 parameter shape"]
+    routes: {straight: "11장부터 optimizer 계보를 읽는다.", operations: "14장의 overflow 진단에서 시작한다.", source_digging: "12장의 Muon 구현과 수식을 왕복한다."}
+    exit_artifact: "parameter group별 update·state byte·수치 안정성 보고서"
+    next_handoff: "V부가 parameter·gradient·optimizer state의 분산 소유권을 나눈다."
+    chapters:
+      - chapters/11-optimizer-adamw.md
+      - chapters/12-matrix-optimizers.md
+      - chapters/13-scheduler-scaling.md
+      - chapters/14-low-precision-kernels.md
+  - title: "V부. 여러 GPU와 여러 노드"
+    question: "학습 상태는 rank 사이에서 누가 소유하고 언제 합의되는가?"
+    promise: "병렬화·collective·pipeline·checkpoint를 하나의 상태 전이로 묶는다."
+    prerequisites: ["IV부의 optimizer state 회계", "GPU와 network의 기초"]
+    routes: {straight: "15장부터 소유권을 그린다.", operations: "16장의 hang과 straggler에서 시작한다.", source_digging: "17장의 sharded checkpoint 경로를 추적한다."}
+    exit_artifact: "rank topology와 checkpoint commit을 포함한 분산 상태 원장"
+    next_handoff: "VI부가 이 실행 기반에서 SFT와 정렬 상태를 추가한다."
+    chapters:
+      - chapters/15-parallel-ownership.md
+      - chapters/16-cluster-scheduling.md
+      - chapters/17-checkpoint-recovery.md
+  - title: "VI부. 파인튜닝과 정렬"
+    question: "SFT·선호학습·온라인 RL은 어떤 데이터와 상태를 실제로 바꾸는가?"
+    promise: "mask, adapter, reward, policy version과 rollout 일관성을 끝까지 추적한다."
+    prerequisites: ["II부의 데이터 계약", "IV·V부의 update와 분산 상태"]
+    routes: {straight: "18장부터 SFT에서 RL로 읽는다.", operations: "20장의 stale rollout 진단에서 시작한다.", source_digging: "18장의 LoRA 주입 지점부터 추적한다."}
+    exit_artifact: "base·adapter·policy·reward·rollout의 버전 DAG와 parity report"
+    next_handoff: "VII부가 같은 학습 계약을 이미지·음성·diffusion과 지속학습으로 확장한다."
+    chapters:
+      - chapters/18-sft-lora-qlora.md
+      - chapters/19-preference-reward.md
+      - chapters/20-online-rl.md
+  - title: "VII부. 확장 아키텍처와 모달리티"
+    question: "텍스트 밖의 token과 새로운 state는 학습 폐회로를 어떻게 바꾸는가?"
+    promise: "멀티모달 tokenizer, diffusion trajectory, 지식 편집과 삭제를 공통 상태 언어로 읽는다."
+    prerequisites: ["III부의 모델 내부 계산", "VI부의 파인튜닝 상태"]
+    routes: {straight: "21장부터 모달리티를 확장한다.", operations: "23장의 forgetting·삭제 검증에서 시작한다.", source_digging: "22장의 scheduler와 loss 구현을 맞춰 읽는다."}
+    exit_artifact: "모달리티 token·noise trajectory·편집/삭제 후손의 상태 기록"
+    next_handoff: "VIII부가 이 모델들을 평가하고 운영하며 안전하게 배포하는 판정을 맡는다."
+    chapters:
+      - chapters/21-multimodal-training.md
+      - chapters/22-diffusion-flow-training.md
+      - chapters/23-continual-editing-unlearning.md
+  - title: "VIII부. 평가·운영·보안"
+    question: "좋아진 점수와 안전한 release를 어떤 증거로 믿을 수 있는가?"
+    promise: "평가 기여도, red-team 환류, metric·trace·incident와 공급망을 연결한다."
+    prerequisites: ["VI부의 학습 버전 DAG", "통계와 운영 관측의 기초"]
+    routes: {straight: "24장부터 평가에서 공급망으로 읽는다.", operations: "26장의 장애 triage에서 시작한다.", source_digging: "27장의 manifest 검증 경로를 추적한다."}
+    exit_artifact: "EvalID·IncidentID·release manifest가 연결된 출시 증거 묶음"
+    next_handoff: "IX부가 모든 계약을 실제 단일 GPU와 멀티노드 실습에서 검증한다."
+    chapters:
+      - chapters/24-trustworthy-evaluation.md
+      - chapters/25-redteam-safety-training.md
+      - chapters/26-monitoring-debugging.md
+      - chapters/27-supply-chain-reproducibility.md
+  - title: "IX부. 실전 종합 랩"
+    question: "지금까지의 불변조건을 실제 실행과 장애 주입으로 재현할 수 있는가?"
+    promise: "단일 GPU 기준선에서 멀티노드 복구와 SFT·RL·배포까지 한 번에 닫는다."
+    prerequisites: ["I–VIII부 중 실습 대상 장", "CUDA 환경과 명령줄 사용 경험"]
+    routes: {straight: "28장부터 규모를 키운다.", operations: "29장의 장애 주입에서 시작한다.", source_digging: "30장의 전체 artifact DAG에서 역추적한다."}
+    exit_artifact: "재실행 가능한 학습·평가·배포 dossier와 실패 복구 판정"
+    next_handoff: "독자는 새 모델과 새 프레임워크에도 같은 조사 계약을 적용할 수 있다."
+    chapters:
+      - chapters/28-single-gpu-golden-run.md
+      - chapters/29-multinode-failure-injection.md
+      - chapters/30-end-to-end-finetuning.md
+  - title: "X부. 재현 실습과 장애 대응 부록"
+    question: "본문의 불변조건을 어떤 고정 실습과 장애 대응 절차로 다시 확인하는가?"
+    promise: "일곱 종단 실습과 열 개 장애 플레이북을 독립적으로 찾아 실행할 수 있게 묶는다."
+    prerequisites: ["관련 본문 장의 상태 원장", "안전한 synthetic fixture 환경"]
+    routes: {straight: "실습 색인에서 기준 실행을 고른다.", operations: "플레이북 색인에서 증상으로 진입한다.", source_digging: "각 문서의 고정 코드·테스트 좌표를 역추적한다."}
+    exit_artifact: "GoldenRunID·IncidentID·최초 불일치·회귀 fixture가 연결된 검증 묶음"
+    next_handoff: "검증 결과를 해당 본문 장의 release 판정과 다음 개정 원장으로 되돌린다."
+    chapters:
+      - labs/index.md
+      - labs/06-source-to-commit-golden-lab.md
+      - labs/06-mixture-realized-mass-lab.md
+      - labs/18-sft-adapter-golden-lab.md
+      - labs/19-reward-calibration-disagreement-lab.md
+      - labs/20-online-rl-policy-version-lab.md
+      - labs/24-eval-contamination-uncertainty-lab.md
+      - labs/28-single-gpu-golden-lab.md
+      - labs/29-multinode-failure-lab.md
+      - labs/30-sft-rl-deploy-golden-lab.md
+      - playbooks/index.md
+      - playbooks/01-nan.md
+      - playbooks/02-plateau.md
+      - playbooks/03-sample-repeat.md
+      - playbooks/04-tokenizer-mismatch.md
+      - playbooks/05-oom.md
+      - playbooks/06-rank-hang.md
+      - playbooks/07-expert-imbalance.md
+      - playbooks/08-stale-rollout.md
+      - playbooks/09-partial-checkpoint.md
+      - playbooks/10-contamination.md
+
+chapters:
+  - chapters/00-preface.md
+  - chapters/00-reading-routes.md
+  - chapters/01-next-token.md
+  - chapters/02-backprop-step.md
+  - chapters/03-small-gpt-run.md
+  - chapters/04-web-corpus.md
+  - chapters/05-tokenizer-template.md
+  - chapters/06-packing-mixture.md
+  - chapters/07-embedding-position-norm.md
+  - chapters/08-attention-lineage.md
+  - chapters/09-mlp-moe-residual.md
+  - chapters/10-real-model-autopsy.md
+  - chapters/11-optimizer-adamw.md
+  - chapters/12-matrix-optimizers.md
+  - chapters/13-scheduler-scaling.md
+  - chapters/14-low-precision-kernels.md
+  - chapters/15-parallel-ownership.md
+  - chapters/16-cluster-scheduling.md
+  - chapters/17-checkpoint-recovery.md
+  - chapters/18-sft-lora-qlora.md
+  - chapters/19-preference-reward.md
+  - chapters/20-online-rl.md
+  - chapters/21-multimodal-training.md
+  - chapters/22-diffusion-flow-training.md
+  - chapters/23-continual-editing-unlearning.md
+  - chapters/24-trustworthy-evaluation.md
+  - chapters/25-redteam-safety-training.md
+  - chapters/26-monitoring-debugging.md
+  - chapters/27-supply-chain-reproducibility.md
+  - chapters/28-single-gpu-golden-run.md
+  - chapters/29-multinode-failure-injection.md
+  - chapters/30-end-to-end-finetuning.md
+  - labs/index.md
+  - labs/06-source-to-commit-golden-lab.md
+  - labs/06-mixture-realized-mass-lab.md
+  - labs/18-sft-adapter-golden-lab.md
+  - labs/19-reward-calibration-disagreement-lab.md
+  - labs/20-online-rl-policy-version-lab.md
+  - labs/24-eval-contamination-uncertainty-lab.md
+  - labs/28-single-gpu-golden-lab.md
+  - labs/29-multinode-failure-lab.md
+  - labs/30-sft-rl-deploy-golden-lab.md
+  - playbooks/index.md
+  - playbooks/01-nan.md
+  - playbooks/02-plateau.md
+  - playbooks/03-sample-repeat.md
+  - playbooks/04-tokenizer-mismatch.md
+  - playbooks/05-oom.md
+  - playbooks/06-rank-hang.md
+  - playbooks/07-expert-imbalance.md
+  - playbooks/08-stale-rollout.md
+  - playbooks/09-partial-checkpoint.md
+  - playbooks/10-contamination.md
