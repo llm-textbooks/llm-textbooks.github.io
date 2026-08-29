@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="LLM Textbooks">
+  <rect width="64" height="64" rx="14" fill="#171716"/>
+  <path d="M13 15h15c3 0 5 2 5 5v30c-2-3-5-4-9-4H13V15Zm38 0H36c-3 0-5 2-5 5v30c2-3 5-4 9-4h11V15Z" fill="#f6f5f1"/>
+  <path d="M31 20h2v31h-2z" fill="#3b82f6"/>
+</svg>

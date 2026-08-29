@@ -60,7 +60,7 @@ for (const file of htmlFiles) {
   });
 }
 
-for (const asset of ["assets/site.css","assets/site.js","assets/mermaid.min.js","assets/katex.min.css","pagefind/pagefind.js","pagefind/pagefind-ui.js","downloads/volume-1-cuda-llm-serving-ko.epub","downloads/volume-2-finetuning-mechanisms-ko.epub","sitemap.xml","robots.txt","site-manifest.json"]) {
+for (const asset of ["assets/site.css","assets/site.js","assets/favicon.svg","assets/mermaid.min.js","assets/katex.min.css","pagefind/pagefind.js","pagefind/pagefind-ui.js","downloads/volume-1-cuda-llm-serving-ko.epub","downloads/volume-2-finetuning-mechanisms-ko.epub","sitemap.xml","robots.txt","site-manifest.json"]) {
   if (!fs.existsSync(path.join(SITE, asset))) errors.push(`missing artifact ${asset}`);
 }
 

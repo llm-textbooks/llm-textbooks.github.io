@@ -144,6 +144,7 @@ function shell({ title, description, body, canonical = "/", book = null, doc = n
   return `<!doctype html>
 <html lang="ko-KR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>${esc(fullTitle)}</title><meta name="description" content="${esc(description || siteConfig.site.description)}">
+<link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
 <link rel="canonical" href="${siteConfig.site.url}${canonical}"><meta property="og:title" content="${esc(fullTitle)}"><meta property="og:description" content="${esc(description || siteConfig.site.description)}"><meta property="og:type" content="${doc ? "article" : "website"}"><meta property="og:url" content="${siteConfig.site.url}${canonical}">
 <link rel="stylesheet" href="/assets/site.css"><link rel="stylesheet" href="/assets/highlight.css"><link rel="stylesheet" href="/assets/katex.min.css"><link rel="stylesheet" href="/pagefind/pagefind-ui.css">
 <script defer src="/assets/mermaid.min.js"></script><script defer src="/assets/site.js"></script></head>
@@ -235,6 +236,7 @@ for (const font of fs.readdirSync(path.join(ROOT,"node_modules/katex/dist/fonts"
 copy("node_modules/highlight.js/styles/github-dark.min.css", "assets/highlight.css");
 copy("site-src/site.css", "assets/site.css");
 copy("site-src/site.js", "assets/site.js");
+copy("site-src/favicon.svg", "assets/favicon.svg");
 copy(".nojekyll", ".nojekyll");
 
 console.log(`built ${published.length} books, ${published.reduce((n,b)=>n+b.docs.length,0)} documents, ${urls.length} routes`);
