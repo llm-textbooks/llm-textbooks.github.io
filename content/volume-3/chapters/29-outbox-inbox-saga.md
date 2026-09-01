@@ -145,6 +145,56 @@ poison message는 retry 횟수만 늘려 해결되지 않는다. schema mismatch
 
 관측 표에는 `outbox_state`, `message_id`, `inbox_apply_count`, `receipt_id`, `saga_step`, `compensation_state`, `fencing_token`, `dead_letter_reason`을 둔다. p99 publish latency만 보면 duplicate·공백·human queue를 놓친다.
 
+### 실행 실습: 네 개의 내구 DB와 네 개의 죽음
+
+아래 실습은 producer, broker, consumer, saga coordinator를 **서로 다른 WAL SQLite 파일**로 둔다. broker도 SQLite이므로 Kafka·SQS·외부 API의 동작을 재현하는 실험은 아니다. 대신 DB commit과 publish, consumer apply와 ack, compensation 기록 사이의 창을 실제 child process 종료로 끊는다. 이 범위가 중요한 이유는 "정확히 한 번"이라는 문장이 어느 durable boundary에서만 참인지 드러내기 때문이다.
+
+```bash
+python3 research/agents/harnesses/outbox_inbox_saga/outbox_inbox_saga_harness.py --write-artifacts
+uv run --with pytest --with rdflib pytest -q \
+  research/agents/fixtures/test_outbox_inbox_saga_runtime_wave44.py
+```
+
+publisher의 핵심은 order 상태와 outbox intent를 먼저 한 transaction에 쓰고, 그 뒤에만 broker delivery를 넣는 순서다. `publish_attempts`가 늘어도 `message_id`는 바뀌지 않는다.
+
+```python
+# producer.sqlite: order=reserved 와 outbox(message_id, digest, pending)는 이미 함께 commit 됐다.
+broker.execute(
+    "insert into deliveries(message_id, digest) values (?, ?)",
+    (row["message_id"], row["digest"]),
+)
+if crash_after_publish:
+    os._exit(86)       # local published 표시는 아직 쓰지 못했다.
+producer.execute("update outbox set state='published' where message_id=?", (MESSAGE,))
+```
+
+consumer는 inbox record, business effect, authority receipt를 하나의 SQLite transaction에 둔다. apply 뒤 ack 전에 죽으면 broker는 아직 미확인 delivery를 재전달할 수 있다. 재시작 consumer는 같은 ID·digest의 inbox row를 찾아 prior receipt를 돌려주고 business row를 한 번 더 쓰지 않는다.
+
+```python
+prior = consumer.execute(
+    "select * from inbox where message_id=?", (delivery["message_id"],)
+).fetchone()
+if prior:
+    return {"result": "duplicate", "receipt_id": prior["receipt_id"]}
+consumer.execute("insert into inbox values (?,?,?)", (message_id, digest, receipt))
+consumer.execute("insert into business values (?,1)", ("effect-seat-7",))
+if crash_after_apply:
+    os._exit(87)       # transaction은 이미 commit, broker ack는 아직 없다.
+```
+
+실습 oracle은 다음 네 결과를 동시에 요구한다.
+
+|사망 창|재시작 뒤 관찰할 delivery|business `apply_count`|복구 판정|
+|---|---:|---:|---|
+|`commit-before-publish`|1|1|같은 MessageID로 publisher 재시작|
+|`publish-before-ack`|2|1|첫 delivery apply, 두 번째는 duplicate|
+|`consumer-apply-before-ack`|1회 재전달|1|prior receipt로 ack|
+|`compensation-failure`|해당 없음|forward와 별개|`compensation_unknown`을 재시작 대사 뒤에만 `compensated`로 전이|
+
+두 번째 행이 특히 중요하다. broker delivery가 두 개인데 business effect가 하나인 것은 **delivery at-least-once와 consumer-local deduplicated apply**를 뜻한다. 외부 결제 API·production broker·서로 다른 데이터베이스까지 exactly-once라는 결론은 이 표에서 나오지 않는다. 그러한 수신자는 message ID 조회, durable idempotency storage, conflict policy, receipt 조회 계약을 별도로 제공해야 한다.
+
+보상 실패도 rollback으로 덮지 않는다. 실습은 `release-reserve`를 먼저 `compensation_unknown`으로 기록하고, 다음 process가 별도 attempt를 만들 때만 `compensated`로 바꾼다. 실제 provider가 "이미 release됨"을 조회할 수 없으면 이 단계는 자동 재시도가 아니라 hold와 담당자 escalation이어야 한다.
+
 ## 29.8 비교: 두 단계 commit 환상에서 벗어나기
 
 |접근|무엇을 단순화하나|무엇을 숨기나|

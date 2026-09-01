@@ -237,6 +237,63 @@ MCP request ID, A2A Task ID, trace ID, proof ID, effect key를 모두 로그 한
 
 검증기 독립성도 수치화한다. 후보들이 공유한 source digest·retrieval snapshot·model family·prompt template을 기록하고, 표 수와 고유 evidence cohort 수를 함께 그래프로 그린다. throughput가 좋아져도 고유 proof가 늘지 않았다면 speculative fan-out의 지식 이득은 0에 가깝다.
 
+### 통합 실행: 다섯 표, 두 정족수, 한 영수증
+
+앞의 표는 서로 다른 실패를 따로 설명한다. 실제 회귀 fixture는 그것들을 한 ledger에 넣는다. 다음 명령은 네트워크, 모델, 실제 MCP server나 Raft cluster를 띄우지 않는다. 대신 고정 event sequence에서 어떤 수를 세어야 하는지 재현한다.
+
+```bash
+python3 research/agents/fixtures/coordination_consensus_runtime_wave44.py
+uv run --with pytest --with rdflib pytest -q \
+  research/agents/fixtures/test_coordination_consensus_runtime_wave44.py
+jq '.metrics, .oracles' \
+  research/agents/runtime-evidence/coordination-consensus-wave44/raw.json
+```
+
+이 trace에는 처음에 같은 poisoned source digest를 인용하는 approve 다섯 개가 들어 있다. 화면에 보이는 vote는 5지만, provenance cohort와 unique digest는 1이다. 따라서 correlation gate는 decision을 만들지 않는다. 그 다음 서로 다른 digest 두 개가 ballot의 decision quorum을 통과한다. 여기서도 아직 receiver effect는 없다. log index 44의 durable commit과 term 8의 receiver receipt는 뒤의 별도 사건이다.
+
+하나의 run ID 아래에 있더라도 cancel lane의 `task-cancel-44`와 fencing lane의 `deploy:release-44`는 서로 다른 logical command다. 전자는 receipt 없이 cancelled로 끝나며, 후자는 stale term을 거절한 뒤에만 receipt를 만든다. 이 구분을 없애면 “취소 뒤 effect가 0”이라는 측정과 “별도 명령의 정상 receipt가 1”이라는 측정이 같은 분모에 섞인다.
+
+|계량값|이 fixture의 값|해석|
+|---|---:|---|
+|poisoned branch votes|5|문장·agent 호출의 개수|
+|poisoned effective cohorts|1|공유 원인을 제거한 증거 집단 수|
+|decision quorum|2|authority가 decision artifact를 만들 최소 독립 cohort|
+|durably committed log entries|1|복제된 상태 경계의 모형 사건 수|
+|receiver effect receipts|1|외부 receiver가 apply를 인정한 postcondition 수|
+|residual work after cancel|1|ack 뒤에도 관측된 작업 수|
+|residual external effects after cancel|0|그 잔재가 새 effect로 새지 않아야 하는 oracle|
+|stale-fence rejections|1|옛 term의 write가 receiver에서 거절된 횟수|
+
+여기서 특히 주의할 점은 `tasks/cancel`의 ack다. ack 시점의 task status는 여전히 `working`이고, cache write 하나가 그 뒤에 관측된다. 이 잔재는 discard되며 receiver effect를 만들지 않는다. 따라서 **cancel ack = handler stop = effect rollback**이라는 등식은 성립하지 않는다. 운영 대시보드에도 cancel 하나만 찍지 말고 ack 시각, 마지막 work 시각, residue 개수, effect receipt 유무, reconciliation 결과를 함께 남긴다.
+
+복구 순서는 짧지만 바꿀 수 없다.
+
+```mermaid
+sequenceDiagram
+  participant C as cancellation client
+  participant W as worker
+  participant L as durable ledger
+  participant R as receiver
+  C->>W: cancel intent
+  W-->>C: acknowledgement
+  W->>W: residual cache write observed
+  W->>L: terminal cancelled / no receipt
+  Note over W,R: 별도 deploy 명령의 term 7 owner resumes late
+  W->>R: effect with fence 7
+  R-->>W: stale-fence reject
+  W->>R: current owner effect with fence 8
+  R-->>W: receipt deploy-44
+  W->>L: link receipt and do not reapply
+```
+
+1. cancellation과 receiver effect를 같은 terminal label로 합치지 않는다.
+2. receipt가 없으면 effect를 성공·실패로 추측하지 말고 `unknown` 또는 별도 reconcile queue에 둔다.
+3. 새 term/lease owner는 receiver가 보관한 fencing token보다 큰 token으로만 effect를 시도한다.
+4. stale write의 거절은 scheduler log가 아니라 receiver receipt ledger에서 확인한다.
+5. recovery는 동일 logical effect key로 receipt를 먼저 조회한다. 새 apply는 receipt 부재와 재시도 정책이 함께 승인할 때만 허용한다.
+
+이것은 Raft safety proof도, MCP cancellation의 실제 구현 시험도 아니다. 고정된 수와 사건 순서를 이용해 독립성 착시·결정·durable commit·effect receipt·취소 잔재의 관측 경계를 코드 리뷰와 회귀 테스트에서 분리하는 작은 반례다.
+
 ## 원전 바로가기
 
 - [Hewitt actor model 원 논문](https://arxiv.org/abs/1008.1459)
@@ -244,4 +301,5 @@ MCP request ID, A2A Task ID, trace ID, proof ID, effect key를 모두 로그 한
 - [Raft 논문](https://raft.github.io/raft.pdf)
 - [Pi reducer의 state reduction 경계](https://github.com/badlogic/pi-mono/blob/853a80d26c90a14c1886f0ebb8ffaae133ca2185/packages/agent/src/harness/reducer.ts#L312-L391)
 - [MCP cancellation race](https://github.com/modelcontextprotocol/modelcontextprotocol/blob/3ff697dcbea0804f3f397b864cfbbaaa10cba71a/docs/specification/2025-06-18/basic/utilities/cancellation.mdx#L7-L49)
+- [MCP Task cancellation: acknowledgement와 cooperative 처리](https://github.com/modelcontextprotocol/modelcontextprotocol/blob/3ff697dcbea0804f3f397b864cfbbaaa10cba71a/seps/2663-tasks-extension.md#L385-L410)
 - [A2A Task와 terminal state](https://github.com/a2aproject/A2A/blob/c0f30b35390c59d2cc398a1100823a9115b97a20/specification/a2a.proto#L150-L210)

@@ -24,7 +24,7 @@ award는 선택의 기록이고 receipt는 effect의 기록이다. 둘의 주어
 
 ## 19.1 proposal 선택과 계약 lifecycle은 다르다
 
-FIPA Contract Net Interaction Protocol은 manager의 CFP, participant의 proposal/refusal, accept/reject proposal과 subsequent task 수행의 대화 구조를 규정한다. [FIPA Contract Net](https://www.fipa.org/specs/fipa00029/SC00029H.html)은 message choreography의 원전이다. JADE의 contract-net behavior는 이 protocol을 agent behavior로 구현하는 도구다. 그러나 protocol message가 있다고 bid가 enforceable price이고, completion message가 receiver-side effect receipt라는 뜻은 아니다.
+FIPA Contract Net Interaction Protocol은 manager의 CFP, participant의 proposal/refusal, accept/reject proposal과 subsequent task 수행의 대화 구조를 규정한다. [보존된 FIPA Contract Net 원문](https://web.archive.org/web/20240101000000id_/http://www.fipa.org/specs/fipa00029/SC00029H.html)은 message choreography의 원전이다. JADE의 contract-net behavior는 이 protocol을 agent behavior로 구현하는 도구다. 그러나 protocol message가 있다고 bid가 enforceable price이고, completion message가 receiver-side effect receipt라는 뜻은 아니다.
 
 ```mermaid
 stateDiagram-v2
@@ -188,8 +188,78 @@ selector의 실제 표면은 [AutoGen `SelectorGroupChat` 고정 코드](https:/
 
 worker가 사라졌다고 receipt를 지우지 않는다. 먼저 `(logical effect, fence)`로 receiver를 조회한다. receipt가 있으면 effect는 완료일 수 있고, run에는 늦은 관측으로 붙인다. receipt가 없고 lease가 유효하면 같은 worker의 재시도보다 lease owner와 capacity reservation을 먼저 검사한다. lease가 만료되거나 revoke되면 이전 fence는 더 이상 settle할 수 없고 새 round가 필요하다. re-auction은 같은 bid table을 조용히 재사용하는 일이 아니라 새 `state_generation`과 새 decision authority로 다시 시작하는 일이다.
 
+## 19.8 실행 실습: 낙찰자는 죽고, 영수증은 남는다
+
+앞의 상태 기계만으로는 가장 까다로운 순간을 볼 수 없다. receiver가 작업을 적용한 직후 worker 또는 coordinator가 죽으면, 발신자 입장에서는 성공 응답도 실패 응답도 없다. 이때 다시 보내는 것은 합리적인 재시도가 아니라 같은 효과를 두 번 만들 수 있는 도박이다.
+
+동반 실습은 임시 SQLite WAL 파일, 네 개의 bidder 자식 프로세스, `multiprocessing.Queue`, 세 개의 receiver 자식 프로세스를 실제로 기동한다. 네트워크나 LLM은 사용하지 않는다. 그래서 무엇을 증명하는지와 증명하지 않는지가 선명하다. 이 실습이 검증하는 것은 **이 로컬 receiver가 fence와 영수증을 어떻게 판단하는가**이지, FIPA·JADE·AutoGen의 동작이나 분산 lease의 안전성이 아니다.
+
+```mermaid
+sequenceDiagram
+  participant A as worker-a (cheap, false proof)
+  participant C as worker-c (winner, fence 1)
+  participant D as worker-d (new winner, fence 2)
+  participant M as coordinator + SQLite
+  participant R as receiver
+  A-->>M: bid(cost=1, capabilityProof=0)
+  M-->>A: reject: unverifiable offer
+  M->>C: award + lease(fence=1)
+  M->>M: lease expires, release, re-auction
+  M->>D: award + lease(fence=2)
+  C->>R: commit(effectKey, fence=1)
+  R-->>C: reject: stale fence
+  D->>R: commit(effectKey, fence=2)
+  R->>M: durable receipt written
+  Note over R,M: coordinator acknowledgement is lost, child exits 23
+  M->>R: restart: query receipt(effectKey)
+  R-->>M: existing receipt, applyCount=1
+```
+
+### 실행 명령
+
+```bash
+uv run --with pytest --with rdflib \
+  pytest -q research/agents/fixtures/test_contract_net_auction_sqlite_wave44.py
+```
+
+실행 원본은 다음 위치에 남는다.
+
+```text
+research/agents/runtime-evidence/contract-net-auction-sqlite-wave44/raw.json
+research/agents/runtime-evidence/contract-net-auction-sqlite-wave44/manifest.json
+```
+
+### oracle: 어느 결과가 정상인가
+
+이 실습은 네 가지 결과를 동시에 요구한다.
+
+|장면|입력|반드시 관측할 결과|그 결과가 없을 때의 의미|
+|---|---|---|---|
+|거짓으로 싼 bid|`cost=1`, `capabilityProof=0`|`lying-or-stale` 거절|selector가 최저가 자기 보고를 사실로 취급한다|
+|늦은 bid|`submitted_at=11`, `reply_by=10`|`late` 거절|deadline이 기록일 뿐 admission 경계가 아니다|
+|이전 winner|lease expiry 뒤 `fence=1` write|receiver의 `stale-fence` 거절|re-auction이 늦은 write를 막지 못한다|
+|적용 뒤 crash|`fence=2` apply 후 receiver child exit `23`|재시작 receipt 조회, replay `apply_count=1`|응답 손실을 실패로 오인하거나 duplicate effect를 만든다|
+
+`duplicate-award-delivery`도 의도적으로 기록한다. award 메시지가 두 번 전달되지 않을 것이라는 가정은 receiver의 dedup 근거가 될 수 없다. 같은 `(effect_key, fence)`가 다시 오면 receiver는 새 write가 아니라 기존 receipt를 돌려준다. 반대로 fence가 더 낮으면 receipt의 존재 여부보다 먼저 권한이 낡았다는 사실로 거절한다. **중복성**과 **소유권 세대**는 서로 다른 검사다.
+
+### 복구 절차: timeout을 실패로 닫지 않는다
+
+1. worker timeout 뒤에는 bid·award 상태가 아니라 `(effect_key, fence)`로 receiver를 조회한다.
+2. receipt가 있으면 실행을 다시 하지 않는다. local run에는 `reconciled-from-receipt`라는 별 disposition을 남긴다.
+3. receipt가 없고 lease가 아직 살아 있으면 새 winner를 고르지 않는다. 같은 owner의 liveness, reservation, retry policy를 먼저 확인한다.
+4. lease가 만료된 경우에만 reservation을 release하고 새 round와 더 큰 fence를 발행한다.
+5. 새 winner가 생긴 뒤 이전 winner의 completion은 취소 acknowledgement가 아니라 receiver fence로 거절한다.
+
+여기서 `exit 23`은 실제 crash를 재현하기 위한 의도적 child-process 종료 코드다. SQLite에 이미 commit된 receipt와 coordinator가 보지 못한 acknowledgement를 분리한다. 이것은 crash recovery의 최소 장면일 뿐이다. remote receiver의 fsync 정책, SQLite 파일시스템의 전원 장애 내성, clock skew, network partition, byzantine bidder, payment 정산, 다중 리전 합의는 이 실습의 범위 밖이다.
+
+### 원전의 위치와 이 실습의 거리
+
+[보존된 FIPA Contract Net 명세](https://web.archive.org/web/20240101000000id_/http://www.fipa.org/specs/fipa00029/SC00029H.html)는 CFP·proposal·accept/reject·completion 대화를 설명한다. [JADE `ContractNetInitiator` API](https://jade.tilab.com/doc/api/jade/proto/ContractNetInitiator.html)는 그 initiator 쪽 callback을 제공한다. [AutoGen selector](https://github.com/microsoft/autogen/blob/027ecf0a379bcc1d09956d46d12d44a3ad9cee14/python/packages/autogen-agentchat/src/autogen_agentchat/teams/_group_chat/_selector_group_chat.py#L152-L217)는 다음 speaker 후보를 제한하고 한 명을 선택한다.
+
+세 원전 중 어느 것도 이 실습의 reservation table, `active_fence`, receiver receipt row, crash 뒤 reconciliation을 제공하지 않는다. 따라서 protocol을 채택했다는 사실과 안전한 경매형 delegation을 만들었다는 주장을 분리해야 한다. 이 간격을 코드와 oracle로 드러내는 것이 경매 비유를 시스템 설계로 바꾸는 출발점이다.
+
 ### 원전
 
-- [FIPA Contract Net Interaction Protocol](https://www.fipa.org/specs/fipa00029/SC00029H.html)
+- [보존된 FIPA Contract Net Interaction Protocol](https://web.archive.org/web/20240101000000id_/http://www.fipa.org/specs/fipa00029/SC00029H.html)
 - [JADE Contract Net behavior](https://jade.tilab.com/doc/api/jade/proto/ContractNetInitiator.html)
 - [AutoGen group-chat selector](https://github.com/microsoft/autogen/blob/2b0f7093171350f7d3a3a4c6963bc1fcd873804f/python/packages/autogen-agentchat/src/autogen_agentchat/teams/_group_chat/_selector_group_chat.py#L274-L363)
