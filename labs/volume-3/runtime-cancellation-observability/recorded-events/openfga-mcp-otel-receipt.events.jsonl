@@ -1,0 +1,9 @@
+{"arm":"allow_tool_receipt","ordinal":1,"stage":"agent_run","outcome":"started"}
+{"arm":"allow_tool_receipt","ordinal":2,"stage":"security","outcome":"openfga_decision_allow_or_deny"}
+{"arm":"allow_tool_receipt","ordinal":3,"stage":"mcp_client","outcome":"tools_call_sent"}
+{"arm":"allow_tool_receipt","ordinal":4,"stage":"mcp_server","outcome":"tool_received"}
+{"arm":"allow_tool_receipt","ordinal":5,"stage":"receiver","outcome":"effect_applied_receipt_committed"}
+{"arm":"allow_tool_receipt","ordinal":6,"stage":"receipt","outcome":"receipt_joined"}
+{"arm":"deny_no_tool_receipt","ordinal":1,"stage":"agent_run","outcome":"started"}
+{"arm":"deny_no_tool_receipt","ordinal":2,"stage":"security","outcome":"openfga_decision_allow_or_deny"}
+{"arm":"deny_no_tool_receipt","ordinal":3,"stage":"mcp_client","outcome":"not_invoked_fail_closed"}

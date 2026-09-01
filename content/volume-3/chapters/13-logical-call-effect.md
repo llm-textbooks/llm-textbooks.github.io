@@ -199,3 +199,36 @@ flowchart LR
 어떤 legacy API는 status query도 idempotency key도 제공하지 않는다. 이 경우 agent는 환상을 만들지 말아야 한다. 가능한 선택은 (a) write 전에 human confirmation을 높이고, (b) read-after-write로 관찰 가능한 business state를 찾고, (c) 호출을 한 번만 시도하고 unknown을 사람에게 올리고, (d) 더 강한 adapter/receiver를 앞에 두는 것이다. ‘재시도하면 대개 괜찮다’는 결론은 비용이 작은 read에는 쓸 수 있어도, 돈·배포·공개 메시지에는 안전 정책이 아니다.
 
 정확한 시스템은 모르는 상태를 그대로 보고할 수 있어야 한다. `unknown` queue는 receiver 계약이 끊기는 지점을 보여 주는 중요한 운영 신호다.
+
+## 13.14 실제 프로토콜 두 개로 확인한 취소의 범위
+
+취소는 한 단어지만, protocol마다 관측 가능한 끝점이 다르다. 다음의 두 실행은 각각 실제 SDK 경로를 통과한 loopback 실험이다. 그러므로 “모든 원격 도구가 이처럼 동작한다”는 증거는 아니지만, **요청을 보냈다**와 **상태를 다시 읽었다**를 하나의 성공 표시로 합치지 말아야 할 이유를 아주 선명하게 보여 준다.
+
+|경로|실제로 확인한 순서|여기서 멈춰야 하는 결론|
+|---|---|---|
+|MCP/rmcp 1.8.0|40 ms timeout → `notifications/cancelled` → server request token 취소 관측 → 의도적으로 늦춘 local effect 미적용|협조적인 handler가 effect 전에 signal을 보았다는 사실|
+|A2A Python HTTP|`WORKING` 조회 → cancel hook 진입 → cancel 응답 `CANCELED` → 독립 `GetTask`도 `CANCELED`|살아 있는 in-memory task store에서 task 상태가 수렴했다는 사실|
+
+rmcp의 [timeout cancellation 전송 경로](https://github.com/modelcontextprotocol/rust-sdk/blob/25220361d5540715294c501c289d79de4bec2bfc/crates/rmcp/src/service.rs#L400-L409)와 [서버의 request-id token 취소 경로](https://github.com/modelcontextprotocol/rust-sdk/blob/25220361d5540715294c501c289d79de4bec2bfc/crates/rmcp/src/service.rs#L1196-L1209)는 notification과 handler signal의 연결을 보여 준다. 그러나 handler가 그 token을 기다리지 않거나, effect가 이미 commit된 뒤라면 이 연결은 rollback transaction이 아니다.
+
+A2A 쪽도 [handler의 terminal-state 검사와 executor cancel 순서](https://github.com/a2aproject/a2a-python/blob/4b7b24293c55518e3f8b815b04fadf77ed488505/src/a2a/server/request_handlers/default_request_handler.py#L198-L258), [JSON-RPC HTTP POST transport](https://github.com/a2aproject/a2a-python/blob/4b7b24293c55518e3f8b815b04fadf77ed488505/src/a2a/client/transports/jsonrpc.py#L339-L373)를 읽어야 같은 이름의 `cancel`을 과대해석하지 않는다.
+
+### 실습: 관측값과 effect verdict를 두 열로 출력한다
+
+공개 저장소에 함께 배포되는 [기록 검증 bundle](/labs/volume-3/runtime-cancellation-observability/README.txt)은 과거 실행을 새로 돌리지 않는다. 정제해 보관한 event ledger의 순서와 상태 oracle만 검사한다. 따라서 결과의 SHA-256은 **보관본이 바뀌지 않았음**을 뜻하며, live SDK 실행이나 receiver rollback을 재증명하지 않는다.
+
+```bash
+python3 labs/volume-3/runtime-cancellation-observability/verify_recorded_wave78.py \
+  --case rmcp-timeout-cancel --verify-recorded
+python3 labs/volume-3/runtime-cancellation-observability/verify_recorded_wave78.py \
+  --case a2a-http-task-cancel --verify-recorded
+```
+
+실제 제품에 이 실습을 옮길 때의 oracle은 아래처럼 두 줄이어야 한다. 첫 줄만 녹색이어도 둘째 줄이 없으면 effect를 `Cancelled`로 확정하지 않는다.
+
+```text
+control verdict: cancel_requested / handler_cancel_observed / task_state=CANCELED
+effect verdict: receipt_absent / receipt_present / receiver_unreachable
+```
+
+MCP의 local effect 미적용, A2A의 in-memory task state, HTTP 응답, 외부 SaaS의 business commit은 서로 다른 저장 경계다. `receipt_present`라면 cancellation 결과와 별도로 `committed_before_cancel` 또는 보상 절차를 기록한다. `receiver_unreachable`이라면 정답은 재시도도 rollback도 아닌 `unknown`이다.

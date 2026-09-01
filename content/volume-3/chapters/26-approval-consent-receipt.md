@@ -185,6 +185,12 @@ stateDiagram-v2
 
 검증에서는 승인 직후 네 사건을 각각 주입한다. 파일 내용을 바꿔 content hash를 흔들고, policy revision을 올리고, monotonic deadline을 넘기고, dispatch 직전에 revoke를 넣는다. 기대값은 모두 “새 승인 없이 effect attempt 0회”다. 이어 정상 승인 호출의 응답만 버린다. 승인은 유효했어도 결과는 `Unknown`이어야 한다. MCP 성공 응답이나 A2A terminal task state도 receiver가 정의한 commit receipt가 아니므로, 별 계약이 없으면 이 빈칸을 채우지 못한다.
 
+### 26.11.1 receipt 대사 연습
+
+동일 action digest로 정상 승인 하나를 만들고, dispatch 직후 응답을 버린다. 재개 시 approval record를 성공으로 재사용하지 말고 receiver에 effect key를 조회한다. receipt가 있으면 `Committed`로 연결하고, 없거나 조회할 수 없으면 `Unknown`을 유지해 사람이 정한 reconciliation 절차로 넘긴다.
+
+같은 실험에서 content hash를 한 글자만 바꾼 뒤 기존 Yes를 제출한다. revalidation은 stale로 끝나고 effect attempt가 0회여야 한다. 이 결과는 특정 receiver가 exactly-once를 제공한다는 증명이 아니라, 동의·전송 응답·수신자 receipt를 별도 기록으로 다루는지 확인하는 최소 계약이다.
+
 ### 장을 닫기 전 체크리스트
 
 - [ ] consent receipt가 action digest·policy/checkpoint revision·expiry를 포함하는가?

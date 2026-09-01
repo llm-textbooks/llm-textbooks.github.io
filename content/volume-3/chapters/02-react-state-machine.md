@@ -164,6 +164,12 @@ ReAct에서 `Observation: deployment completed`라는 문자열은 읽기 좋지
 
 Codex registry의 post-tool hook 주석은 결과 차단이 이미 끝난 tool execution을 되돌리지 않는다고 명시한다. [Codex registry postflight](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/tools/registry.rs#L651-L773) 또 cancellation 테스트는 dispatch 전 취소와 handler 완료 뒤 취소를 구분한다. [Codex parallel cancellation tests](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/tools/parallel.rs#L419-L675) 이 두 앵커는 cancel이 하나의 상태가 아니라 시점에 따라 다른 의미를 가진다는 직접 근거다.
 
+### 2.6.1 이력 세 장을 손으로 판정하기
+
+같은 logical call ID에 대해 다음 세 이력을 만든다: `proposed → rejected`, `proposed → dispatched → receipt`, `proposed → dispatched → timeout`. 첫째는 새 proposal을 만들 수 있고, 둘째는 receipt를 결과로 합류하며, 셋째는 receiver 조회 전 재시도할 수 없어야 한다. 각 이력에는 attempt와 target revision을 따로 쓴다.
+
+검사는 event 개수가 아니라 전이 순서에 둔다. `dispatch`보다 앞선 receipt, 이전 attempt의 receipt를 새 attempt에 붙이는 일, timeout을 곧바로 실패로 바꾸는 일을 모두 invalid history로 처리한다. 이 작은 판정표가 맞아야 모델의 자연어 observation도 복구기의 다음 행동을 거짓으로 바꾸지 않는다.
+
 ## 2.7 복구와 비보장
 
 ReAct loop의 종료는 네 가지를 분리해서 말해야 한다.

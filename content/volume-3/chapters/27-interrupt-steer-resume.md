@@ -199,6 +199,44 @@ sequenceDiagram
 
 pi 계열에서 `AbortSignal`이 tool callback으로 전달되는지, Codex에서 parallel join이 loser task를 어떻게 정리하는지, Jikji runner가 progress/checkpoint를 어디에 쓰는지를 함수 단위로 본다. 같은 `cancel` 메서드가 있어도 signal 전달, task join, durable checkpoint, receiver fence 중 어느 층인지 먼저 표시한다. Claude Code의 managed core는 공개 소스로 이 전 경로를 확인할 수 없으므로 공개 hook과 문서 계약 이상을 추정하지 않는다.
 
+## 27.12 cancel을 받아들이는 층을 실행 기록으로 판독한다
+
+실제 SDK 경로를 보면 같은 cancel이라도 서로 다른 층에서 멈춘다. rmcp 실행은 timeout 뒤 취소 notification을 보냈고 server handler가 request-context token을 effect 전에 관측했다. A2A HTTP 실행은 executor hook과 task store의 `CANCELED` 상태를 차례로 관측했다. 전자는 **협조적 handler의 중단**, 후자는 **task-state transition**이다. 어느 것도 이미 commit된 receiver effect의 rollback은 아니다.
+
+```mermaid
+sequenceDiagram
+  participant C as control plane
+  participant H as handler / executor
+  participant T as task store
+  participant R as effect receiver
+  C->>H: cancel request or signal
+  H-->>C: handler observed (optional)
+  H->>T: task state=CANCELED (protocol-specific)
+  C->>R: query(idempotency key)
+  alt receipt absent
+    C-->>C: cancelled only after bounded receiver contract
+  else receipt present
+    C-->>C: committed before cancel
+  else query unavailable
+    C-->>C: CancelledUnknownEffect
+  end
+```
+
+이 그림에서 `task state=CANCELED`은 A2A의 task store가 말하는 상태이고, `handler observed`는 rmcp의 cooperative handler가 말하는 상태다. receiver는 두 사실을 자동으로 알지 못한다. 그래서 `cancel_acknowledged_at`, `handler_observed_at`, `task_state_read_at`, `receipt_lookup_at`을 같은 timestamp 필드로 합치지 않는다.
+
+### 공개 기록을 이용한 regression assertion
+
+다음 검증은 external service를 시작하지 않는다. 정제된 과거 ledger에서 MCP의 `request_context_cancelled_before_effect`, A2A의 `WORKING → CANCELED → CANCELED` 재조회 순서를 확인한다. [bundle의 보관 범위와 원전 좌표](/labs/volume-3/runtime-cancellation-observability/README.txt)를 먼저 읽고, 이 결과를 production cancellation latency나 durable task recovery 점수로 쓰지 않는다.
+
+```bash
+python3 labs/volume-3/runtime-cancellation-observability/verify_recorded_wave78.py \
+  --case rmcp-timeout-cancel --verify-recorded
+python3 labs/volume-3/runtime-cancellation-observability/verify_recorded_wave78.py \
+  --case a2a-http-task-cancel --verify-recorded
+```
+
+회귀 테스트에는 반드시 반대쪽 창도 넣는다. 즉, effect commit 직후 response를 잃는 경우와 cancel이 terminal task에 도착하는 경우다. 이 두 경우가 없으면 “취소가 된다”는 테스트는 signal이 빨리 도착한 happy path만 시험하게 된다.
+
 ### 장을 닫기 전 체크리스트
 
 - [ ] interrupt, steer, follow-up, cancel, resume의 event 이름과 state owner가 다른가?

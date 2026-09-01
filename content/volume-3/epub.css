@@ -8,6 +8,9 @@ h2 { font-size: 1.42em; margin-top: 2.2em; border-bottom: 1px solid #b8d8d3; pad
 h3 { font-size: 1.16em; margin-top: 1.7em; }
 p { margin: .75em 0; }
 a { color: #086f66; }
+/* Keep long fixture paths, identifiers, and inline links inside narrow
+   reading panes.  `pre` remains intentionally horizontally scrollable. */
+:where(p, li, td, th, h1, h2, h3, blockquote, figcaption, a) { overflow-wrap: anywhere; }
 code { font-family: monospace; background: #eef7f5; padding: .08em .25em; }
 pre { overflow-x: auto; background: #102a27; color: #f1fbf9; padding: 1em; border-radius: .35em; white-space: pre-wrap; }
 pre code { color: inherit; background: transparent; padding: 0; }
@@ -17,6 +20,7 @@ th { background: #e6f3f0; }
 blockquote { margin: 1em 0; padding: .2em 1em; border-left: .3em solid #43a89d; color: #334b47; }
 figure { margin: 1.5em 0; text-align: center; }
 figure img, svg { max-width: 100%; height: auto; }
+.math-block { max-width: 100%; overflow-x: auto; }
 .part-opener { break-before: page; }
 .part-question, .part-promise, .part-exit-artifact, .part-handoff { margin: 1em 0; padding: .8em 1em; background: #eef7f5; }
 nav ol { padding-left: 1.4em; }

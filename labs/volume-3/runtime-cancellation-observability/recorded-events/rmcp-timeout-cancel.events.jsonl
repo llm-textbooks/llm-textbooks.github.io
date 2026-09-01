@@ -1,0 +1,6 @@
+{"ordinal":1,"stage":"mcp_client","outcome":"initialized"}
+{"ordinal":2,"stage":"mcp_client","outcome":"tools_call_sent_with_timeout_40ms"}
+{"ordinal":3,"stage":"mcp_server","outcome":"tools_call_received"}
+{"ordinal":4,"stage":"mcp_client","outcome":"timeout_and_cancel_notification_sent"}
+{"ordinal":5,"stage":"mcp_server","outcome":"request_context_cancelled_before_effect"}
+{"ordinal":6,"stage":"mcp_client","outcome":"connection_closed_after_observation"}

@@ -119,6 +119,12 @@ sandbox는 허용하지 않은 파일, 네트워크, process, secret surface를 
 4. sandbox deny 뒤 같은 operation을 다른 tool route로 제안한다. policy가 우회되지 않아야 한다.
 5. 같은 resume token을 두 번 enqueue한다. logical call과 effect receipt가 한 번인지 검사한다.
 
+### 12.6.1 승인 대기열을 재현하는 짧은 실습
+
+하나의 destructive proposal에 action digest, policy revision, expiry를 붙여 pause record를 먼저 durable하게 만든다. 그 뒤 (a) 정상 Yes, (b) target 변경 뒤 Yes, (c) expiry 뒤 Yes를 차례로 deliver한다. (a)만 revalidation 뒤 admission 후보가 되고, (b)와 (c)는 새 effect attempt 없이 stale 또는 expired로 끝나야 한다.
+
+정상 경로도 receiver 응답을 일부러 잃어 `Unknown`으로 남긴다. 이 실습은 sandbox가 원격 효과를 되돌린다는 뜻이 아니며, 승인 유효성과 receiver commit을 같은 성공으로 세지 않는지 확인하는 것이다.
+
 ## 12.7 체크리스트와 비보장
 
 - [ ] approval은 action digest·policy revision·expiry를 가진다.

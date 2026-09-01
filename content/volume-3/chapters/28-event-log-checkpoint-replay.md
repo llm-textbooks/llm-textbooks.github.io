@@ -142,6 +142,12 @@ replay는 장애 때 처음 실행하면 안 된다. 매 release에서 표본 ru
 
 이 drill은 production effect를 재발사하지 않아야 한다. network egress를 막고, replay mode에서는 live tool call이 hard fail하도록 만들어 accidental execution을 검출한다. 작동하는 replay는 사고를 되감는 시간 여행이 아니라, 우리가 무엇을 알고 무엇을 모르는지 반복해서 검증하는 훈련이다.
 
+### 28.11.1 한 run을 격리해 다시 판정하기
+
+receipt가 있는 call 하나와 timeout 뒤 receipt가 없는 call 하나를 포함한 완료 run을 고른다. network egress를 막은 격리 환경에서 checkpoint부터 reducer를 적용하고, `pending`, `committed`, `unknown` 집합과 state digest를 baseline에 대조한다. effect attempt counter가 0이 아니면 drill은 실패다.
+
+그 다음 두 번째 call의 event 하나를 삭제하고 다시 실행한다. reducer는 빈칸을 성공으로 메우지 말고 missing artifact 또는 `unknown`으로 멈춰야 한다. 이 실습은 production receiver의 상태를 재현하거나 과거 효과를 되돌리는 기능이 아니다. durable 기록만으로 현재 지식의 경계를 재구성하는지 검사한다.
+
 ### replay drill 중간 점검
 
 - [ ] event, checkpoint, artifact/receipt store의 owner와 책임이 다른가?

@@ -268,6 +268,129 @@ receiver가 commit한 뒤의 refund를 무조건 rollback할 수 있다고 가�
 근거가 되고, 그 근거가 승인된 행동이 되고, 행동이 실제 외부 효과가 되는 모든 경계에서
 identity와 증거의 소유자를 바꾸지 않는 것이 핵심이다.
 
+## 39.9 수직 경계 실습: 후보 하나를 끝까지, 그리고 되짚어 읽기
+
+앞의 표들은 각 경계를 따로 설명했다. 운영에서 더 어려운 일은 다섯 시스템이 남긴 서로 다른
+기록을 한 사용자 의도에 다시 묶는 일이다. 이 절에서는 `refund customer-17`이라는 하나의
+논리 작업을 따라간다. 후보가 발견됐다는 기록, 그래프 제약을 통과했다는 기록, 권한 판정,
+소유권 교체, receiver 영수증은 서로 대체되지 않는다. 따라서 어느 한 단계가 비어도 다음
+단계의 성공 메시지로 채우지 않는다.
+
+### 39.9.1 한 요청에 필요한 좌표를 먼저 고정한다
+
+다음 다이어그램에서 굵은 화살표는 **다음 단계에 넘기는 값**이고, 점선은 **나중에 대조할
+기록**이다. `generation tuple`은 하나의 전역 시계가 아니라, 이 실행이 스스로 비교하기로 한
+좌표 묶음이다. 예를 들어 `(index=g2, graph=g2, source=h91, policy=p8)`처럼 각 저장소의
+독립 revision을 함께 적는다. Qdrant 후보 payload와 OpenFGA Check 응답만으로 이 묶음이
+원자적으로 읽혔다고 말할 수는 없다. 실제 loopback 실험에서도 `g2` 후보와 deny, 또는 allow와
+빈 후보가 각각 나왔다. 그러므로 application이 비교할 좌표와 불일치 처리 규칙을 명시해야 한다.
+
+```mermaid
+sequenceDiagram
+  participant A as AgentRun
+  participant V as Vector index
+  participant G as Graph verifier
+  participant Z as Authorization
+  participant O as Owner / fence
+  participant R as Effect receiver
+
+  A->>V: query(tenant, indexGeneration)
+  V-->>A: candidate + payload generation
+  A->>G: verify(candidate, source hash, graph generation)
+  G-->>A: represented path / unknown
+  A->>Z: Check(principal, action, policy revision)
+  Z-->>A: allow / deny
+  A->>O: acquire current owner + fence
+  O-->>A: epoch / revision
+  A->>R: apply(logicalCall, digest, idempotencyKey, fence)
+  R-->>A: durable receipt or no answer
+  Note over A,R: Unknown is neither abort nor commit
+  A-->>V: record query and candidate
+  A-->>G: record proof identity and source span
+  A-->>Z: record decision revision and time
+  A-->>O: record owner epoch and fence
+  A-->>R: query receipt during recovery
+```
+
+여기서 그래프 검증의 답은 세 값으로 두는 편이 안전하다. `pass`는 선언한 snapshot 안에서
+필요한 path·hash·scope가 표현됐다는 뜻이고, `fail`은 **선언된 폐쇄 inventory** 안에서
+위반을 확인했다는 뜻이다. inventory·탐색 범위·entity-link 규칙이 없는 빈 path는 `unknown`이다.
+이는 그래프가 약해서가 아니라, “찾지 못함”을 “세상에 없음”으로 바꾸지 않기 위한 계약이다.
+`unknown`은 answer를 보류하거나 사람에게 질문할 이유가 될 수 있지만, effect를 시작할 근거는
+아니다.
+
+### 39.9.2 장애를 한 칸씩 옮겨 원인을 분리한다
+
+수신자의 response를 잃은 사건은 겉으로 모두 timeout처럼 보인다. 하지만 *어디까지 도달했는지*
+에 따라 다음 행동은 정반대가 된다. 아래 순서는 이 저장소의 bounded fixture가 실제로 보존하는
+국소적 관측을 바탕으로 한 실습 절차다. SQLite fixture와 localhost process의 결과를 분산
+exactly-once 보장으로 일반화해서는 안 된다.
+
+|관측된 최초 불일치|그 순간까지 확실한 사실|금지할 추론|다음 읽기/행동|
+|---|---|---|---|
+|후보 `g2`, 권한 deny|후보와 권한이 별도 시점에 읽힘|`g2`가 현재 권한을 뜻함|candidate를 폐기하고 effect를 열지 않는다|
+|권한 allow, graph path 없음|권한은 action scope만 판정|원문 관계가 거짓|closure 계약을 확인하고 `unknown` 또는 재조사|
+|승인 뒤 fence가 바뀜|과거 owner가 있었음|기존 worker가 여전히 쓸 수 있음|새 owner가 receiver-side fence로 재입장|
+|old fence의 apply가 409|receiver가 현재 epoch와 비교함|old worker의 이전 호출도 취소됨|그 logical call의 receipt를 별도로 조회|
+|commit 뒤 client response 유실|transport 결과가 미상|abort 또는 duplicate apply|같은 idempotency key로 receipt를 조회|
+
+두 receiver fixture에서는 A가 epoch 1을 얻고 만료 뒤 B가 epoch 2를 얻었다. 늦은 A 요청은
+409 `stale-owner-or-lease`로 거절됐다. 이어 B가 local effect와 receipt를 commit한 직후
+응답 전에 종료됐고, restart된 B는 epoch 3을 얻어 receipt를 읽은 뒤 같은 fingerprint를
+`duplicate`로 reconcile했다. 이 연쇄가 보여 주는 것은 “lease가 중복을 모두 해결한다”가
+아니다. fence는 **오래된 writer를 receiver 입구에서 막는 값**, idempotency key는 **같은
+논리 효과를 다시 알아보는 값**, receipt는 **이미 적용된 사실을 복구하는 값**이다. 셋의 책임은
+서로 다르다.
+
+공개 저장소를 clone한 독자는 다음 세 독립 artifact-verification harness를 차례로 실행한다.
+첫째는 후보·권한의 세대 불일치, 둘째는 stale owner와 receipt reconciliation, 셋째는
+response-loss transport 경계다. 이 명령은 network나 Docker를 시작하지 않고, 함께 배포한
+sanitized event ledger의 SHA-256·ordinal·핵심 outcome을 검증한다. bounded live reproduction의
+고정 제품·scratch 조건은 checkout 안의 `labs/volume-3/retrieval-permission-effect/README.md`에 분리했다.
+
+```bash
+python3 labs/volume-3/retrieval-permission-effect/verify_generation_skew.py --verify-recorded
+python3 labs/volume-3/retrieval-permission-effect/verify_lease_takeover.py --verify-recorded
+python3 labs/volume-3/retrieval-permission-effect/verify_response_boundary.py --verify-recorded
+```
+
+### 39.9.3 15분 디버깅 체크리스트: 마지막 오류부터 거꾸로 간다
+
+incident에서 “에이전트가 잘못 실행했다”는 문장은 출발점일 뿐이다. 아래 순서로 마지막
+durable 사실에서 위로 거슬러 올라가면, 모델 응답·HTTP timeout·trace 유실이라는 큰 잡음보다
+먼저 실제 경계를 찾을 수 있다.
+
+1. **receiver부터 읽는다.** `LogicalCallID`, idempotency key, action digest로 receipt를
+   조회한다. receipt가 없으면 `Failed`로 접지 말고 `Unknown`으로 보존한다.
+2. **fence를 대조한다.** receiver가 받은 fence, 현재 owner/fence, reject reason을 한 화면에
+   놓는다. worker 로그의 “lease 보유”는 receiver가 받아들였다는 증거가 아니다.
+3. **effect-time 권한을 확인한다.** allow/deny뿐 아니라 principal, resource, relation,
+   policy revision, 판정 시각과 action digest가 같은지 본다. 검색 당시의 allow로 대체하지
+   않는다.
+4. **근거의 generation tuple을 확인한다.** index payload generation, graph generation,
+   source hash/span, policy revision이 모두 action에 묶였는지 확인한다. 한 시스템이 최신이라는
+   표시는 다른 시스템의 watermark가 아니다.
+5. **candidate와 proof를 분리한다.** score와 rank는 후보 정렬 기록이다. graph path가 있다면
+   scope·closure·source hash를, 없으면 negative를 말할 권한이 있는지를 확인한다.
+6. **관측 채널을 마지막에 읽는다.** trace, metric, proxy close는 타임라인을 보강하지만 receipt의
+   부재나 존재를 뒤집지 않는다. trace가 없다는 사실도 effect가 없다는 뜻이 아니다.
+
+이 checklist가 만드는 산출물은 한 줄짜리 “성공/실패”가 아니라 다음과 같은 incident tuple이다.
+`(candidate ID, generation tuple, proof disposition, policy decision, fence, logical call,
+idempotency key, receipt disposition)`. 이 튜플을 남기면 새 retriever, graph store, policy
+engine, receiver로 교체해도 어떤 계약을 다시 검증해야 하는지 사라지지 않는다.
+
+### 39.9.4 원전과 구현 좌표
+
+이 절의 국소 실험은 제품의 모든 동작을 대표하지 않는다. 아래 원전은 각각의 경계가 실제로
+어디에 구현되거나 정의되는지 추적하기 위한 출발점이다.
+
+- [Qdrant v1.19.0 query REST handler](https://github.com/qdrant/qdrant/blob/74f3e85b9473c62560006c043e13737ce6b48412/src/actix/api/query_api.rs#L31-L110): query 요청이 product 경계에 들어오는 위치
+- [OpenFGA Check cache/consistency 경로](https://github.com/openfga/openfga/blob/a7dfe8491dc7f9cd5905f4e9ae6c8e1d718c4bd9/internal/graph/cached_resolver.go#L136-L168): `HIGHER_CONSISTENCY`가 cache 경로를 우회하는 범위
+- [OpenFGA Write command](https://github.com/openfga/openfga/blob/a7dfe8491dc7f9cd5905f4e9ae6c8e1d718c4bd9/pkg/server/commands/write.go#L80-L115): tuple delete/write가 처리되는 코드 경계
+- [etcd transaction API](https://etcd.io/docs/v3.5/dev-guide/api_grpc_gateway/#transaction): compare-and-swap ownership을 설계할 때 확인할 compare·success·failure 분기
+- [RDF 1.1 Semantics](https://www.w3.org/TR/rdf11-mt/): 표현되지 않은 path를 자동으로 false로 읽지 않는 모델 이론의 경계
+
 ## 원전 바로가기
 
 - [W3C PROV-O](https://www.w3.org/TR/prov-o/): entity, activity, agent와 provenance 관계

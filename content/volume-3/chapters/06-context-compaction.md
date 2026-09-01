@@ -94,6 +94,12 @@ def compact(run):
     return install_generation(run, summary, control)
 ```
 
+### 6.5.1 설치 전 불변식 판정 연습
+
+완료된 read 하나, 열려 있는 approval 하나, `unknown` write 하나, 만료된 memory 하나, stale child 결과 하나를 같은 history에 넣는다. 압축 전후에 narrative token 수만 비교하지 말고 `approval ID`, unresolved effect 집합, policy revision, child base generation을 표로 대조한다. summary가 짧아져도 이 값 중 하나를 잃으면 설치를 거절한다.
+
+그다음 같은 source generation에서 compactor를 두 번 시작해 늦게 끝난 결과를 설치하려 한다. base generation이 현재 값과 다르면 stale install로 막아야 한다. 이 연습은 요약 문장의 동등성이나 특정 provider의 압축 품질을 증명하지 않는다. 세대 교체가 control state를 덮어쓰지 않는지만 검증한다.
+
 이 코드는 `validates`가 semantic equivalence를 증명한다고 주장하지 않는다. 최소 invariant를 확인할 뿐이다. 예컨대 사고 번호, 대상 revision, open question, 인용 reference가 summary에서 사라지지 않았는지 검사할 수 있다. 하지만 “이 요약만으로 사람이 같은 결정을 내린다”는 성질은 별도 evaluation과 human review가 필요하다.
 
 ## 6.6 summary의 오염과 prompt injection

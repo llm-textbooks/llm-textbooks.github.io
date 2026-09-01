@@ -72,7 +72,7 @@ flowchart LR
 
 planner가 “다음에는 아마 고객 정보를 조회할 것”이라고 예측해 read-only 조회를 준비하는 것은, 맞으면 대기 시간을 가릴 수 있다. 그러나 그 다음 호출이 메일 발송, 배포, 결제, 티켓 변경이라면 이야기가 달라진다. 모델이 나중에 그 branch를 버려도 이미 일어난 외부 효과는 자동으로 버려지지 않는다.
 
-[speculative-tools](https://github.com/joelvarun/speculative-tools)는 tool sequence의 n-gram을 이용해 다음 호출을 예측하고, hit이면 결과를 재사용하고 miss이면 폐기하는 공개 사례다. 이 사례가 유용한 이유는 예측·cache hit·폐기라는 구조를 분명히 보여 주기 때문이다. 하지만 README의 ‘행동이 같다’는 설명만으로 원격 cancellation, 외부 write, idempotency를 증명할 수는 없다. 그 문장이 참이 되려면 tool의 purity 또는 idempotency, 안정적인 call identity, receiver 측 deduplication, 그리고 취소 확인이 별도로 필요하다.
+[speculative-tools](https://github.com/joelvarun/speculative-tools/blob/c93cad9e6449be5e3953ef563943c28b3a962629/README.md#L17-L24)는 tool sequence의 n-gram을 이용해 다음 호출을 예측하고, hit이면 결과를 재사용하고 miss이면 폐기하는 공개 사례다. 이 사례가 유용한 이유는 예측·cache hit·폐기라는 구조를 분명히 보여 주기 때문이다. 하지만 README의 ‘행동이 같다’는 설명만으로 원격 cancellation, 외부 write, idempotency를 증명할 수는 없다. 그 문장이 참이 되려면 tool의 purity 또는 idempotency, 안정적인 call identity, receiver 측 deduplication, 그리고 취소 확인이 별도로 필요하다.
 
 ### 14.1.3 speculative decoding은 검색 fan-out이 아니다
 
@@ -336,4 +336,4 @@ timeout이 만료되면 application task는 돌아올 수 있다. 그것은 remo
 - [Graph of Thoughts](https://arxiv.org/abs/2308.09687), [LLMCompiler](https://arxiv.org/abs/2312.04511), [Adaptive Graph of Thoughts](https://arxiv.org/abs/2502.05078)
 - [Speculative RAG](https://arxiv.org/abs/2407.08223), [RASD](https://arxiv.org/abs/2503.03434)
 - [G-Retriever](https://arxiv.org/abs/2402.07630), [ColBERT](https://arxiv.org/abs/2004.12832)
-- [pi-agent의 tool 실행 경로](https://github.com/badlogic/pi-mono/blob/853a80d26c90a14c1886f0ebb8ffaae133ca2185/packages/agent/src/agent-loop.ts#L409-L553), [speculative-tools](https://github.com/joelvarun/speculative-tools)
+- [pi-agent의 tool 실행 경로](https://github.com/badlogic/pi-mono/blob/853a80d26c90a14c1886f0ebb8ffaae133ca2185/packages/agent/src/agent-loop.ts#L409-L553), [speculative-tools](https://github.com/joelvarun/speculative-tools/blob/c93cad9e6449be5e3953ef563943c28b3a962629/README.md#L17-L24)

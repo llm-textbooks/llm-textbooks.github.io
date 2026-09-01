@@ -161,3 +161,35 @@ $$
 OpenTelemetry의 span status는 instrumentation이 관측한 operation 결과를 표현한다. receiver의 business commit이나 idempotency ledger를 정의하지 않는다. semantic conventions 저장소에 남아 있는 `invoke_agent`·`execute_tool` span 모델도 [deprecated 파일](https://github.com/open-telemetry/semantic-conventions/blob/e9d0607d95d879d4c565b5a25a565fe0c995ec61/model/gen-ai/deprecated/spans-deprecated.yaml#L531-L635)에 있으므로, 이를 현재 안정 규약이나 효과 보증으로 인용하면 안 된다. 이름이 `execute_tool`이어도 span lifecycle의 관측 계약일 뿐이다.
 
 failure lab은 네 channel을 독립적으로 끊는다. collector를 중단해 span·log export를 잃고도 receiver receipt가 남는지, metric scrape를 건너뛰어도 execution ledger가 유지되는지, receiver response만 버려 span을 error로 끝내도 나중 조회로 commit이 드러나는지, log redaction으로 effect ID가 사라져도 access-controlled lookup이 가능한지 본다. 각 trial은 `(runId, logicalCallId, attemptId, effectId, receiptId)`에서 어떤 join이 정의됐는지와 왜 정의되지 않았는지를 함께 출력한다. null을 빈 문자열로 채우면 “관측 불가”가 “동일 사건”으로 합쳐지므로 join key가 없을 때는 명시적으로 `unjoinable`을 반환한다.
+
+## 32.10 한 수직 실행에서 관측을 연결하되, 전달 보증은 만들지 않는다
+
+OpenFGA 판정 → MCP tool → local receipt를 실제 loopback으로 통과시킨 실행에서 allow arm에는 `security.openfga.check`, `mcp.tools.call`, `receiver.receipt`, structured log, root span이 같은 trace ID로 남았고, deny arm에는 tool attempt와 receipt가 없었다. 이것은 authorization decision이 이 fixture의 dispatch gate가 되었고, trace로 실행의 **관계**를 살필 수 있다는 뜻이다.
+
+그러나 사용한 exporter는 [끝난 `SpanData`를 메모리에서 읽는 구현](https://github.com/open-telemetry/opentelemetry-rust/blob/285dc925f98403ff426acc70968f104dc820d4f2/opentelemetry-sdk/src/trace/in_memory_exporter.rs#L117-L138)이었다. [SimpleSpanProcessor가 exporter를 연결하는 코드](https://github.com/open-telemetry/opentelemetry-rust/blob/285dc925f98403ff426acc70968f104dc820d4f2/opentelemetry-sdk/src/trace/provider.rs#L306-L321)는 inspection pipeline을 만들지만 OTLP collector의 수신 확인, disk queue, backend retention을 만들지 않는다. metric도 Prometheus server가 scrape한 series가 아니라 text exposition 형태의 retained counter였다.
+
+|질문|이 실행이 답한 것|별도 검증이 필요한 것|
+|---|---|---|
+|권한 deny가 tool을 막았는가|deny arm에서 tool/receipt 없음|policy update와 dispatch 사이의 원자성|
+|같은 실행을 trace로 잇는가|allow/deny arm의 span이 arm trace ID로 join|모든 service와 모든 retry의 complete trace|
+|receipt는 남았는가|allow arm의 local receipt|원격 receiver durability와 multi-writer correctness|
+|metric은 수집됐는가|retained counter가 증가|Prometheus scrape, remote-write, alert delivery|
+
+### collector와 Prometheus를 붙일 때의 최소 oracle
+
+collector를 추가하면 “span이 collector까지 도착했다”와 “effect가 commit됐다”가 또 한 번 분리된다. Prometheus를 추가하면 “counter가 process에서 노출됐다”, “server가 한 번 scrape했다”, “rule이 평가됐다”, “alert가 전달됐다”도 각각 다른 사실이다. 따라서 운영 검증은 아래처럼 channel별 postcondition을 선언한다.
+
+```text
+trace: collector accepted batch / backend queryable trace (telemetry only)
+metric: Prometheus scraped timestamp / rule result (aggregate only)
+effect: receiver receipt by idempotency key (business effect only)
+```
+
+공개 [기록 검증 bundle](/labs/volume-3/runtime-cancellation-observability/README.txt)에서는 allow/deny의 순서와 fail-closed oracle만 재검사한다.
+
+```bash
+python3 labs/volume-3/runtime-cancellation-observability/verify_recorded_wave78.py \
+  --case openfga-mcp-otel-receipt --verify-recorded
+```
+
+이 검증은 collector나 Prometheus를 기동하지 않으며, 정제된 ledger의 SHA-256도 live 실행 증명이 아니다. 오히려 이 제한을 명시해야 dashboard가 녹색이라는 이유로 receipt를 생략하는 설계를 피할 수 있다.

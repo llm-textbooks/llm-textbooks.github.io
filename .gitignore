@@ -4,6 +4,8 @@ _site/
 npm-debug.log*
 scratch/
 .epub-venv/
+__pycache__/
+*.py[cod]
 content/volume-2/build/
 content/volume-2/dist/
 content/volume-3/build/

@@ -18,6 +18,18 @@ const stripTags = (s = "") => String(s).replace(/<[^>]*>/g, "").replace(/\s+/g, 
 const mkdir = (p) => fs.mkdirSync(p, { recursive: true });
 const write = (rel, data) => { const p = path.join(OUT, rel); mkdir(path.dirname(p)); fs.writeFileSync(p, data); };
 const copy = (src, dest) => { mkdir(path.dirname(path.join(OUT, dest))); fs.copyFileSync(path.join(ROOT, src), path.join(OUT, dest)); };
+const copyTree = (src, dest) => {
+  const from = path.join(ROOT, src);
+  for (const entry of fs.readdirSync(from, { withFileTypes: true })) {
+    // Python verifiers may leave bytecode caches beside the lab fixtures.
+    // They are local execution artifacts, not deployable lab content.
+    if (entry.name === "__pycache__") continue;
+    const childSrc = path.posix.join(src, entry.name);
+    const childDest = path.posix.join(dest, entry.name);
+    if (entry.isDirectory()) copyTree(childSrc, childDest);
+    else copy(childSrc, childDest);
+  }
+};
 
 class StableSlugger {
   constructor(prefix) { this.prefix = prefix; this.seen = new Map(); this.order = 0; }
@@ -259,6 +271,8 @@ for (const rel of ["public/downloads/volume-1-cuda-llm-serving-ko.epub", "public
 // canonical dist artifact directly so the deployed download cannot lag behind
 // the EPUB that was just validated.
 copy("content/volume-3/dist/llm-multi-agent-mechanisms-ko-draft.epub", "downloads/volume-3-multi-agent-mechanisms-ko-draft.epub");
+copyTree("labs/volume-3", "labs/volume-3");
+copy("labs/volume-3/runtime-cancellation-observability/README.md", "labs/volume-3/runtime-cancellation-observability/README.txt");
 copy("public/fonts/NotoSansKR-VF.ttf", "assets/fonts/NotoSansKR-VF.ttf");
 copy("public/fonts/OFL.txt", "assets/fonts/OFL.txt");
 copy("node_modules/mermaid/dist/mermaid.min.js", "assets/mermaid.min.js");

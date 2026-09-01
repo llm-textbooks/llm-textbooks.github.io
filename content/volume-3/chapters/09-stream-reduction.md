@@ -123,6 +123,12 @@ Codex의 item dispatch는 stream response item을 finalize하거나 추적되는
 
 각 실험에서 확인할 oracle은 `terminal_event_seen`, `partial_item_count`, `pending_call_count`, `dispatch_seen`, `receipt_seen`이다. “UI가 멈추지 않았다”는 좋은 UX 신호일 수 있어도 execution correctness oracle은 아니다.
 
+### 9.6.1 재접속 경계 확인
+
+둘째 실험의 마지막으로 받은 sequence를 저장한 뒤, 재접속 응답에 같은 delta와 그 다음 delta를 함께 넣는다. reducer는 이미 적용한 `(response_id, item_id, sequence)`를 한 번만 반영하고, 새 delta만 partial 화면을 바꿔야 한다. `response.completed` 뒤에 늦은 receipt가 오면 transcript terminal은 그대로 두고 tool effect ledger만 갱신한다.
+
+이 검사는 실제 provider의 재접속 프로토콜을 재현하는 실험이 아니다. 화면 reducer가 중복, transcript 종료, receiver 관측을 하나의 완료 boolean으로 합치지 않는지 확인하는 순수 입력-출력 시험이다.
+
 ## 9.7 관측 설계
 
 stream reducer에는 raw event payload를 무제한 저장하지 않는다. prompt나 tool argument에는 비밀·개인정보가 있을 수 있다. 대신 다음처럼 bounded metadata와 보호된 event store를 나눈다.

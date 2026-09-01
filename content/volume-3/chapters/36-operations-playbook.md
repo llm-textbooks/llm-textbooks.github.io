@@ -148,6 +148,19 @@ rm -f run.json
 
 incident record는 blame을 위한 문서가 아니다. 동일한 input과 fault에서 다음 교대자가 같은 oracle을 재검사할 수 있게 하는 재현 패키지다. 그래서 raw 대화 전문보다 identity tuple, revision, receipt, 거절 사유, 변경 시각이 먼저다.
 
+### cancel 경보의 네 줄 packet
+
+취소율이 급증했다고 곧바로 worker를 재시작하지 않는다. 취소 관측에는 네 가지 독립 channel이 있으므로, incident packet에도 네 줄을 분리해 넣는다.
+
+|줄|필수 필드|판정|
+|---|---|---|
+|control|request ID, accepted time, protocol task state|요청이 수락됐는가|
+|handler|attempt ID, cancellation observed phase, deadline|협조적 실행이 실제 멈췄는가|
+|telemetry|trace disposition, exporter/collector/scrape health|무엇이 보이지 않는가|
+|effect|logical key, receiver lookup, receipt ID|외부 변화가 있었는가|
+
+MCP timeout notification, A2A task `CANCELED`, OpenTelemetry span error, Prometheus scrape failure는 이 네 줄 중 서로 다른 줄에 적힌다. 하나의 줄이 누락됐다고 다른 줄을 추론하지 않는다. 특히 `CANCELED`와 `receipt_present`가 함께 보이면 rollback이 아니라 `committed_before_cancel` incident로 분류하고, 보상이 필요하면 새 logical call로 승인·receipt를 남긴다.
+
 ## 36.8 partition·unknown effect 통합 incident playbook
 
 재현 실험의 사후조건은 [37장](37-minimal-agentrun-golden-lab.md), 조정 계층의 CAS·fencing은 [38장](38-multiagent-coordination-lab.md), 검색에서 effect까지의 admission은 [39장](39-retrieval-permission-effect-lab.md), 실행 가능한 회귀 테스트는 [40장](40-crash-recovery-deployment-lab.md)에서 이어진다.

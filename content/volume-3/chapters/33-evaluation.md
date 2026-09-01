@@ -214,3 +214,16 @@ closed-world negative evaluator도 이 계층을 통과해야 한다. inventory 
 - [ ] 점수가 말하지 않는 production·long-horizon 비보장을 적었는가?
 
 평가의 가장 실용적인 산출물은 leaderboard가 아니라 regression suite다. 과거 incident의 stale approval, cross-tenant retrieval, receipt-loss, poisoned shared evidence, retry storm을 작은 deterministic scenario로 고정한다. 새 architecture가 평균 score를 올리더라도 이 negative control을 깨면 release gate를 통과시키지 않는다. 이런 실패 사례가 책의 앞 장들에서 배운 상태·권한·복구를 실제 capability claim에 다시 연결한다.
+
+## 33.11 취소와 관측을 점수 하나로 채점하지 않는다
+
+cancel test의 `PASS`는 무엇을 뜻하는가? MCP에서는 handler가 effect 전 signal을 관측한 것일 수 있고, A2A에서는 task store가 `CANCELED`를 반환한 것일 수 있다. trace가 남았는지도, receiver effect가 없었는지도 이 둘과 독립적이다. 따라서 아래 네 oracle을 하나의 boolean으로 축약하지 않는다.
+
+|oracle|예시 pass|실패를 다른 점수로 숨기면 안 되는 이유|
+|---|---|---|
+|control-plane|cancel request accepted 또는 task state `CANCELED`|request가 effect rollback을 뜻하지 않음|
+|handler|cooperative cancellation을 effect 전 관측|handler가 signal을 무시할 수 있음|
+|telemetry|필요한 span/log/metric disposition 존재|sampling·exporter loss가 실행 부재를 뜻하지 않음|
+|effect|receipt absent 또는 receipt-present reconciliation|외부 상태는 receiver만 권위 있게 판정|
+
+평가 카드에는 “cancellation success rate” 대신 이 네 분모와 `unknown_effect`를 함께 싣는다. 공개 [Wave77/78 기록 검증 bundle](/labs/volume-3/runtime-cancellation-observability/README.txt)은 그중 세 결정론적 순서 oracle을 보존한 regression example다. recorded verification의 통과를 live reliability benchmark로 보고하지 않는 것이 이 장의 평가 원칙과도 일치한다.

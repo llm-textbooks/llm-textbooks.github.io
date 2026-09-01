@@ -75,6 +75,12 @@ allow iff registered(tool)
 
 낮은 temperature로 `delete_backup` proposal이 매번 나와도 allow-list가 없으면 거절돼야 한다. policy revision이 바뀌면 같은 proposal도 stale로 거절돼야 한다. 이 실험이 입증하는 것은 toy sampler의 재현성과 gate의 결정성이다. 실제 provider 품질, 실제 병렬 실행, 실제 external effect safety의 벤치마크가 아니다.
 
+### 10.5.1 proposal과 admission을 분리해 기록하기
+
+세 seed로 같은 입력을 실행해 proposal digest와 sampling 설정을 기록한다. 이어 가장 자주 나온 proposal 하나를 고정하고 allow-list 부재, schema 오류, policy revision 변경을 하나씩 주입한다. 세 경우 모두 sampling 결과와 무관하게 `rejected-before-handler`가 남아야 하며 effect attempt는 0회여야 한다.
+
+마지막으로 policy가 통과한 proposal은 dispatch 뒤 receipt까지 별도 줄에 적는다. 이 표가 없으면 proposal 분포의 변화와 외부 행동의 변화를 같은 수치로 잘못 해석하기 쉽다.
+
 ## 10.6 실패 주입과 운영 점검
 
 | 주입 | 기대 oracle |

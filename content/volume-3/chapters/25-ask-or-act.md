@@ -83,6 +83,12 @@ Admitted -> Prepared -> Attempted -> ReceiptObserved | Unknown | Failed
 
 LangGraph의 interrupt 문서는 checkpoint와 `Command(resume=...)`를 통해 이 경계를 드러낸다. 그러나 재개 때 node가 interrupt 지점만 이어진다고 가정해서는 안 된다. [LangGraph interrupts](https://langchain-ai.github.io/langgraph/concepts/human_in_the_loop/)가 설명하듯 application은 재실행 가능성을 전제로 side effect를 interrupt 뒤로 옮기거나 별 idempotency fence로 감싸야 한다. 프레임워크의 pause가 business receipt를 대신하지 않는 이유다.
 
+### 25.4.1 질문 하나를 실행 계약으로 바꾸는 실습
+
+`production` alias가 두 endpoint를 가리키는 요청을 고르고, 질문을 보내기 전에 candidate target과 presentation digest를 기록한다. 사용자가 첫 endpoint를 고른 뒤 alias를 다른 endpoint로 바꾼 다음 resume한다. canonical target 또는 digest가 달라졌다면 답은 `stale`이며 dispatch가 시작되면 안 된다.
+
+이때 “질문을 보냈다”와 “행동 권한이 생겼다” 사이의 경계를 ledger에서 확인한다. `asked`, durable `paused`, `decided`, `revalidated`, `attempted` 중 누락된 event가 있으면 자동 실행을 보류한다. 이 실습은 사람의 답이 항상 옳음을 검증하는 것이 아니라, 오래된 답이 다른 대상을 승인하지 못하게 하는 시험이다.
+
 ## 25.5 관측: 질문 품질을 승인 수로 재지 않는다
 
 ask rate가 낮으면 과감한 것처럼 보이고, 높으면 신중한 것처럼 보인다. 둘 다 틀릴 수 있다. 다음 지표를 같은 request class별로 본다.
