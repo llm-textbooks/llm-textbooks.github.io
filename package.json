@@ -8,7 +8,7 @@
     "build:html": "node scripts/build.mjs",
     "build:search": "pagefind --site _site --glob '**/*.html'",
     "build": "npm run clean && npm run build:html && npm run build:search",
-    "verify": "node scripts/audit-sources.mjs && node scripts/audit-volume2-editorial.mjs --strict && node scripts/verify.mjs",
+    "verify": "node scripts/audit-sources.mjs && node scripts/audit-volume2-editorial.mjs --strict && node scripts/audit-volume3-preview.mjs && node scripts/audit-volume3-coherence.mjs && node scripts/verify-mermaid.mjs && node scripts/verify.mjs && python3 scripts/verify-epub.py",
     "test": "npm run build && npm run verify"
   },
   "repository": {

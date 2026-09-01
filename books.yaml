@@ -23,8 +23,11 @@ books:
     accent: "#8b5cf6"
   - id: volume-3
     number: 3
-    status: planned
+    status: draft
     short_title: "멀티 에이전트 메커니즘"
     title: "어떻게 활용할 것인가"
     subtitle: "에이전트를 구성하고 지속적으로 개선하기"
+    manifest: content/volume-3/book.yaml
+    content_root: content/volume-3
+    download: /downloads/volume-3-multi-agent-mechanisms-ko-draft.epub
     accent: "#14b8a6"

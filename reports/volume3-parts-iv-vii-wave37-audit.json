@@ -1,0 +1,30 @@
+{
+  "scope": "content/volume-3/chapters/11-*.md through 27-*.md",
+  "chapter_count": 17,
+  "paragraphs_compared": 554,
+  "near_duplicate_threshold": "5-token-shingle Jaccard >= 0.45",
+  "near_duplicate_pairs": [],
+  "cross_references": {
+    "15_to_16": "valid",
+    "21_to_22": "valid",
+    "22_to_23": "valid",
+    "22_to_24_explicit_preview": "valid",
+    "23_to_24": "valid"
+  },
+  "code_fences": {
+    "unlabelled_openers": 0,
+    "python_blocks_reviewed_as_pseudocode_or_partial_example": 14,
+    "pseudocode_boundary_comments_added": 12
+  },
+  "diagram_table_contract": {
+    "contradictions_found": 0,
+    "invariants_checked": [
+      "cancellation request is not receiver rollback",
+      "tool or task completion is not an effect receipt",
+      "candidate retrieval is not admission",
+      "selection is not authorization",
+      "trace correlation is not durable state"
+    ]
+  },
+  "preview_audit": {"chapters": 43, "failures": 0}
+}

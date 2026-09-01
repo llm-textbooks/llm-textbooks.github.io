@@ -464,7 +464,7 @@ sequenceDiagram
   B-->>P: local/backend terminal status
   B-->>D: payload completion/readiness protocol
   D-->>P: application consume/release ACK
-  P->>D: revoke D17; reject new submits
+  P->>D: revoke D17, reject new submits
   D-->>P: revoke ACK and handles drained
   P->>B: deregister M17
   P->>P: free/reuse A17 as A18
@@ -970,4 +970,3 @@ preregistered pool과 eager registration의 선택도 같은 owner 문제다. ea
 마지막 판단은 다섯 질문으로 돌아간다. 누가 bytes를 소유하는가, 어느 registration이 어느 범위를 권한화했는가, 어느 peer가 현재 descriptor를 가졌는가, 어떤 in-flight operation이 이를 참조하는가, 어느 completion과 revoke 뒤에 deregister·reuse할 수 있는가. source와 trace가 같은 답을 가리킬 때 비로소 주소는 안전한 network path가 된다.
 
 독자가 이 장을 덮기 전에 A17 한 행을 직접 채워 보자. base와 length만 적지 말고 allocator epoch, M17 access와 backend, D17을 받은 peer epoch, T17의 submitter와 terminal evidence, revoke ACK와 allocator 반환 시각을 적는다. 어느 칸도 “아마 완료”라고 쓰지 않는다. 증거가 없으면 unknown으로 두고 필요한 source predicate, bounded trace 또는 canary를 지정한다. 이 한 행을 정확히 복원할 수 있다면 새로운 framework나 transport를 만나도 같은 질문으로 lifetime을 다시 계산할 수 있다.
-

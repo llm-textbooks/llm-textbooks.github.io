@@ -1,0 +1,141 @@
+title: "멀티 에이전트 메커니즘"
+subtitle: "한 번의 AgentRun에서 권한·검색·병렬 실행·외부 효과·복구까지"
+series: "LLM 시스템 메커니즘"
+volume: 3
+subjects: ["LLM 에이전트 런타임", "멀티 에이전트 조정", "권한·관측·장애 복구"]
+lang: ko-KR
+edition: draft-0.2
+date: 2026-09-01
+rights: "Draft — 장별 원전 링크와 고정 revision으로 근거를 관리"
+description: "에이전트를 대화 UI가 아니라 상태·권한·외부 효과를 가진 실행 시스템으로 해부하는 기술서"
+include_ontology_catalog: false
+reader_surface_allowed_technical_terms: [sparql, shacl]
+output: llm-multi-agent-mechanisms-ko-draft.epub
+toc_title: "목차"
+
+parts:
+  - title: "I부. 에이전트는 답변이 아니라 실행이다"
+    question: "요청 하나는 어떤 identity와 상태 전이를 거쳐 종료되는가?"
+    promise: "한 AgentRun을 request부터 terminal disposition까지 추적한다."
+    prerequisites: ["명령줄과 JSON의 기초"]
+    routes: {straight: "머리말부터 1→3장을 읽는다.", operations: "1장의 실패 원장에서 시작한다.", source_digging: "3장의 프레임워크 비교를 따라간다."}
+    exit_artifact: "Run·Turn·Attempt·LogicalCall·Effect identity 원장"
+    next_handoff: "II부가 model-visible input의 생성 경로를 복원한다."
+    chapters: [chapters/00-preface.md, chapters/00-reading-routes.md, chapters/01-agent-run.md, chapters/02-react-state-machine.md, chapters/03-framework-boundaries.md]
+  - title: "II부. 입력은 어떻게 모델의 세계가 되는가"
+    question: "instruction·history·tool schema는 어떤 token 열과 generation을 만드는가?"
+    promise: "context assembly, tokenizer, compaction, memory의 소유권을 분리한다."
+    prerequisites: ["I부의 AgentRun identity"]
+    routes: {straight: "4→7장을 읽는다.", operations: "6장 compaction 장애에서 시작한다.", source_digging: "5장 template/schema 코드를 추적한다."}
+    exit_artifact: "context generation·token·memory provenance 원장"
+    next_handoff: "III부가 고정된 입력을 stream 사건으로 바꾸다."
+    chapters: [chapters/04-context-assembly.md, chapters/05-tokenizer-tool-schema.md, chapters/06-context-compaction.md, chapters/07-memory-lifecycle.md]
+  - title: "III부. 모델 호출과 스트림을 사건으로 만들기"
+    question: "확률적 proposal을 어떻게 재시도·정규화·종료 상태로 바꾸는가?"
+    promise: "request identity, partial stream, stochastic surface와 deterministic gate를 분리한다."
+    prerequisites: ["II부의 context generation"]
+    routes: {straight: "8→10장을 읽는다.", operations: "9장 malformed stream에서 시작한다.", source_digging: "8장 retry loop를 추적한다."}
+    exit_artifact: "model attempt·raw event·normalized state·terminal 원장"
+    next_handoff: "IV부가 proposal을 권한 있는 effect로 변환한다."
+    chapters: [chapters/08-model-request-retry.md, chapters/09-stream-reduction.md, chapters/10-stochastic-control.md]
+  - title: "IV부. 도구는 권한 있는 외부 효과다"
+    question: "tool proposal은 언제 실행·재시도·commit될 자격을 얻는가?"
+    promise: "registry, approval, sandbox, logical call, speculation을 effect boundary로 연결한다."
+    prerequisites: ["III부의 normalized event"]
+    routes: {straight: "11→14장을 읽는다.", operations: "13장 unknown effect에서 시작한다.", source_digging: "11장 dispatch path를 따라간다."}
+    exit_artifact: "LogicalCallID·ActionDigest·IdempotencyKey·Receipt 원장"
+    next_handoff: "V부가 여러 실행 주체 사이의 소유권을 다룬다."
+    chapters: [chapters/11-tool-registry-routing.md, chapters/12-permission-approval-sandbox.md, chapters/13-logical-call-effect.md, chapters/14-parallel-speculation.md]
+  - title: "V부. 여러 에이전트를 조직하는 방법"
+    question: "delegation·DAG·debate·shared state·market 비유는 어디까지 유효한가?"
+    promise: "협업 이름 대신 identity, merge law, authority, commit을 비교한다."
+    prerequisites: ["IV부의 effect identity"]
+    routes: {straight: "15→20장을 읽는다.", operations: "18장 stale write에서 시작한다.", source_digging: "20장 actor·CRDT·Raft 원전을 비교한다."}
+    exit_artifact: "parent/child·branch·shared-state·commit authority 그래프"
+    next_handoff: "VI부가 조정 주체가 사용할 근거 검색을 다룬다."
+    chapters: [chapters/15-delegation-parent-child.md, chapters/16-planner-worker-dag.md, chapters/17-debate-vote-verifier.md, chapters/18-blackboard-shared-state.md, chapters/19-contract-net-auction.md, chapters/20-actor-mailbox-crdt-consensus.md]
+  - title: "VI부. 검색과 지식 그래프"
+    question: "가까운 후보를 어떻게 현재·허용·인용 가능한 근거로 바꾸는가?"
+    promise: "vector, graph, temporal scope, hybrid ordering을 출력 타입별로 분리한다."
+    prerequisites: ["V부의 authority·state revision"]
+    routes: {straight: "21→24장을 읽는다.", operations: "22장 post-filter loss에서 시작한다.", source_digging: "23장 SPARQL·SHACL·reasoner를 따라간다."}
+    exit_artifact: "Candidate→AdmissibleRecord→SourceBackedAnswer 변환 원장"
+    next_handoff: "VII부가 사람의 질문·승인·중단을 추가한다."
+    chapters: [chapters/21-embedding-vector-search.md, chapters/22-vector-limits.md, chapters/23-graph-reasoner-temporal.md, chapters/24-hybrid-retrieval.md]
+  - title: "VII부. 사람과 함께 실행하기"
+    question: "언제 묻고, 승인받고, 중단하고, 다시 시작해야 하는가?"
+    promise: "human input을 scope·revision·receipt로 다룬다."
+    prerequisites: ["IV부의 approval·effect boundary"]
+    routes: {straight: "25→27장을 읽는다.", operations: "27장 interrupt race에서 시작한다.", source_digging: "26장 consent receipt를 추적한다."}
+    exit_artifact: "ask·approve·interrupt·resume decision ledger"
+    next_handoff: "VIII부가 중단과 장애 후의 durable recovery를 다룬다."
+    chapters: [chapters/25-ask-or-act.md, chapters/26-approval-consent-receipt.md, chapters/27-interrupt-steer-resume.md]
+  - title: "VIII부. 기록·복구·관측·평가"
+    question: "시스템은 장애 후 무엇을 어디까지 믿고 복구할 수 있는가?"
+    promise: "event log, saga, lease, fault, telemetry, evaluation을 같은 identity로 엮는다."
+    prerequisites: ["VII부의 human-control event"]
+    routes: {straight: "28→33장을 읽는다.", operations: "31장 장애 주입에서 시작한다.", source_digging: "30장 fencing token 구현을 본다."}
+    exit_artifact: "checkpoint·receipt·reconciliation·evaluation 증거 묶음"
+    next_handoff: "IX부가 복구 계약을 배포·SLO·tenant 경계에 올린다."
+    chapters: [chapters/28-event-log-checkpoint-replay.md, chapters/29-outbox-inbox-saga.md, chapters/30-lease-heartbeat-fencing.md, chapters/31-fault-injection-recovery.md, chapters/32-trace-metric-log-receipt.md, chapters/33-evaluation.md]
+  - title: "IX부. 비용·배포·운영"
+    question: "에이전트 시스템을 여러 tenant와 장애 사이에서 어떻게 운영하는가?"
+    promise: "queue·capacity·SLO·isolation·incident playbook을 실행 계약으로 바꾸다."
+    prerequisites: ["VIII부의 recovery·telemetry ledger"]
+    routes: {straight: "34→36장을 읽는다.", operations: "36장 incident triage에서 시작한다.", source_digging: "35장 tenant policy 경계를 추적한다."}
+    exit_artifact: "tenant·queue·SLO·rollout·incident 원장"
+    next_handoff: "X부가 전체 계약을 종합 lab으로 닫는다."
+    chapters: [chapters/34-cost-capacity-slo.md, chapters/35-multitenant-deployment.md, chapters/36-operations-playbook.md]
+  - title: "X부. 종합 실습과 새 프레임워크 해부"
+    question: "독자는 최초 불일치를 찾고 새 프레임워크에도 같은 법을 적용할 수 있는가?"
+    promise: "golden run, coordination, retrieval/effect, crash/deployment, blind source audit를 재실행한다."
+    prerequisites: ["I–IX부 중 실습 대상 장", "Python·SQLite·shell 기초"]
+    routes: {straight: "37→41장을 실행한다.", operations: "40장 crash recovery lab에서 시작한다.", source_digging: "41장 blind rubric을 새 repository에 적용한다."}
+    exit_artifact: "재실행 가능한 AgentRun dossier와 framework 해부 보고서"
+    next_handoff: "실험 결과를 다음 개정의 regression fixture와 운영 판정으로 되돌린다."
+    chapters: [chapters/37-minimal-agentrun-golden-lab.md, chapters/38-multiagent-coordination-lab.md, chapters/39-retrieval-permission-effect-lab.md, chapters/40-crash-recovery-deployment-lab.md, chapters/41-new-framework-autopsy.md]
+
+chapters:
+  - chapters/00-preface.md
+  - chapters/00-reading-routes.md
+  - chapters/01-agent-run.md
+  - chapters/02-react-state-machine.md
+  - chapters/03-framework-boundaries.md
+  - chapters/04-context-assembly.md
+  - chapters/05-tokenizer-tool-schema.md
+  - chapters/06-context-compaction.md
+  - chapters/07-memory-lifecycle.md
+  - chapters/08-model-request-retry.md
+  - chapters/09-stream-reduction.md
+  - chapters/10-stochastic-control.md
+  - chapters/11-tool-registry-routing.md
+  - chapters/12-permission-approval-sandbox.md
+  - chapters/13-logical-call-effect.md
+  - chapters/14-parallel-speculation.md
+  - chapters/15-delegation-parent-child.md
+  - chapters/16-planner-worker-dag.md
+  - chapters/17-debate-vote-verifier.md
+  - chapters/18-blackboard-shared-state.md
+  - chapters/19-contract-net-auction.md
+  - chapters/20-actor-mailbox-crdt-consensus.md
+  - chapters/21-embedding-vector-search.md
+  - chapters/22-vector-limits.md
+  - chapters/23-graph-reasoner-temporal.md
+  - chapters/24-hybrid-retrieval.md
+  - chapters/25-ask-or-act.md
+  - chapters/26-approval-consent-receipt.md
+  - chapters/27-interrupt-steer-resume.md
+  - chapters/28-event-log-checkpoint-replay.md
+  - chapters/29-outbox-inbox-saga.md
+  - chapters/30-lease-heartbeat-fencing.md
+  - chapters/31-fault-injection-recovery.md
+  - chapters/32-trace-metric-log-receipt.md
+  - chapters/33-evaluation.md
+  - chapters/34-cost-capacity-slo.md
+  - chapters/35-multitenant-deployment.md
+  - chapters/36-operations-playbook.md
+  - chapters/37-minimal-agentrun-golden-lab.md
+  - chapters/38-multiagent-coordination-lab.md
+  - chapters/39-retrieval-permission-effect-lab.md
+  - chapters/40-crash-recovery-deployment-lab.md
+  - chapters/41-new-framework-autopsy.md

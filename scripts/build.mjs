@@ -39,7 +39,7 @@ const routeBySource = new Map();
 const fragmentBySource = new Map();
 
 for (const entry of siteConfig.books) {
-  if (entry.status !== "published") { planned.push(entry); continue; }
+  if (!new Set(["published", "draft"]).has(entry.status)) { planned.push(entry); continue; }
   const manifest = yaml(entry.manifest);
   const docs = [];
   const seen = new Set();
@@ -223,7 +223,9 @@ for (const book of published) {
     const body = `<article class="chapter" data-pagefind-filter="volume:${book.number}권" data-pagefind-meta="title:${esc(doc.title)}"><div class="chapter-meta"><a href="${book.route}">${book.number}권</a><span>${esc(book.parts[doc.partIndex].title)}</span><span>${doc.kind === "chapters" ? `${doc.order}장` : doc.kind}</span></div>${doc.rendered.html}${referencePanel(doc.rendered.references)}<div class="chapter-source"><a href="${sourceUrl}">이 장의 Markdown 원문과 개정 이력 보기 ↗</a></div><nav class="pager" aria-label="이전과 다음 장">${prev ? `<a rel="prev" href="${prev.route}"><small>이전</small>${esc(prev.title)}</a>` : "<span></span>"}${next ? `<a rel="next" href="${next.route}"><small>다음</small>${esc(next.title)}</a>` : ""}</nav></article>`;
     write(path.posix.join(doc.route, "index.html").slice(1), shell({ title: doc.title, description: doc.description, body, canonical: doc.route, book, doc, toc: doc.rendered.headings }));
   }
-  const bookBody = `<section class="book-hero"><p class="eyebrow">LLM 시스템 메커니즘 · ${book.number}권</p><h1>${esc(book.manifest.title)}</h1><p class="lead">${esc(book.manifest.subtitle || book.manifest.description)}</p><div class="actions"><a class="button primary" href="${book.docs[0]?.route}">처음부터 읽기</a><a class="button" href="${book.download}">EPUB 내려받기</a></div><dl><div><dt>구성</dt><dd>${book.parts.length}부 · ${book.docs.length}개 문서</dd></div><div><dt>언어</dt><dd>한국어</dd></div><div><dt>상태</dt><dd>계속 개정되는 공개판</dd></div></dl></section><div class="parts-grid">${book.parts.map(p => partCard(book,p)).join("")}</div>`;
+  const downloadAction = book.download ? `<a class="button" href="${book.download}">EPUB 내려받기</a>` : "";
+  const publicationState = book.status === "draft" ? "품질 검증 중인 공개 프리뷰" : "계속 개정되는 공개판";
+  const bookBody = `<section class="book-hero"><p class="eyebrow">LLM 시스템 메커니즘 · ${book.number}권</p><h1>${esc(book.manifest.title)}</h1><p class="lead">${esc(book.manifest.subtitle || book.manifest.description)}</p><div class="actions"><a class="button primary" href="${book.docs[0]?.route}">처음부터 읽기</a>${downloadAction}</div><dl><div><dt>구성</dt><dd>${book.parts.length}부 · ${book.docs.length}개 문서</dd></div><div><dt>언어</dt><dd>한국어</dd></div><div><dt>상태</dt><dd>${publicationState}</dd></div></dl></section><div class="parts-grid">${book.parts.map(p => partCard(book,p)).join("")}</div>`;
   write(`books/${book.id}/index.html`, shell({ title: book.manifest.title, description: book.manifest.description, body: bookBody, canonical: book.route, book }));
   for (const part of book.parts) {
     const body = `<article class="part-opener"><p class="eyebrow">${book.number}권 · ${part.index}부</p><h1>${esc(part.title)}</h1><p class="lead">${esc(part.promise || "")}</p><div class="contract-grid"><section><h2>핵심 질문</h2><p>${esc(part.question || "")}</p></section><section><h2>선행 지식</h2><ul>${(part.prerequisites || []).map(x=>`<li>${esc(x)}</li>`).join("")}</ul></section><section><h2>이 부를 마치면</h2><p>${esc(part.exit_artifact || "")}</p></section><section><h2>다음 연결</h2><p>${esc(part.next_handoff || "")}</p></section></div><ol class="chapter-list">${part.docs.map(d=>`<li><a href="${d.route}"><span>${String(d.order).padStart(2,"0")}</span><strong>${esc(d.title)}</strong></a></li>`).join("")}</ol></article>`;
@@ -235,7 +237,7 @@ const bookCards = siteConfig.books.map(entry => {
   const book = published.find(b => b.id === entry.id);
   return `<article class="series-card ${entry.status}" style="--book-accent:${esc(entry.accent)}"><p>${entry.number}권</p><h2>${esc(book?.manifest.title || entry.title)}</h2><h3>${esc(entry.short_title)}</h3><p>${esc(book?.manifest.description || entry.subtitle || "집필 준비 중")}</p>${book ? `<a href="${book.route}">온라인으로 읽기 <span>→</span></a>` : '<span class="status">준비 중</span>'}</article>`;
 }).join("");
-const home = `<section class="home-hero"><p class="eyebrow">LLM 시스템 메커니즘</p><h1>표면의 API에서<br><em>작동 원리</em>까지.</h1><p class="lead">서빙, 훈련, 에이전트를 따로 외우지 않고 실제 코드·수학·상태·하드웨어의 연결로 읽습니다.</p><div class="actions"><a class="button primary" href="/books/volume-1/">1권 읽기</a><a class="button" href="/books/volume-2/">2권 읽기</a><a class="button" href="/search/">전체 검색</a></div></section><section class="series"><div class="section-heading"><p>THE SERIES</p><h2>세 권으로 이어지는 하나의 지도</h2></div><div class="series-grid">${bookCards}</div></section><section class="principles"><h2>필요할 때 바로 원문까지</h2><div><article><strong>01</strong><h3>함수와 상태</h3><p>설정 이름에서 멈추지 않고 실제 consumer와 상태 전이를 추적합니다.</p></article><article><strong>02</strong><h3>논문과 구현</h3><p>논문의 전제와 고정된 코드 좌표를 같은 문맥에서 연결합니다.</p></article><article><strong>03</strong><h3>실패와 검증</h3><p>정답만 나열하지 않고 최초 불일치와 반증 절차를 남깁니다.</p></article></div></section>`;
+const home = `<section class="home-hero"><p class="eyebrow">LLM 시스템 메커니즘</p><h1>표면의 API에서<br><em>작동 원리</em>까지.</h1><p class="lead">서빙, 훈련, 에이전트를 따로 외우지 않고 실제 코드·수학·상태·하드웨어의 연결로 읽습니다.</p><div class="actions"><a class="button primary" href="/books/volume-1/">1권 읽기</a><a class="button" href="/books/volume-2/">2권 읽기</a><a class="button" href="/books/volume-3/">3권 프리뷰</a><a class="button" href="/search/">전체 검색</a></div></section><section class="series"><div class="section-heading"><p>THE SERIES</p><h2>세 권으로 이어지는 하나의 지도</h2></div><div class="series-grid">${bookCards}</div></section><section class="principles"><h2>필요할 때 바로 원문까지</h2><div><article><strong>01</strong><h3>함수와 상태</h3><p>설정 이름에서 멈추지 않고 실제 consumer와 상태 전이를 추적합니다.</p></article><article><strong>02</strong><h3>논문과 구현</h3><p>논문의 전제와 고정된 코드 좌표를 같은 문맥에서 연결합니다.</p></article><article><strong>03</strong><h3>실패와 검증</h3><p>정답만 나열하지 않고 최초 불일치와 반증 절차를 남깁니다.</p></article></div></section>`;
 write("index.html", shell({ title: siteConfig.site.title, description: siteConfig.site.description, body: home, canonical: "/" }));
 write("books/index.html", shell({ title: "전권", body: `<section class="listing"><p class="eyebrow">BOOKS</p><h1>LLM 시스템 메커니즘 전권</h1><div class="series-grid">${bookCards}</div></section>`, canonical: "/books/" }));
 
@@ -244,7 +246,7 @@ const dummyBook = { id:"author", content_root:"", parts:[] };
 const dummyDoc = { slug:"author", logical:"AUTHOR.md" };
 const author = renderMarkdown(dummyBook, dummyDoc, authorMd);
 write("author/index.html", shell({ title: "저자", description: "Jioh L. Jung 저자 소개", body: `<article class="author-page">${author.html}</article>`, canonical: "/author/", toc: author.headings }));
-write("search/index.html", shell({ title: "전체 검색", body: `<section class="search-page"><p class="eyebrow">SEARCH</p><h1>두 권을 한 번에 검색하기</h1><p>한국어 개념, 함수명, CUDA 심벌, 논문 제목을 검색할 수 있습니다.</p><div id="search" role="search"></div><script>window.addEventListener('DOMContentLoaded',()=>{if(window.PagefindUI)new PagefindUI({element:'#search',showSubResults:true,showImages:false,translations:{placeholder:'예: PagedAttention, Muon, 체크포인트 복구'}})});</script><script src="/pagefind/pagefind-ui.js"></script></section>`, canonical: "/search/" }));
+write("search/index.html", shell({ title: "전체 검색", body: `<section class="search-page"><p class="eyebrow">SEARCH</p><h1>세 권을 한 번에 검색하기</h1><p>한국어 개념, 함수명, CUDA 심벌, 논문 제목과 AgentRun 상태를 검색할 수 있습니다.</p><div id="search" role="search"></div><script>window.addEventListener('DOMContentLoaded',()=>{if(window.PagefindUI)new PagefindUI({element:'#search',showSubResults:true,showImages:false,translations:{placeholder:'예: PagedAttention, Muon, AgentRun, 체크포인트 복구'}})});</script><script src="/pagefind/pagefind-ui.js"></script></section>`, canonical: "/search/" }));
 write("404.html", shell({ title: "페이지를 찾을 수 없습니다", body: `<section class="not-found"><h1>404</h1><p>주소가 바뀌었거나 아직 출판되지 않은 페이지입니다.</p><a class="button primary" href="/">홈으로</a></section>`, canonical: "/404.html" }));
 
 const urls = ["/", "/books/", "/author/", "/search/", ...published.flatMap(b => [b.route, ...b.parts.map(p=>p.route), ...b.docs.map(d=>d.route)])];
@@ -253,6 +255,10 @@ write("robots.txt", `User-agent: *\nAllow: /\nSitemap: ${siteConfig.site.url}/si
 write("site-manifest.json", JSON.stringify({ generatedFrom: siteConfig.books.map(b=>b.id), books: published.map(b=>({id:b.id, parts:b.parts.length, documents:b.docs.length})), routes: urls.length }, null, 2));
 
 for (const rel of ["public/downloads/volume-1-cuda-llm-serving-ko.epub", "public/downloads/volume-2-finetuning-mechanisms-ko.epub"]) copy(rel, rel.replace(/^public\//, ""));
+// Volume 3 is rebuilt from its manuscript during editorial work. Copy the
+// canonical dist artifact directly so the deployed download cannot lag behind
+// the EPUB that was just validated.
+copy("content/volume-3/dist/llm-multi-agent-mechanisms-ko-draft.epub", "downloads/volume-3-multi-agent-mechanisms-ko-draft.epub");
 copy("public/fonts/NotoSansKR-VF.ttf", "assets/fonts/NotoSansKR-VF.ttf");
 copy("public/fonts/OFL.txt", "assets/fonts/OFL.txt");
 copy("node_modules/mermaid/dist/mermaid.min.js", "assets/mermaid.min.js");

@@ -1,0 +1,48 @@
+{
+  "scope": {
+    "parts": ["I", "II", "III"],
+    "files": [
+      "00-preface.md", "00-reading-routes.md", "01-agent-run.md",
+      "02-react-state-machine.md", "03-framework-boundaries.md",
+      "04-context-assembly.md", "05-tokenizer-tool-schema.md",
+      "06-context-compaction.md", "07-memory-lifecycle.md",
+      "08-model-request-retry.md", "09-stream-reduction.md",
+      "10-stochastic-control.md"
+    ]
+  },
+  "chapter_handoffs": {
+    "I_to_II": "Run/Turn/Attempt/LogicalCall/Effect identities feed context generation ownership",
+    "II_to_III": "captured context generation feeds logical model request and stream reduction",
+    "III_to_IV": "normalized proposal and terminal state feed tool admission and effect boundaries"
+  },
+  "cross_references": {
+    "status": "pass",
+    "checked_explicit_prose_refs": 2,
+    "items": [
+      {"from": 8, "to": 13, "concept": "logical call and effect identity", "matched": true},
+      {"from": 8, "to": 10, "concept": "stochastic-control experiment design", "matched": true}
+    ],
+    "route_and_preface_ranges_checked": true
+  },
+  "duplication": {
+    "method": "remove fenced blocks; normalize whitespace; compare paragraphs of at least 80 characters across files",
+    "exact_cross_file_duplicate_paragraphs": 0
+  },
+  "code_blocks": {
+    "counts": {"mermaid": 18, "python": 7, "text": 8, "json": 3, "yaml": 1, "sql": 1},
+    "checks": {
+      "python_ast_parse": {"passed": 7, "failed": 0},
+      "json_decode": {"passed": 3, "failed": 0},
+      "yaml_safe_load": {"passed": 1, "failed": 0},
+      "sqlite_prepare_with_fixture_schema": {"passed": 1, "failed": 0},
+      "mermaid_fence_balance": {"passed": 18, "failed": 0, "note": "Mermaid CLI was not installed; this is a fence and site-structure check, not diagram rendering."}
+    },
+    "execution_boundary": "Python blocks use undefined domain objects by design and are now explicitly labeled as pseudocode. They were syntax-parsed, not presented as standalone runnable programs."
+  },
+  "edits": [
+    "Added explicit pseudocode comments to seven Python blocks",
+    "Marked the SQL example as an application-bound execution template",
+    "Quoted YAML questionnaire placeholders so the block is valid YAML"
+  ],
+  "result": "pass"
+}

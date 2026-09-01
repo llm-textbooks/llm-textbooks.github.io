@@ -6,3 +6,5 @@ scratch/
 .epub-venv/
 content/volume-2/build/
 content/volume-2/dist/
+content/volume-3/build/
+content/volume-3/dist/*-preview.epub

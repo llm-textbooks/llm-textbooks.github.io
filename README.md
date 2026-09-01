@@ -4,7 +4,7 @@ LLM의 서빙·훈련·에이전트 메커니즘을 코드, 수학, 상태, 하�
 
 - 1권: **CUDA로 내려가며 읽는 LLM 추론 서버** — 78장
 - 2권: **파인튜닝 메커니즘** — 본문·실습·플레이북 53문서
-- 3권: **멀티 에이전트 메커니즘** — 준비 중
+- 3권: **멀티 에이전트 메커니즘** — 공개 draft 프리뷰 43문서, EPUB 포함
 
 사이트: <https://llm-textbooks.github.io>
 
@@ -45,6 +45,9 @@ content/
     chapters/
     labs/
     playbooks/
+  volume-3/
+    book.yaml                  # 3권의 부·장 spine
+    chapters/
 public/downloads/              # EPUB
 site-src/                      # 독서 UI의 CSS와 JavaScript
 scripts/build.mjs              # 정적 사이트 생성기
@@ -54,14 +57,14 @@ scripts/audit-volume2-editorial.mjs # 2권 실행 중심 편집 감사
 
 URL은 제목이 아니라 파일 slug를 기반으로 생성합니다. 제목을 고쳐도 장 주소가 바뀌지 않습니다. 각 절의 anchor에는 장 slug와 문서 안 순번을 함께 넣어 같은 제목이 반복되어도 충돌하지 않게 했습니다.
 
-## 3권 추가 방법
+## 3권 공개 프리뷰와 정식판 전환
 
-3권 원고가 준비되면 다음 순서로 등록합니다.
+3권은 현재 `draft` 상태로 웹과 EPUB에 공개되어 있습니다. 정식판으로 전환할 때는 다음을 확인합니다.
 
-1. `content/volume-3/book.yaml`에 권 정보와 `parts`, `chapters`를 선언합니다.
-2. 원고를 `content/volume-3/chapters/` 등에 둡니다.
-3. `books.yaml`의 `volume-3` 항목에 `manifest`, `content_root`, EPUB 경로를 추가하고 상태를 `published`로 바꿉니다.
-4. `npm test`로 전체 세 권의 링크·검색·도식·표·코드 렌더링을 검증합니다.
+1. `content/volume-3/book.yaml`의 권 정보와 `parts`, `chapters`가 실제 EPUB spine과 같은지 확인합니다.
+2. `content/volume-3/dist/`의 검증 대상 EPUB을 `public/downloads/`의 공개 이름으로 복사합니다.
+3. `books.yaml`의 `volume-3` 상태를 `published`로 바꾸고 edition·날짜·rights를 갱신합니다.
+4. `npm test`로 세 권의 링크·검색·도식·표·코드 렌더링과 EPUB container·OPF·spine·내부 참조를 검증합니다.
 
 별도 템플릿을 복제할 필요 없이 동일한 탐색, 검색, EPUB, 저자, SEO 구조가 자동으로 생성됩니다.
 
