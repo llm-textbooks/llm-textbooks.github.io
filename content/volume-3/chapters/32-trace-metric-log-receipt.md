@@ -166,7 +166,9 @@ failure lab은 네 channel을 독립적으로 끊는다. collector를 중단해 
 
 OpenFGA 판정 → MCP tool → local receipt를 실제 loopback으로 통과시킨 실행에서 allow arm에는 `security.openfga.check`, `mcp.tools.call`, `receiver.receipt`, structured log, root span이 같은 trace ID로 남았고, deny arm에는 tool attempt와 receipt가 없었다. 이것은 authorization decision이 이 fixture의 dispatch gate가 되었고, trace로 실행의 **관계**를 살필 수 있다는 뜻이다.
 
-그러나 사용한 exporter는 [끝난 `SpanData`를 메모리에서 읽는 구현](https://github.com/open-telemetry/opentelemetry-rust/blob/285dc925f98403ff426acc70968f104dc820d4f2/opentelemetry-sdk/src/trace/in_memory_exporter.rs#L117-L138)이었다. [SimpleSpanProcessor가 exporter를 연결하는 코드](https://github.com/open-telemetry/opentelemetry-rust/blob/285dc925f98403ff426acc70968f104dc820d4f2/opentelemetry-sdk/src/trace/provider.rs#L306-L321)는 inspection pipeline을 만들지만 OTLP collector의 수신 확인, disk queue, backend retention을 만들지 않는다. metric도 Prometheus server가 scrape한 series가 아니라 text exposition 형태의 retained counter였다.
+그러나 사용한 exporter는 [끝난 `SpanData`를 메모리에서 읽는 구현](https://github.com/open-telemetry/opentelemetry-rust/blob/285dc925f98403ff426acc70968f104dc820d4f2/opentelemetry-sdk/src/trace/in_memory_exporter.rs#L117-L138)이었다.
+
+[SimpleSpanProcessor가 exporter를 연결하는 코드](https://github.com/open-telemetry/opentelemetry-rust/blob/285dc925f98403ff426acc70968f104dc820d4f2/opentelemetry-sdk/src/trace/provider.rs#L306-L321)는 inspection pipeline을 만들지만 OTLP collector의 수신 확인, disk queue, backend retention을 만들지 않는다. metric도 Prometheus server가 scrape한 series가 아니라 text exposition 형태의 retained counter였다.
 
 |질문|이 실행이 답한 것|별도 검증이 필요한 것|
 |---|---|---|

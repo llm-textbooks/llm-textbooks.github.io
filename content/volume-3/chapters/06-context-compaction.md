@@ -54,7 +54,11 @@ context window는 단지 비용 상한이 아니다. provider가 요청을 받�
 
 ## 6.3 실제 코드: pre-sampling compact는 언제 들어가는가
 
-Codex의 고정 공개 리비전에서 pre-sampling compaction은 normal sampling 전에 context-window 상태와 fallback 조건을 확인한다. [Codex pre-sampling compact policy](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/session/turn.rs#L1032-L1062) 그 다음 compatibility hash, backend/provider/model identity 조건을 보고 fallback step context를 다룬다. [Codex compaction compatibility](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/session/turn.rs#L1063-L1197) dispatch는 token-budget, remote-v2, remote-v1, inline path를 provider capability와 설정에 따라 고른다. [Codex compaction dispatch](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/session/turn.rs#L1198-L1331)
+Codex의 고정 공개 리비전에서 pre-sampling compaction은 normal sampling 전에 context-window 상태와 fallback 조건을 확인한다. [Codex pre-sampling compact policy](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/session/turn.rs#L1032-L1062)
+
+그 다음 compatibility hash, backend/provider/model identity 조건을 보고 fallback step context를 다룬다. [Codex compaction compatibility](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/session/turn.rs#L1063-L1197)
+
+dispatch는 token-budget, remote-v2, remote-v1, inline path를 provider capability와 설정에 따라 고른다. [Codex compaction dispatch](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/session/turn.rs#L1198-L1331)
 
 이 구현에서 직접 말할 수 있는 것은 “compaction이 sampling 전에 context-window·provider capability와 연결된 선택 경로를 가진다”는 것이다. summary가 원 history와 의미적으로 동치라는 것, remote compactor가 보안·권한 상태를 모두 보존한다는 것, 또는 모든 provider가 같은 token 계산을 한다는 것은 이 코드로 보장되지 않는다.
 
@@ -195,7 +199,9 @@ install 가능 ⇔ required_refs ⊆ retained_refs
 
 요약이 사실상 맞아도 `call-17`이 아직 unknown이라는 표식이 사라지면 다음 turn이 같은 알림을 새로 보낼 수 있다. 오래된 도구 출력 전문을 모두 보존하면 최신 질문이 잘릴 수도 있다. 압축은 정보량 최대화가 아니라 위험별 보존 규칙을 적용하는 세대 전환이다.
 
-[Codex pre-sampling 검사](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/session/turn.rs#L1032-L1062)에서 trigger가 어느 상태를 읽는지 표시한다. [호환성 경로](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/session/turn.rs#L1063-L1197)에서는 remote/local 선택과 fallback이 같은 보존 계약을 지키는지 본다. [dispatch 구간](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/session/turn.rs#L1198-L1331)은 새 history가 언제 설치되고 실패가 어느 상태로 돌아오는지 추적할 자리다.
+[Codex pre-sampling 검사](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/session/turn.rs#L1032-L1062)에서 trigger가 어느 상태를 읽는지 표시한다.
+
+[호환성 경로](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/session/turn.rs#L1063-L1197)에서는 remote/local 선택과 fallback이 같은 보존 계약을 지키는지 본다. [dispatch 구간](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/session/turn.rs#L1198-L1331)은 새 history가 언제 설치되고 실패가 어느 상태로 돌아오는지 추적할 자리다.
 
 반례는 “배포 알림을 보냈다”는 자연스러운 요약이다. 원래 상태가 timeout 뒤 `unknown`이었다면 재시도를 중복 효과로 바꾼다. “사용자가 배포를 승인했다”만 남기고 action digest와 expiry를 버리면 다른 target에 승인을 재사용할 수도 있다.
 

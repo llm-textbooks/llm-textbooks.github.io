@@ -96,7 +96,9 @@ reduce(state, event):
 
 Codex의 item dispatch는 stream response item을 finalize하거나 추적되는 in-flight tool future로 보낸다. [Codex stream tool dispatch](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/session/turn.rs#L2521-L2720) 이 경계는 tool call이 단지 채팅의 특수한 토큰이 아니라는 사실을 드러낸다. tool output이 늦게 돌아와도 모델 text reducer의 순서와 tool lifecycle은 다를 수 있다.
 
-예를 들어 두 read tool은 병렬로 끝날 수 있다. UI가 completion order로 결과를 넣으면 model에게 준 original call order와 다른 transcript가 만들어질 수 있다. write tool은 더 엄격하다. 병렬 proposal은 가능해도 commit order·approval·idempotency key를 reducer가 임의로 정해서는 안 된다. Codex의 parallel 도구 테스트는 cancellation 전 admission과 handler 완료 뒤 cancellation을 구분한다. [parallel cancellation tests](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/tools/parallel.rs#L419-L675) UI가 ‘취소됨’이라고 표시해도 이미 완료된 handler의 효과가 되돌아간다는 뜻은 아니다.
+예를 들어 두 read tool은 병렬로 끝날 수 있다. UI가 completion order로 결과를 넣으면 model에게 준 original call order와 다른 transcript가 만들어질 수 있다. write tool은 더 엄격하다. 병렬 proposal은 가능해도 commit order·approval·idempotency key를 reducer가 임의로 정해서는 안 된다.
+
+Codex의 parallel 도구 테스트는 cancellation 전 admission과 handler 완료 뒤 cancellation을 구분한다. [parallel cancellation tests](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/tools/parallel.rs#L419-L675) UI가 ‘취소됨’이라고 표시해도 이미 완료된 handler의 효과가 되돌아간다는 뜻은 아니다.
 
 ## 9.5 partial output의 정직한 표시
 

@@ -127,7 +127,9 @@ Plan -> policy(actionDigest, revision)
 |clock의 owner가 명확한가|test tick과 production clock을 구분|TTL 수치를 성능 주장으로 오독|
 |reconcile는 authoritative state를 읽는가|trace만으로 success를 만들지 않음|관측 누락이 effect 누락으로 둔갑|
 
-이 장이 보장하지 않는 것 또한 분명하다. 단일-host SQLite와 Linux식 `SIGKILL`은 multi-region partition, split brain, Kubernetes Lease API, Temporal task ownership, provider-side cancel, replicated database failover를 검증하지 않는다. [Kubernetes Deployment controller의 reconciliation 경로](https://github.com/kubernetes/kubernetes/blob/98e9da3000734733127c8ac3bdb77b42ad61c31b/pkg/controller/deployment/deployment_controller.go#L479-L519)는 reconciliation이 authoritative state를 다시 읽는 구조를 보여 주지만, 이 장의 receiver fence 구현 증거는 아니다. 이 경계를 지켜야 “죽어도 중복 실행하지 않는다”는 강한 문장이 실제로 시험 가능한 약속이 된다.
+이 장이 보장하지 않는 것 또한 분명하다. 단일-host SQLite와 Linux식 `SIGKILL`은 multi-region partition, split brain, Kubernetes Lease API, Temporal task ownership, provider-side cancel, replicated database failover를 검증하지 않는다.
+
+[Kubernetes Deployment controller의 reconciliation 경로](https://github.com/kubernetes/kubernetes/blob/98e9da3000734733127c8ac3bdb77b42ad61c31b/pkg/controller/deployment/deployment_controller.go#L479-L519)는 reconciliation이 authoritative state를 다시 읽는 구조를 보여 주지만, 이 장의 receiver fence 구현 증거는 아니다. 이 경계를 지켜야 “죽어도 중복 실행하지 않는다”는 강한 문장이 실제로 시험 가능한 약속이 된다.
 
 ## 30.7 heartbeat 운영 규칙: 건강 신호를 권한으로 승격하지 않는다
 

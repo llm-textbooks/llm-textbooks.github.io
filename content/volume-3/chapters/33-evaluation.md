@@ -34,9 +34,13 @@ seed를 적었다고 remote model, user simulator, provider queue가 determinist
 
 ## 33.2 benchmark는 서로 다른 질문을 한다
 
-[SWE-bench의 evaluation harness](https://github.com/SWE-bench/SWE-bench/blob/9d38c55881d3ee5c25bad64d736c4440fa5b82d9/swebench/harness/run_evaluation.py#L288-L429)는 pristine container tree에 patch를 적용하고 test script 결과와 report를 materialize하는 흐름을 보여 준다. patch apply 성공은 behavioral correctness가 아니며, report의 `resolved`는 그 harness가 정의한 test oracle의 결과다. [SWE-bench grading](https://github.com/SWE-bench/SWE-bench/blob/9d38c55881d3ee5c25bad64d736c4440fa5b82d9/swebench/harness/grading.py#L113-L176)는 log credibility를 판정하는 단계를 둔다. 이는 pass-looking output이 oracle을 속일 수 있다는 사실을 드러낸다.
+[SWE-bench의 evaluation harness](https://github.com/SWE-bench/SWE-bench/blob/9d38c55881d3ee5c25bad64d736c4440fa5b82d9/swebench/harness/run_evaluation.py#L288-L429)는 pristine container tree에 patch를 적용하고 test script 결과와 report를 materialize하는 흐름을 보여 준다. patch apply 성공은 behavioral correctness가 아니며, report의 `resolved`는 그 harness가 정의한 test oracle의 결과다.
 
-[AgentBench session loop](https://github.com/THUDM/AgentBench/blob/d1e4a10db08c87075c78972e48ecc182be03e2d5/src/client/task.py#L18-L153)는 controller-mediated trajectory와 task status, history-length summary를 다룬다. history length는 token cost도, latency도, side-effect correctness도 아니다. [tau-bench 실행부](https://github.com/sierra-research/tau-bench/blob/59a200c6d575d595120f1cb70fea53cef0632f6b/tau_bench/run.py#L20-L203)는 task/trial reward와 pass^k를 만들지만, user simulation과 strategy configuration이 달라지면 같은 model 비교가 아니다.
+[SWE-bench grading](https://github.com/SWE-bench/SWE-bench/blob/9d38c55881d3ee5c25bad64d736c4440fa5b82d9/swebench/harness/grading.py#L113-L176)는 log credibility를 판정하는 단계를 둔다. 이는 pass-looking output이 oracle을 속일 수 있다는 사실을 드러낸다.
+
+[AgentBench session loop](https://github.com/THUDM/AgentBench/blob/d1e4a10db08c87075c78972e48ecc182be03e2d5/src/client/task.py#L18-L153)는 controller-mediated trajectory와 task status, history-length summary를 다룬다. history length는 token cost도, latency도, side-effect correctness도 아니다.
+
+[tau-bench 실행부](https://github.com/sierra-research/tau-bench/blob/59a200c6d575d595120f1cb70fea53cef0632f6b/tau_bench/run.py#L20-L203)는 task/trial reward와 pass^k를 만들지만, user simulation과 strategy configuration이 달라지면 같은 model 비교가 아니다.
 
 |벤치마크|강한 oracle|그것만으로 약한 것|
 |---|---|---|

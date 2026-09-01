@@ -141,7 +141,9 @@ task completion 수는 planner 품질의 약한 지표다. 더 유용한 지표�
 
 ### 수직 walkthrough
 
-‘새 모델 문서의 호환성을 평가하라’는 task를 생각하자. planner는 fetch documentation, inspect schema, run read-only compatibility check, draft report를 만든다. documentation fetch와 schema inspect는 declared independent일 수 있지만 같은 vendor quota와 source snapshot을 공유한다. admission은 같은 quota group으로 묶는다. compatibility check는 둘의 admissible output만 입력으로 받는다. draft report는 source span이 없는 claim을 포함하면 verifier가 reject한다. publish는 human approval과 current policy revision을 다시 확인한 뒤 수행한다. graph는 이 순서를 보이지만, source freshness와 authority는 별 gate가 보장한다.
+‘새 모델 문서의 호환성을 평가하라’는 task를 생각하자. planner는 fetch documentation, inspect schema, run read-only compatibility check, draft report를 만든다. documentation fetch와 schema inspect는 declared independent일 수 있지만 같은 vendor quota와 source snapshot을 공유한다. admission은 같은 quota group으로 묶는다. compatibility check는 둘의 admissible output만 입력으로 받는다.
+
+draft report는 source span이 없는 claim을 포함하면 verifier가 reject한다. publish는 human approval과 current policy revision을 다시 확인한 뒤 수행한다. graph는 이 순서를 보이지만, source freshness와 authority는 별 gate가 보장한다.
 
 ### merge law가 없는 DAG는 순서가 숨어 있는 목록이다
 

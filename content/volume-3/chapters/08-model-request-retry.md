@@ -63,11 +63,15 @@ sequenceDiagram
 
 ## 8.2 코드가 말하는 범위
 
-Codex의 고정 공개 리비전에서 sampling request는 요청 attempt를 반복하고, retryable stream error를 구분하며, retry가 허용된 뒤 timing을 남긴다. [Codex sampling retry loop](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/session/turn.rs#L1361-L1468) retry policy는 bounded retry와 특정 조건의 connection retry, capped exponential delay를 다룬다. [Codex response retry policy](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/responses_retry.rs#L1-L150)
+Codex의 고정 공개 리비전에서 sampling request는 요청 attempt를 반복하고, retryable stream error를 구분하며, retry가 허용된 뒤 timing을 남긴다. [Codex sampling retry loop](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/session/turn.rs#L1361-L1468)
+
+retry policy는 bounded retry와 특정 조건의 connection retry, capped exponential delay를 다룬다. [Codex response retry policy](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/responses_retry.rs#L1-L150)
 
 이 구현에서 읽어야 할 문장은 “재시도한다”가 아니라 “어떤 오류가 retryable이며, 어느 시점에서 다음 attempt를 허용하는가”다. retryable transport failure는 provider가 같은 출력이나 같은 tool proposal을 반환한다는 약속이 아니다. 더구나 이것은 원격 도구의 외부 효과 원자성이나 rollback을 보장하지 않는다.
 
-스트림 event loop는 `response.completed` 전에 EOF가 오면 stream error로 취급하고, cancellation을 turn abort로 바꾼다. [Codex stream event loop](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/session/turn.rs#L2296-L2520) 별도 integration test는 특정 고정 시나리오에서 stream error 뒤 다음 turn을 시작할 수 있음을 확인한다. [stream recovery test](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/tests/suite/stream_error_allows_next_turn.rs#L21-L120) 이것은 회복성의 좋은 근거이지만, 모든 provider failure나 partial tool execution의 안전성을 일반화하는 근거는 아니다.
+스트림 event loop는 `response.completed` 전에 EOF가 오면 stream error로 취급하고, cancellation을 turn abort로 바꾼다. [Codex stream event loop](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/session/turn.rs#L2296-L2520)
+
+별도 integration test는 특정 고정 시나리오에서 stream error 뒤 다음 turn을 시작할 수 있음을 확인한다. [stream recovery test](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/tests/suite/stream_error_allows_next_turn.rs#L21-L120) 이것은 회복성의 좋은 근거이지만, 모든 provider failure나 partial tool execution의 안전성을 일반화하는 근거는 아니다.
 
 ## 8.3 네 종류의 retry를 섞지 말 것
 
@@ -189,6 +193,8 @@ retryable = transport_class 허용 ∧ budget_remaining ∧ not_cancelled
           ∧ context_generation unchanged ∧ no_unreconciled_effect
 ```
 
-[sampling loop](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/session/turn.rs#L1361-L1468)에서 attempt 증가를, [retry policy](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/responses_retry.rs#L1-L150)에서 오류 분류와 delay 상한을, [stream loop](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/session/turn.rs#L2296-L2520)에서 EOF와 cancel disposition을 찾는다. 429와 tool dispatch 뒤 timeout을 같은 retryable flag로 접으면 안 된다.
+[sampling loop](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/session/turn.rs#L1361-L1468)에서 attempt 증가를, [retry policy](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/responses_retry.rs#L1-L150)에서 오류 분류와 delay 상한을, [stream loop](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/session/turn.rs#L2296-L2520)에서 EOF와 cancel disposition을 찾는다.
+
+429와 tool dispatch 뒤 timeout을 같은 retryable flag로 접으면 안 된다.
 
 실습 stub은 partial text 뒤 EOF, completion 전 cancel, 429와 retry-after, tool item 직후 connection loss를 낸다. partial transcript가 final로 승격되지 않는지, cancel 뒤 admission이 없는지, unknown effect가 있으면 retry가 보류되는지 확인한다. 원장에는 logical request/attempt ID, generation, digests, route, error class, delay와 누적 budget을 남긴다.

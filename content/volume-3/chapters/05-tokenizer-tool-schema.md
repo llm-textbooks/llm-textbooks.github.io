@@ -60,7 +60,9 @@ flowchart LR
 
 ## 5.3 실제 구현: Transformers의 템플릿 경계
 
-Hugging Face Transformers의 고정 리비전에서 `apply_chat_template` 경로는 role/message와 tool을 Jinja chat template으로 렌더한 뒤 tokenizer를 호출한다. 이때 이미 템플릿이 special token을 넣었다면 tokenization에서 중복으로 넣지 않도록 처리한다. [Transformers chat template tokenization](https://github.com/huggingface/transformers/blob/4da05482135896a529d5536c3c003102d36528a2/src/transformers/tokenization_utils_base.py#L2989-L3131) 도구는 callable 또는 dict를 JSON Schema 형태로 바꾸고 template render에 전달된다. [Transformers tool-schema rendering](https://github.com/huggingface/transformers/blob/4da05482135896a529d5536c3c003102d36528a2/src/transformers/utils/chat_template_utils.py#L498-L587)
+Hugging Face Transformers의 고정 리비전에서 `apply_chat_template` 경로는 role/message와 tool을 Jinja chat template으로 렌더한 뒤 tokenizer를 호출한다. 이때 이미 템플릿이 special token을 넣었다면 tokenization에서 중복으로 넣지 않도록 처리한다. [Transformers chat template tokenization](https://github.com/huggingface/transformers/blob/4da05482135896a529d5536c3c003102d36528a2/src/transformers/tokenization_utils_base.py#L2989-L3131)
+
+도구는 callable 또는 dict를 JSON Schema 형태로 바꾸고 template render에 전달된다. [Transformers tool-schema rendering](https://github.com/huggingface/transformers/blob/4da05482135896a529d5536c3c003102d36528a2/src/transformers/utils/chat_template_utils.py#L498-L587)
 
 이 코드가 직접 보여 주는 것은 role/tool/schema가 renderer를 거쳐 tokenization에 들어간다는 사실이다. 모든 provider wire format이 동일하다거나, 이 renderer가 authorization을 수행한다는 뜻은 아니다. 특히 callable에서 생성한 schema는 description과 type hint의 해석을 포함하므로, dependency revision이 바뀌면 model-visible bytes가 바뀔 수 있다.
 
@@ -189,7 +191,9 @@ N_total = N_special + N_instruction + N_history
 
 예산 `B`를 넘으면 어느 항을 줄일지 owner가 정해야 한다. 마지막 `B`개 token만 남기는 방식은 system instruction을 살리고 tool result를 자를 수도, 반대로 오래된 tool result 때문에 최신 사용자 질문을 자를 수도 있다. 따라서 truncation은 배열 slice가 아니라 semantic segment policy다.
 
-[Transformers의 `apply_chat_template` 경로](https://github.com/huggingface/transformers/blob/4da05482135896a529d5536c3c003102d36528a2/src/transformers/tokenization_utils_base.py#L2989-L3131)를 함수 단위로 읽을 때는 네 지점을 표시한다. template 선택, tools/documents 전달, tokenize 여부, generation prompt와 assistant mask 처리다. 이어 [tool schema 변환](https://github.com/huggingface/transformers/blob/4da05482135896a529d5536c3c003102d36528a2/src/transformers/utils/chat_template_utils.py#L498-L587)에서 Python callable의 type hint와 docstring이 JSON schema로 바뀌는 조건을 확인한다. 자동 변환이 편리해도 description, nullable, enum, nested object 의미가 제품 계약과 같은지는 별도 검사해야 한다.
+[Transformers의 `apply_chat_template` 경로](https://github.com/huggingface/transformers/blob/4da05482135896a529d5536c3c003102d36528a2/src/transformers/tokenization_utils_base.py#L2989-L3131)를 함수 단위로 읽을 때는 네 지점을 표시한다. template 선택, tools/documents 전달, tokenize 여부, generation prompt와 assistant mask 처리다.
+
+이어 [tool schema 변환](https://github.com/huggingface/transformers/blob/4da05482135896a529d5536c3c003102d36528a2/src/transformers/utils/chat_template_utils.py#L498-L587)에서 Python callable의 type hint와 docstring이 JSON schema로 바뀌는 조건을 확인한다. 자동 변환이 편리해도 description, nullable, enum, nested object 의미가 제품 계약과 같은지는 별도 검사해야 한다.
 
 [assistant mask와 truncation 구간](https://github.com/huggingface/transformers/blob/4da05482135896a529d5536c3c003102d36528a2/src/transformers/tokenization_utils_base.py#L3132-L3157)은 학습용 mask 이야기로만 넘기지 않는다. serving에서도 character span과 token span의 대응이 깨지면 어느 부분이 assistant 생성인지, tool call이 어디서 시작하는지 분석하기 어려워진다. fast tokenizer와 slow tokenizer, Unicode normalization, template whitespace control이 달라질 때 golden fixture가 필요한 이유다.
 

@@ -80,7 +80,9 @@ embedding cache 또는 retrieval cache key에 query text만 쓰면 policy revisi
 
 ## 21.7 품질·안전성 평가를 분리한다
 
-Recall@k와 nDCG가 좋아져도 authorization correctness, stale answer rate, citation span completeness가 같이 좋아졌다는 뜻은 아니다. 평가 표에는 ranking metric과 `authorized recall`, `post-filter empty`, `stale-source promoted`, `negative unknown correctness`를 나란히 둔다. offline corpus의 완전 relevance label을 production SLO로 옮길 때는 ingest lag, deletion propagation, policy decision latency, tail query latency를 추가로 관찰한다. generator 직전에도 allowed record, valid as-of, source span을 재검사한다. retrieval answer는 action authority가 아니라 후보 생성이다.
+Recall@k와 nDCG가 좋아져도 authorization correctness, stale answer rate, citation span completeness가 같이 좋아졌다는 뜻은 아니다. 평가 표에는 ranking metric과 `authorized recall`, `post-filter empty`, `stale-source promoted`, `negative unknown correctness`를 나란히 둔다. offline corpus의 완전 relevance label을 production SLO로 옮길 때는 ingest lag, deletion propagation, policy decision latency, tail query latency를 추가로 관찰한다.
+
+generator 직전에도 allowed record, valid as-of, source span을 재검사한다. retrieval answer는 action authority가 아니라 후보 생성이다.
 
 ### multi-vector와 hybrid의 위치
 

@@ -97,7 +97,9 @@ Codex의 고정 공개 리비전에서 `run_turn`은 이전 비동기 hook을 �
 
 모델이 구조화된 도구 호출을 출력해도 바로 실행하면 안 된다. 적어도 이름, payload 형태, 사용 가능 도구 집합, 사용자·tenant 권한, 승인 범위, 대상 revision, 동시성 제한을 확인해야 한다. 이 단계는 모델 품질을 의심하기 위한 장치가 아니라, 모델이 권한 owner가 아니기 때문에 필요하다.
 
-Codex는 response item을 in-flight future로 넘기기 전에 router에서 `session`, `turn`, `step context`, cancellation token, `call_id`, tool name, payload를 묶은 invocation을 만든다. [Codex tool router](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/tools/router.rs#L302-L387) 이어 registry는 알 수 없는 도구·맞지 않는 payload를 거절하고 pre-tool hook을 수행한다. [Codex registry preflight](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/tools/registry.rs#L493-L650)
+Codex는 response item을 in-flight future로 넘기기 전에 router에서 `session`, `turn`, `step context`, cancellation token, `call_id`, tool name, payload를 묶은 invocation을 만든다. [Codex tool router](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/tools/router.rs#L302-L387)
+
+이어 registry는 알 수 없는 도구·맞지 않는 payload를 거절하고 pre-tool hook을 수행한다. [Codex registry preflight](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/tools/registry.rs#L493-L650)
 
 이 두 함수 사이에는 중요한 설계 원칙이 숨어 있다. **schema exposure는 authorization이 아니다.** 모델에게 `delete_branch` schema를 보여 주는 일은 모델이 그 이름을 올바르게 말할 수 있게 할 뿐이다. 실제 실행 권한은 registry와 policy gate가 소유한다. 반대로 policy가 허용해도 schema가 drift하면 모델은 다른 인자를 만들 수 있다. 문법·권한·대상 최신성은 세 개의 독립 gate다.
 
@@ -162,7 +164,9 @@ ReAct에서 `Observation: deployment completed`라는 문자열은 읽기 좋지
 | stale target revision | revision mismatch | reject/replan | 오래된 proposal commit |
 | stream EOF | `response.completed` 전 종료 기록 | retryable error 또는 failed | partial assistant text를 완료로 표시 |
 
-Codex registry의 post-tool hook 주석은 결과 차단이 이미 끝난 tool execution을 되돌리지 않는다고 명시한다. [Codex registry postflight](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/tools/registry.rs#L651-L773) 또 cancellation 테스트는 dispatch 전 취소와 handler 완료 뒤 취소를 구분한다. [Codex parallel cancellation tests](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/tools/parallel.rs#L419-L675) 이 두 앵커는 cancel이 하나의 상태가 아니라 시점에 따라 다른 의미를 가진다는 직접 근거다.
+Codex registry의 post-tool hook 주석은 결과 차단이 이미 끝난 tool execution을 되돌리지 않는다고 명시한다. [Codex registry postflight](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/tools/registry.rs#L651-L773)
+
+또 cancellation 테스트는 dispatch 전 취소와 handler 완료 뒤 취소를 구분한다. [Codex parallel cancellation tests](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/tools/parallel.rs#L419-L675) 이 두 앵커는 cancel이 하나의 상태가 아니라 시점에 따라 다른 의미를 가진다는 직접 근거다.
 
 ### 2.6.1 이력 세 장을 손으로 판정하기
 

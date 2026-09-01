@@ -69,7 +69,9 @@ sequenceDiagram
 | receiver commit 뒤 response loss | 효과는 이미 있을 수 있음 | unknown, dedup/status query |
 | receipt durable write 뒤 client crash | reconcile로 commit 복원 가능 | committed 가능 |
 
-Temporal의 activity retry 옵션과 client retry는 scheduling/transport의 재시도를 다룬다. [Temporal activity retry options](https://github.com/temporalio/sdk-go/blob/213f751d5117fd5621ef6dd55a21b78d605c9696/workflow/activity_options.go#L83-L90) 그러나 이 설정은 third-party API가 같은 business write를 중복 제거한다는 보장이 아니다. Temporal의 설명과 test를 정확히 읽으면, workflow identity·retry·heartbeat는 서로 다른 문제를 푼다는 점이 보인다. [Temporal heartbeat interface](https://github.com/temporalio/sdk-typescript/blob/1327f2d5ae77210555bbafc01fbdeaca3e9499eb/packages/workflow/src/workflow.ts#L254-L261)
+Temporal의 activity retry 옵션과 client retry는 scheduling/transport의 재시도를 다룬다. [Temporal activity retry options](https://github.com/temporalio/sdk-go/blob/213f751d5117fd5621ef6dd55a21b78d605c9696/workflow/activity_options.go#L83-L90) 그러나 이 설정은 third-party API가 같은 business write를 중복 제거한다는 보장이 아니다.
+
+Temporal의 설명과 test를 정확히 읽으면, workflow identity·retry·heartbeat는 서로 다른 문제를 푼다는 점이 보인다. [Temporal heartbeat interface](https://github.com/temporalio/sdk-typescript/blob/1327f2d5ae77210555bbafc01fbdeaca3e9499eb/packages/workflow/src/workflow.ts#L254-L261)
 
 ## 13.3 receiver가 가져야 하는 계약
 

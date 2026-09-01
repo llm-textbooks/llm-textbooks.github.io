@@ -225,7 +225,9 @@ effect observation:  receipt_id=receipt-deploy-11
 
 ### Akka source를 읽을 때의 실무 질문
 
-고정 [Akka Typed `SupervisorStrategy.scala`](https://github.com/akka/akka/blob/a7ebe0ca46a55d62270b959942e6698727e400aa/akka-actor-typed/src/main/scala/akka/actor/typed/SupervisorStrategy.scala#L16-L40)는 `resume`, `restart`, `stop`을 구분한다. 같은 파일의 [restart stash contract](https://github.com/akka/akka/blob/a7ebe0ca46a55d62270b959942e6698727e400aa/akka-actor-typed/src/main/scala/akka/actor/typed/SupervisorStrategy.scala#L274-L288)는 restart 대기 중 들어온 message를 stash했다가 새 behavior에 전달할 수 있으며, capacity를 넘으면 drop될 수 있음을 적는다.
+고정 [Akka Typed `SupervisorStrategy.scala`](https://github.com/akka/akka/blob/a7ebe0ca46a55d62270b959942e6698727e400aa/akka-actor-typed/src/main/scala/akka/actor/typed/SupervisorStrategy.scala#L16-L40)는 `resume`, `restart`, `stop`을 구분한다.
+
+같은 파일의 [restart stash contract](https://github.com/akka/akka/blob/a7ebe0ca46a55d62270b959942e6698727e400aa/akka-actor-typed/src/main/scala/akka/actor/typed/SupervisorStrategy.scala#L274-L288)는 restart 대기 중 들어온 message를 stash했다가 새 behavior에 전달할 수 있으며, capacity를 넘으면 drop될 수 있음을 적는다.
 
 그래서 운영 review에서는 'restart했는가?' 대신 다음을 묻는다.
 

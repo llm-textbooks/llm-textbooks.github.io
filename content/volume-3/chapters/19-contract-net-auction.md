@@ -245,7 +245,9 @@ research/agents/runtime-evidence/contract-net-auction-sqlite-wave44/manifest.jso
 
 ### 원전의 위치와 이 실습의 거리
 
-[보존된 FIPA Contract Net 명세](https://web.archive.org/web/20240101000000id_/http://www.fipa.org/specs/fipa00029/SC00029H.html)는 CFP·proposal·accept/reject·completion 대화를 설명한다. [JADE `ContractNetInitiator` API](https://jade.tilab.com/doc/api/jade/proto/ContractNetInitiator.html)는 그 initiator 쪽 callback을 제공한다. [AutoGen selector](https://github.com/microsoft/autogen/blob/027ecf0a379bcc1d09956d46d12d44a3ad9cee14/python/packages/autogen-agentchat/src/autogen_agentchat/teams/_group_chat/_selector_group_chat.py#L152-L217)는 다음 speaker 후보를 제한하고 한 명을 선택한다.
+[보존된 FIPA Contract Net 명세](https://web.archive.org/web/20240101000000id_/http://www.fipa.org/specs/fipa00029/SC00029H.html)는 CFP·proposal·accept/reject·completion 대화를 설명한다. [JADE `ContractNetInitiator` API](https://jade.tilab.com/doc/api/jade/proto/ContractNetInitiator.html)는 그 initiator 쪽 callback을 제공한다.
+
+[AutoGen selector](https://github.com/microsoft/autogen/blob/027ecf0a379bcc1d09956d46d12d44a3ad9cee14/python/packages/autogen-agentchat/src/autogen_agentchat/teams/_group_chat/_selector_group_chat.py#L152-L217)는 다음 speaker 후보를 제한하고 한 명을 선택한다.
 
 세 원전 중 어느 것도 이 실습의 reservation table, `active_fence`, receiver receipt row, crash 뒤 reconciliation을 제공하지 않는다. 따라서 protocol을 채택했다는 사실과 안전한 경매형 delegation을 만들었다는 주장을 분리해야 한다. 이 간격을 코드와 oracle로 드러내는 것이 경매 비유를 시스템 설계로 바꾸는 출발점이다.
 

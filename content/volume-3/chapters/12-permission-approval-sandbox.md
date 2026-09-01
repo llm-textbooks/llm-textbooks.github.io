@@ -78,7 +78,9 @@ sequenceDiagram
 
 ## 12.2 코드에서 보는 좁은 계약
 
-Codex orchestrator는 approval 요건과 sandbox 관련 attempt 처리를 순서 있게 조합한다. [Codex tool orchestrator](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/tools/orchestrator.rs#L56-L260) approval handling은 command·cwd·parsed action 같은 정보를 presentation boundary로 보낼 수 있다. [Codex approvals](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/tools/approvals.rs#L495-L780) 이 코드는 UI에 무엇을 보여 줄 수 있는지와 실행 시도 순서를 읽게 해 준다. 그것만으로 모든 approval receipt가 durable하고 외부 effect가 exactly once라는 결론은 낼 수 없다.
+Codex orchestrator는 approval 요건과 sandbox 관련 attempt 처리를 순서 있게 조합한다. [Codex tool orchestrator](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/tools/orchestrator.rs#L56-L260)
+
+approval handling은 command·cwd·parsed action 같은 정보를 presentation boundary로 보낼 수 있다. [Codex approvals](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/tools/approvals.rs#L495-L780) 이 코드는 UI에 무엇을 보여 줄 수 있는지와 실행 시도 순서를 읽게 해 준다. 그것만으로 모든 approval receipt가 durable하고 외부 effect가 exactly once라는 결론은 낼 수 없다.
 
 Jikji의 approval 흐름은 auto/deny/ask를 나누고 human approver가 없는 ask를 fail-closed로 다룬다. 이는 중요한 기본값이다. 그러나 승인 판단과 receiver의 commit receipt는 서로 다른 데이터다. message send가 승인되었다고 전송 성공이 증명되는 것은 아니다.
 

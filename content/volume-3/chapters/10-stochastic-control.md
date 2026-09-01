@@ -24,7 +24,9 @@ flowchart LR
 
 ## 10.2 Transformers 코드의 정확한 경계
 
-Transformers의 고정 공개 revision에서 logits processor list는 score를 순서대로 변환한다. score가 decoding mode에 따라 logits 또는 log-softmax일 수 있다는 설명도 코드 문서에 있다. [Transformers logits processors](https://github.com/huggingface/transformers/blob/550d7b3834670483a4df436541272c055dc364bf/src/transformers/generation/logits_process.py#L63-L103) Temperature warper는 sampling에서 score를 temperature로 나누며, sampling을 사용하지 않으면 영향을 주지 않는다는 구현 경계가 명시되어 있다. [temperature warper](https://github.com/huggingface/transformers/blob/550d7b3834670483a4df436541272c055dc364bf/src/transformers/generation/logits_process.py#L238-L303)
+Transformers의 고정 공개 revision에서 logits processor list는 score를 순서대로 변환한다. score가 decoding mode에 따라 logits 또는 log-softmax일 수 있다는 설명도 코드 문서에 있다. [Transformers logits processors](https://github.com/huggingface/transformers/blob/550d7b3834670483a4df436541272c055dc364bf/src/transformers/generation/logits_process.py#L63-L103)
+
+Temperature warper는 sampling에서 score를 temperature로 나누며, sampling을 사용하지 않으면 영향을 주지 않는다는 구현 경계가 명시되어 있다. [temperature warper](https://github.com/huggingface/transformers/blob/550d7b3834670483a4df436541272c055dc364bf/src/transformers/generation/logits_process.py#L238-L303)
 
 top-p는 누적 확률 질량을 기준으로 후보를 동적으로 자른다. [top-p implementation](https://github.com/huggingface/transformers/blob/550d7b3834670483a4df436541272c055dc364bf/src/transformers/generation/logits_process.py#L473-L539) 이 사실은 top-p가 사실성·안전성·도구 권한을 보장한다는 뜻이 아니다. `do_sample` 조건에서만 temperature/top-p 관련 processor가 붙는 경로도 확인할 수 있다. [generation mode setup](https://github.com/huggingface/transformers/blob/550d7b3834670483a4df436541272c055dc364bf/src/transformers/generation/utils.py#L1292-L1322)
 
@@ -177,7 +179,11 @@ for proposal in malformed, alternate_tool, exact_action, stale_action:
 
 모델은 token마다 logit `z_i`를 내고 `p_i = exp(z_i/T) / Σ exp(z_j/T)`로 확률을 만든다. 낮은 온도는 분포를 뾰족하게 하지만 사실성이나 권한을 만들지 않는다. top-k는 후보 수를, top-p는 누적 확률 질량을 제한한다. processor 적용 순서도 결과를 바꾼다.
 
-[processor 기반 클래스](https://github.com/huggingface/transformers/blob/550d7b3834670483a4df436541272c055dc364bf/src/transformers/generation/logits_process.py#L63-L103), [temperature](https://github.com/huggingface/transformers/blob/550d7b3834670483a4df436541272c055dc364bf/src/transformers/generation/logits_process.py#L238-L303), [top-p](https://github.com/huggingface/transformers/blob/550d7b3834670483a4df436541272c055dc364bf/src/transformers/generation/logits_process.py#L473-L539)를 읽으며 tensor shape와 제거 token 표현을 확인한다. temperature가 0에 가까워도 가장 높은 logit의 tool이 잘못된 tenant를 가리킬 수 있다.
+[processor 기반 클래스](https://github.com/huggingface/transformers/blob/550d7b3834670483a4df436541272c055dc364bf/src/transformers/generation/logits_process.py#L63-L103)와 [temperature](https://github.com/huggingface/transformers/blob/550d7b3834670483a4df436541272c055dc364bf/src/transformers/generation/logits_process.py#L238-L303)를 읽으며 tensor shape와 제거 token 표현을 확인한다.
+
+[top-p](https://github.com/huggingface/transformers/blob/550d7b3834670483a4df436541272c055dc364bf/src/transformers/generation/logits_process.py#L473-L539)도 같은 항목을 확인한다.
+
+temperature가 0에 가까워도 가장 높은 logit의 tool이 잘못된 tenant를 가리킬 수 있다.
 
 ```python
 # 실행 가능한 최소 예: 온도에 따른 확률만 계산한다.

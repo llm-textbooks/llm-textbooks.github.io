@@ -184,7 +184,9 @@ C_g = Render(Order(Filter(M_system ∪ M_history ∪ M_tools ∪ M_retrieval,
 
 `C_g`는 세대 `g`에서 모델이 본 token 열이다. `Filter`는 권한·만료·신뢰 상태를 적용하고, `Order`는 충돌 우선순위와 tool result의 위치를 정하며, `Render`는 chat template과 special token을 실제 bytes로 만든다. 어느 한 단계가 달라져도 같은 사용자 문장은 다른 모델 요청이 된다. 그래서 재시도 때 context generation이 바뀌었다면 “같은 요청을 다시 보냈다”고 기록해서는 안 된다.
 
-[Codex의 `run_turn`](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/session/turn.rs#L155-L255)을 읽을 때는 함수 이름보다 소유권 이동을 표시한다. turn 준비, 필요한 MCP server 결정, step context 포착, sampling 시작 사이에 어떤 값이 복제되고 어떤 값이 참조되는지 본다. 이어 [`built_tools`](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/session/turn.rs#L1516-L1604)에서 tool 목록이 전역 상수가 아니라 요청 조건으로 만들어지는 경로를 따라간다. 두 span을 나란히 놓으면 “현재 사용 가능한 도구”도 문맥 세대의 일부라는 사실이 드러난다.
+[Codex의 `run_turn`](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/session/turn.rs#L155-L255)을 읽을 때는 함수 이름보다 소유권 이동을 표시한다. turn 준비, 필요한 MCP server 결정, step context 포착, sampling 시작 사이에 어떤 값이 복제되고 어떤 값이 참조되는지 본다.
+
+이어 [`built_tools`](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/session/turn.rs#L1516-L1604)에서 tool 목록이 전역 상수가 아니라 요청 조건으로 만들어지는 경로를 따라간다. 두 span을 나란히 놓으면 “현재 사용 가능한 도구”도 문맥 세대의 일부라는 사실이 드러난다.
 
 [pi-agent loop의 조립 구간](https://github.com/badlogic/pi-mono/blob/853a80d26c90a14c1886f0ebb8ffaae133ca2185/packages/agent/src/agent-loop.ts#L279-L310)은 다른 구현에서 같은 질문을 던질 비교점이다. 메시지 배열이 어느 시점에 확정되고, tool call 결과가 다음 호출에 어떻게 합류하며, 취소 signal이 어느 호출에 전달되는지 표시한다. 이름이 `messages`라고 해서 append-only history라고 가정하지 않는다. adapter가 normalize하거나 누락시키는 필드까지 확인해야 한다.
 

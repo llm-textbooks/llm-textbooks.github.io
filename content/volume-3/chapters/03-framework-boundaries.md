@@ -48,13 +48,17 @@ flowchart LR
 
 고정 리비전의 Codex에서 `start_or_steer_turn` 계열은 새 turn 시작, 기존 turn으로의 steer, 기록된 turn ID의 recovery를 구분한다. [Codex thread admission](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/codex_thread.rs#L342-L430) 이 구현에서 중요한 것은 “사용자 입력”과 “recovery”가 같은 입력 경로가 아니라는 점이다. 복구가 새 user message를 덧붙여서 발생하면 transcript와 causality가 변한다.
 
-`run_turn`은 pre-sampling compaction, MCP requirement, captured `StepContext`, tool build, model stream을 잇는다. [Codex turn entry](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/session/turn.rs#L155-L255) tool router와 registry는 proposal을 invocation으로 만들고 validation/hook을 거친다. [Codex router and registry](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/tools/router.rs#L302-L387) 이는 admission·context·stream·tool gate에 대한 공개 코드 근거다.
+`run_turn`은 pre-sampling compaction, MCP requirement, captured `StepContext`, tool build, model stream을 잇는다. [Codex turn entry](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/session/turn.rs#L155-L255)
+
+tool router와 registry는 proposal을 invocation으로 만들고 validation/hook을 거친다. [Codex router and registry](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/tools/router.rs#L302-L387) 이는 admission·context·stream·tool gate에 대한 공개 코드 근거다.
 
 그러나 이 사실에서 일반 원격 도구의 exactly-once, 모든 provider의 cancellation, 외부 API rollback을 결론 내릴 수는 없다. Codex의 event persistence 경로가 turn event를 rollout과 trace 경로로 보내더라도, 수신자 데이터베이스와 한 transaction을 구성한다는 증거는 별개다. [Codex event persistence](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/session/mod.rs#L2043-L2145)
 
 ## 3.4 pi-agent: loop가 보이는 만큼만 말한다
 
-pi-agent의 공개 TypeScript 구현은 `transform → LLM-message conversion → system/messages/tools → provider stream`이라는 context assembly 경계를 직접 보여 준다. [pi-agent context assembly](https://github.com/badlogic/pi-mono/blob/853a80d26c90a14c1886f0ebb8ffaae133ca2185/packages/agent/src/agent-loop.ts#L279-L310) assistant tool call은 validation과 abort check를 지나며, 병렬 모드에서는 완료 순서가 아니라 원래 tool-call 순서로 result message를 만든다. [pi-agent parallel reducer](https://github.com/badlogic/pi-mono/blob/853a80d26c90a14c1886f0ebb8ffaae133ca2185/packages/agent/src/agent-loop.ts#L487-L552)
+pi-agent의 공개 TypeScript 구현은 `transform → LLM-message conversion → system/messages/tools → provider stream`이라는 context assembly 경계를 직접 보여 준다. [pi-agent context assembly](https://github.com/badlogic/pi-mono/blob/853a80d26c90a14c1886f0ebb8ffaae133ca2185/packages/agent/src/agent-loop.ts#L279-L310)
+
+assistant tool call은 validation과 abort check를 지나며, 병렬 모드에서는 완료 순서가 아니라 원래 tool-call 순서로 result message를 만든다. [pi-agent parallel reducer](https://github.com/badlogic/pi-mono/blob/853a80d26c90a14c1886f0ebb8ffaae133ca2185/packages/agent/src/agent-loop.ts#L487-L552)
 
 이것은 transcript ordering에 대한 직접 근거다. 반면 host가 process를 재시작한 뒤 어떤 실행을 재개하는지, event sink가 어느 저장소에 durability를 갖는지, tool이 외부 API write를 되돌리는지는 loop만 보고 결정할 수 없다. 비교표에서 그런 행은 `HostOwned` 또는 `NotObserved`로 남겨야 한다.
 
@@ -106,7 +110,9 @@ non_guarantees:
 | host restart | durable checkpoint, retry identity | 누가 resume하며 effect key를 보존하는가 |
 | hook reject after execution | handler와 model output | visibility 차단을 rollback으로 오독하지 않는가 |
 
-Codex 공개 테스트는 cancellation이 handler admission 전일 때와 completion 후일 때 다른 lifecycle을 남김을 보여 준다. [Codex cancellation tests](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/tools/parallel.rs#L419-L675) pi-agent의 length-stopped call fence는 partial arguments를 실행하지 않는 기준을 보여 준다. [pi-agent length fence](https://github.com/badlogic/pi-mono/blob/853a80d26c90a14c1886f0ebb8ffaae133ca2185/packages/agent/src/agent-loop.ts#L220-L240) 이 두 test/코드 경계 밖의 환경을 일반화하지 않는 것이 비교의 절제다.
+Codex 공개 테스트는 cancellation이 handler admission 전일 때와 completion 후일 때 다른 lifecycle을 남김을 보여 준다. [Codex cancellation tests](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/tools/parallel.rs#L419-L675)
+
+pi-agent의 length-stopped call fence는 partial arguments를 실행하지 않는 기준을 보여 준다. [pi-agent length fence](https://github.com/badlogic/pi-mono/blob/853a80d26c90a14c1886f0ebb8ffaae133ca2185/packages/agent/src/agent-loop.ts#L220-L240) 이 두 test/코드 경계 밖의 환경을 일반화하지 않는 것이 비교의 절제다.
 
 ## 3.9 비교표: 기능이 아니라 증거를 나란히 놓기
 

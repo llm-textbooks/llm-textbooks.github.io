@@ -97,7 +97,9 @@ flowchart LR
 
 자식을 세 명 만들면 속도가 세 배가 된다는 기대는 token, provider rate limit, verification, merge, cancellation 비용을 빼먹는다. 각 child에는 input/output token cap, wall deadline, tool call cap, spend cap, retry cap을 주고 parent에는 그 합보다 작은 global envelope를 둔다. 그렇지 않으면 parent가 스스로 준 병렬성 때문에 deadline에서 verifier를 실행할 자원을 잃는다.
 
-관찰해야 할 최소 metric은 `child_spawned_total`, `child_join_latency`, `child_stale_rejected_total`, `child_result_promoted_total`, `child_budget_exhausted_total`, `child_cancel_requested_total`, `child_remote_terminal_unknown_total`이다. `child_success_total` 하나만 있으면 ‘텍스트를 반환했다’와 ‘현재 state에 안전하게 반영됐다’를 섞는다. metric label에는 run ID나 raw prompt를 넣지 않는다. 고카디널리티 identity는 trace/log의 bounded digest로 보내고, Prometheus label은 tenant class·tool class처럼 제한된 차원만 쓴다. [Prometheus label guidance](https://prometheus.io/docs/practices/naming/#labels)는 label 조합의 비용을 경고한다.
+관찰해야 할 최소 metric은 `child_spawned_total`, `child_join_latency`, `child_stale_rejected_total`, `child_result_promoted_total`, `child_budget_exhausted_total`, `child_cancel_requested_total`, `child_remote_terminal_unknown_total`이다. `child_success_total` 하나만 있으면 ‘텍스트를 반환했다’와 ‘현재 state에 안전하게 반영됐다’를 섞는다.
+
+metric label에는 run ID나 raw prompt를 넣지 않는다. 고카디널리티 identity는 trace/log의 bounded digest로 보내고, Prometheus label은 tenant class·tool class처럼 제한된 차원만 쓴다. [Prometheus label guidance](https://prometheus.io/docs/practices/naming/#labels)는 label 조합의 비용을 경고한다.
 
 ## 15.6 장애 주입: 자식을 죽여도 부모가 거짓말하지 않게 하라
 

@@ -168,7 +168,9 @@ child agent도 마찬가지다. 부모의 snapshot에서 child를 시작하는 �
 | dispatch·cancel·return·receipt 시각 | 실패 창 분석 | timeout을 미실행으로 오독 |
 | effect disposition | prepared / committed / unknown / compensated | 실패를 자동 성공 또는 자동 rollback으로 바꿈 |
 
-Codex telemetry는 response event에서 얻은 token usage와 function-call name을 response span에 기록할 수 있고, sandbox outcome을 call ID와 함께 남긴다. 이는 비용과 실행 경계의 관측에 유용하다. 그러나 외부 효과가 한 번만 commit되었다는 receipt는 아니다. [Codex response telemetry](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/otel/src/events/session_telemetry.rs#L517-L555) · [sandbox outcome](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/otel/src/events/session_telemetry.rs#L1104-L1133)
+Codex telemetry는 response event에서 얻은 token usage와 function-call name을 response span에 기록할 수 있고, sandbox outcome을 call ID와 함께 남긴다. 이는 비용과 실행 경계의 관측에 유용하다.
+
+그러나 외부 효과가 한 번만 commit되었다는 receipt는 아니다. [Codex response telemetry](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/otel/src/events/session_telemetry.rs#L517-L555) · [sandbox outcome](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/otel/src/events/session_telemetry.rs#L1104-L1133)
 
 Metrics에는 특히 절제가 필요하다. Prometheus label에 `run_id`, raw prompt, tool argument, 이메일 같은 무한·민감 값을 넣으면 비용과 보안이 함께 무너진다. bounded label에는 결과 종류와 도구 종류를, 상세 correlation에는 trace/log/event store를 쓴다. [Prometheus label practices](https://prometheus.io/docs/practices/naming/#labels)
 
@@ -202,7 +204,9 @@ Codex 공개 테스트는 cancellation이 dispatch admission 전일 때와 handl
 
 compensation은 cancellation도 rollback도 아니다. 예를 들어 이미 발송한 메시지를 지우는 작업은 “취소”가 아니라 또 하나의 권한 있는 외부 write다. 전송이 취소됐다고 간주하면 audit trail도 사라진다.
 
-lease, heartbeat, circuit breaker도 서로 다른 문제를 푼다. lease는 한 worker가 당분간 작업할 권리를 주장하는 장치고, fencing token을 receiver가 검사할 때 stale writer를 막는다. heartbeat는 노드가 최근 살아 있었다는 routing 신호다. circuit breaker는 반복 실패 대상으로의 폭주를 줄인다. 셋 중 어느 것도 이미 출발한 요청의 효과를 자동으로 취소하거나 확인하지 않는다. Jikji의 circuit-breaker 테스트도 실패 임계값과 cooldown 뒤의 선택 가능성을 다루며, in-flight operation의 rollback을 보장하지 않는다. [Jikji breaker regression](https://github.com/jikji-labs/jikji/blob/d0cb4997e1882f9f5fc28b0b601ddf97317baf43/jikji/pkg/toolnode/catalog_breaker_test.go#L20-L70)
+lease, heartbeat, circuit breaker도 서로 다른 문제를 푼다. lease는 한 worker가 당분간 작업할 권리를 주장하는 장치고, fencing token을 receiver가 검사할 때 stale writer를 막는다. heartbeat는 노드가 최근 살아 있었다는 routing 신호다. circuit breaker는 반복 실패 대상으로의 폭주를 줄인다.
+
+셋 중 어느 것도 이미 출발한 요청의 효과를 자동으로 취소하거나 확인하지 않는다. Jikji의 circuit-breaker 테스트도 실패 임계값과 cooldown 뒤의 선택 가능성을 다루며, in-flight operation의 rollback을 보장하지 않는다. [Jikji breaker regression](https://github.com/jikji-labs/jikji/blob/d0cb4997e1882f9f5fc28b0b601ddf97317baf43/jikji/pkg/toolnode/catalog_breaker_test.go#L20-L70)
 
 ## 1.9 프레임워크를 비교할 때는 이름이 아니라 증거 범위를 비교한다
 
