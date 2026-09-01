@@ -296,7 +296,7 @@ sequenceDiagram
 
 ## 원전 바로가기
 
-- [Hewitt actor model 원 논문](https://arxiv.org/abs/1008.1459)
+- [Hewitt actor model 원 논문](https://arxiv.org/abs/1008.1459v38)
 - [INRIA CRDT 연구 보고서](https://inria.hal.science/inria-00555588/document)
 - [Raft 논문](https://raft.github.io/raft.pdf)
 - [Pi reducer의 state reduction 경계](https://github.com/badlogic/pi-mono/blob/853a80d26c90a14c1886f0ebb8ffaae133ca2185/packages/agent/src/harness/reducer.ts#L312-L391)

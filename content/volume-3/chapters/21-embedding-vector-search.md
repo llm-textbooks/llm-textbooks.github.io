@@ -47,7 +47,7 @@ record에 `tenant`, `purpose`, `trust`, `valid_from/to`, `source revision`, `tom
 
 ANN은 모든 vector를 방문하지 않음으로써 latency와 memory traffic을 줄인다. exact search도 encoder 표현과 distance metric이 정의한 ranking만 정확하다. 즉 exact는 ANN의 방문 손실을 줄일 수 있어도 semantic truth·authorization·negative knowledge를 만든다지 않는다. benchmark에는 query set, relevant-set 정의, encoder/index revision, filter order, `k`, visit budget, p50/p95/p99, memory, update lag를 고정한다.
 
-ColBERT의 late interaction은 query/document token 간 상호작용으로 ranking 표현을 세밀하게 만든다. [ColBERT](https://arxiv.org/abs/2004.12832)는 score 품질의 다른 설계 선택을 보여 준다. 하지만 reranker를 추가해도 `allow` 판정이나 source span completeness가 cosine/MaxSim의 속성이 되지는 않는다.
+ColBERT의 late interaction은 query/document token 간 상호작용으로 ranking 표현을 세밀하게 만든다. [ColBERT](https://arxiv.org/abs/2004.12832v2)는 score 품질의 다른 설계 선택을 보여 준다. 하지만 reranker를 추가해도 `allow` 판정이나 source span completeness가 cosine/MaxSim의 속성이 되지는 않는다.
 
 ## 21.5 실습: 빈 검색 결과를 false로 바꾸지 않기
 
@@ -162,5 +162,5 @@ flowchart LR
 
 - [Faiss indexes](https://github.com/facebookresearch/faiss/wiki/Faiss-indexes)
 - [Faiss FAQ](https://github.com/facebookresearch/faiss/wiki/FAQ)
-- [ColBERT](https://arxiv.org/abs/2004.12832)
+- [ColBERT](https://arxiv.org/abs/2004.12832v2)
 - [RDF 1.1 Semantics](https://www.w3.org/TR/rdf11-mt/)

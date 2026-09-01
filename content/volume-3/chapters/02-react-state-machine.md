@@ -53,7 +53,7 @@ stateDiagram-v2
 | 관측 | output → model-visible observation | observation ID, source call ID | observation이 최신 사실인가 |
 | 종료 | active → terminal | terminal reason, durable offset | background 효과가 없는가 |
 
-ReAct 논문은 reasoning trace와 action-observation의 교대를 제안했지만, 그 자체가 transaction protocol은 아니다. 논문에서의 관찰 문자열을 수신자 receipt로 읽으면 안 된다. [ReAct: Synergizing Reasoning and Acting in Language Models](https://arxiv.org/abs/2210.03629)는 이 루프가 추론과 행동을 결합하는 방법임을 보여 주지만, exactly-once 외부 효과를 약속하지 않는다.
+ReAct 논문은 reasoning trace와 action-observation의 교대를 제안했지만, 그 자체가 transaction protocol은 아니다. 논문에서의 관찰 문자열을 수신자 receipt로 읽으면 안 된다. [ReAct: Synergizing Reasoning and Acting in Language Models](https://arxiv.org/abs/2210.03629v3)는 이 루프가 추론과 행동을 결합하는 방법임을 보여 주지만, exactly-once 외부 효과를 약속하지 않는다.
 
 ```mermaid
 stateDiagram-v2
@@ -207,7 +207,7 @@ pi-agent는 길이 제한으로 멈춘 response의 tool call을 실패 처리하
 
 ## 이 장의 원전 바로가기
 
-1. [ReAct 논문](https://arxiv.org/abs/2210.03629)
+1. [ReAct 논문](https://arxiv.org/abs/2210.03629v3)
 2. [Codex turn entry](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/session/turn.rs#L155-L255)
 3. [Codex router](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/tools/router.rs#L302-L387) · [registry](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/tools/registry.rs#L493-L773)
 4. [Jikji remote request boundary](https://github.com/jikji-labs/jikji/blob/d0cb4997e1882f9f5fc28b0b601ddf97317baf43/jikji/pkg/toolnode/remote_runner.go#L91-L100)

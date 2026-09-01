@@ -31,7 +31,7 @@ admit = (projected_work <= branch_budget
          and (estimated_nv > 0 or shadow_measurement))
 ```
 
-[The Tail at Scale](https://research.google/pubs/the-tail-at-scale/)의 중복 요청 동기를 외부 효과가 있는 에이전트에 옮길 때는 취소 잔여와 확인서 비용을 새로 넣어야 한다. [Speculative RAG](https://arxiv.org/abs/2407.08223)와 [RASD](https://arxiv.org/abs/2503.03434)도 같은 이름 때문에 이 식의 고유 근거와 동일시해서는 안 된다.
+[The Tail at Scale](https://research.google/pubs/the-tail-at-scale/)의 중복 요청 동기를 외부 효과가 있는 에이전트에 옮길 때는 취소 잔여와 확인서 비용을 새로 넣어야 한다. [Speculative RAG](https://arxiv.org/abs/2407.08223v2)와 [RASD](https://arxiv.org/abs/2503.03434v1)도 같은 이름 때문에 이 식의 고유 근거와 동일시해서는 안 된다.
 
 새벽 두 시, 장애 대응 에이전트가 같은 질문을 세 번 던진다. 하나는 키워드 검색을, 하나는 벡터 검색을, 하나는 서비스 그래프 탐색을 시작한다. 가장 먼저 돌아온 답은 180일 전의 다른 테넌트 문서다. 두 번째 답은 권한은 맞지만 이미 철회됐다. 세 번째 답은 느렸지만 현재 revision의 근거와 변경 이력을 함께 가져온다. 이 순간 시스템이 해야 할 일은 ‘가장 빠른 답을 채택’하는 일이 아니다. **무엇이 후보이고, 무엇이 검증된 관찰이며, 무엇이 실제 세계를 바꿀 권한을 얻었는지**를 구별하는 일이다.
 
@@ -76,13 +76,13 @@ planner가 “다음에는 아마 고객 정보를 조회할 것”이라고 예
 
 ### 14.1.3 speculative decoding은 검색 fan-out이 아니다
 
-speculative decoding에서는 작은 draft model이 다음 token들의 후보를 내고, target model이 그 후보 묶음을 검증한다. 한 번의 target 검증에서 받아들여진 draft-token 길이와 그 검증 비용을 핵심 지표로 삼는다. branch 수나 top-k overlap과는 다르다. retrieval을 draft-token 후보 생성에 결합한 [RASD](https://arxiv.org/abs/2503.03434)는 이 둘을 연결한 연구이지만, 그래서 query rewrite 병렬화와 동의어가 되는 것은 아니다.
+speculative decoding에서는 작은 draft model이 다음 token들의 후보를 내고, target model이 그 후보 묶음을 검증한다. 한 번의 target 검증에서 받아들여진 draft-token 길이와 그 검증 비용을 핵심 지표로 삼는다. branch 수나 top-k overlap과는 다르다. retrieval을 draft-token 후보 생성에 결합한 [RASD](https://arxiv.org/abs/2503.03434v1)는 이 둘을 연결한 연구이지만, 그래서 query rewrite 병렬화와 동의어가 되는 것은 아니다.
 
-반대로 [Speculative RAG](https://arxiv.org/abs/2407.08223)는 여러 retrieval 기반 초안과 검증을 결합하는 방법을 제안한다. 논문에서 보고한 결과는 drafter, verifier, 데이터셋, 병렬 endpoint, 평가 protocol이라는 조건 아래의 결과다. 모든 RAG 요청에 fan-out을 붙이면 같은 품질·지연 우위를 얻는다는 일반 명제로 바꾸면 안 된다.
+반대로 [Speculative RAG](https://arxiv.org/abs/2407.08223v2)는 여러 retrieval 기반 초안과 검증을 결합하는 방법을 제안한다. 논문에서 보고한 결과는 drafter, verifier, 데이터셋, 병렬 endpoint, 평가 protocol이라는 조건 아래의 결과다. 모든 RAG 요청에 fan-out을 붙이면 같은 품질·지연 우위를 얻는다는 일반 명제로 바꾸면 안 된다.
 
 ### 14.1.4 그래프는 병렬화 버튼이 아니다
 
-[Graph of Thoughts](https://arxiv.org/abs/2308.09687)는 thought를 정점과 dependency edge로 다루며 결합·개선하는 연구를 제안했고, [LLMCompiler](https://arxiv.org/abs/2312.04511)는 planner, task fetching, parallel executor 구조를 제시한다. 두 작업은 ‘모든 일을 직렬 chain으로 놓지 않아도 된다’는 통찰을 준다. 다만 planner가 그린 DAG에 edge가 없다는 사실은 숨은 파일 의존성, 같은 API rate-limit bucket, 같은 credential, 같은 stale snapshot이 없다는 증거가 아니다.
+[Graph of Thoughts](https://arxiv.org/abs/2308.09687v4)는 thought를 정점과 dependency edge로 다루며 결합·개선하는 연구를 제안했고, [LLMCompiler](https://arxiv.org/abs/2312.04511v3)는 planner, task fetching, parallel executor 구조를 제시한다. 두 작업은 ‘모든 일을 직렬 chain으로 놓지 않아도 된다’는 통찰을 준다. 다만 planner가 그린 DAG에 edge가 없다는 사실은 숨은 파일 의존성, 같은 API rate-limit bucket, 같은 credential, 같은 stale snapshot이 없다는 증거가 아니다.
 
 실행 DAG는 declared predecessor와 fork/join을, provenance graph는 입력과 산출물의 유래를, state graph는 허용된 전이를, authority/effect graph는 누가 무엇을 commit할 수 있는지를 관리한다. 이 네 graph는 서로 대체되지 않는다.
 
@@ -206,7 +206,7 @@ else:
 
 ## 14.4 그래프와 검색을 결합하되, 각각의 무지를 보존한다
 
-벡터와 lexical 검색은 넓고 싼 후보 생성에 좋다. [ColBERT](https://arxiv.org/abs/2004.12832) 같은 late interaction은 ranking 표현을 더 정교하게 만들 수 있다. [G-Retriever](https://arxiv.org/abs/2402.07630)는 질문과 관련된 subgraph를 사용해 graph context를 줄이는 방법을 다룬다. 그러나 reranker를 한 번 더 붙여도 authorization, temporal validity, negative closure가 similarity 함수 속성으로 바뀌지는 않는다.
+벡터와 lexical 검색은 넓고 싼 후보 생성에 좋다. [ColBERT](https://arxiv.org/abs/2004.12832v2) 같은 late interaction은 ranking 표현을 더 정교하게 만들 수 있다. [G-Retriever](https://arxiv.org/abs/2402.07630v3)는 질문과 관련된 subgraph를 사용해 graph context를 줄이는 방법을 다룬다. 그러나 reranker를 한 번 더 붙여도 authorization, temporal validity, negative closure가 similarity 함수 속성으로 바뀌지는 않는다.
 
 따라서 결합 순서는 보통 다음과 같이 읽는 편이 좋다.
 
@@ -252,7 +252,7 @@ tenant마다 완전히 별도 index를 만드는 선택도 언제나 최선은 �
 
 planner는 A와 B 사이에 edge가 없으니 병렬이라고 선언한다. 실제로는 두 tool이 같은 third-party API의 초당 요청 한도를 공유한다. 둘을 동시에 시작하면 한 branch의 queue wait가 다른 branch의 tail을 늘리고, retry가 또 다른 fan-out을 부른다. 이 의존성은 data edge가 아니라 **resource edge**다.
 
-따라서 task graph에는 가능한 경우 input/output dependency 외에도 rate-limit bucket, exclusive lock, tenant quota, side-effect domain을 선언해야 한다. 모든 hidden dependency를 자동으로 추출할 수는 없다. 그 한계 때문에 production에서는 ‘declared independent’를 ‘독립이 증명됨’으로 읽지 않고, 별도의 concurrency cap·token budget·queue wait alarm을 둔다. [Adaptive Graph of Thoughts](https://arxiv.org/abs/2502.05078)처럼 필요한 subproblem만 동적으로 확장하는 접근도, expansion 자체의 비용과 숨은 resource conflict를 없애 주지는 않는다.
+따라서 task graph에는 가능한 경우 input/output dependency 외에도 rate-limit bucket, exclusive lock, tenant quota, side-effect domain을 선언해야 한다. 모든 hidden dependency를 자동으로 추출할 수는 없다. 그 한계 때문에 production에서는 ‘declared independent’를 ‘독립이 증명됨’으로 읽지 않고, 별도의 concurrency cap·token budget·queue wait alarm을 둔다. [Adaptive Graph of Thoughts](https://arxiv.org/abs/2502.05078v1)처럼 필요한 subproblem만 동적으로 확장하는 접근도, expansion 자체의 비용과 숨은 resource conflict를 없애 주지는 않는다.
 
 ## 14.5 실습: 안전한 fan-out을 설계하는 45분
 
@@ -333,7 +333,7 @@ timeout이 만료되면 application task는 돌아올 수 있다. 그것은 remo
 
 - [Faiss FAQ — filtering·incomplete search](https://github.com/facebookresearch/faiss/wiki/FAQ)
 - [RDF 1.1 Semantics](https://www.w3.org/TR/rdf11-mt/), [PROV-O](https://www.w3.org/TR/prov-o/)
-- [Graph of Thoughts](https://arxiv.org/abs/2308.09687), [LLMCompiler](https://arxiv.org/abs/2312.04511), [Adaptive Graph of Thoughts](https://arxiv.org/abs/2502.05078)
-- [Speculative RAG](https://arxiv.org/abs/2407.08223), [RASD](https://arxiv.org/abs/2503.03434)
-- [G-Retriever](https://arxiv.org/abs/2402.07630), [ColBERT](https://arxiv.org/abs/2004.12832)
+- [Graph of Thoughts](https://arxiv.org/abs/2308.09687v4), [LLMCompiler](https://arxiv.org/abs/2312.04511v3), [Adaptive Graph of Thoughts](https://arxiv.org/abs/2502.05078v1)
+- [Speculative RAG](https://arxiv.org/abs/2407.08223v2), [RASD](https://arxiv.org/abs/2503.03434v1)
+- [G-Retriever](https://arxiv.org/abs/2402.07630v3), [ColBERT](https://arxiv.org/abs/2004.12832v2)
 - [pi-agent의 tool 실행 경로](https://github.com/badlogic/pi-mono/blob/853a80d26c90a14c1886f0ebb8ffaae133ca2185/packages/agent/src/agent-loop.ts#L409-L553), [speculative-tools](https://github.com/joelvarun/speculative-tools/blob/c93cad9e6449be5e3953ef563943c28b3a962629/README.md#L17-L24)

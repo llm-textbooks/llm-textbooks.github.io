@@ -117,7 +117,7 @@ ReAct, planner, worker, supervisor, swarm, memory, blackboard, graph라는 이�
 
 ## 이 책의 원전과 실습을 대하는 태도
 
-여기서는 원전을 인용의 장식으로 쓰지 않는다. [ReAct 논문](https://arxiv.org/abs/2210.03629)을 읽을 때에는 reasoning과 acting의 아이디어를 현재 실행기의 durable state model로 과장하지 않는다. [The Raft Consensus Algorithm](https://raft.github.io/raft.pdf)을 읽을 때에는 leader election과 committed log의 조건을 투표 기반 agent panel에 자동으로 이식하지 않는다. [Sagas 논문](https://www.cs.cornell.edu/andru/cs711/2002fa/reading/sagas.pdf)을 읽을 때에는 compensation을 cancel이나 rollback의 동의어로 바꾸지 않는다.
+여기서는 원전을 인용의 장식으로 쓰지 않는다. [ReAct 논문](https://arxiv.org/abs/2210.03629v3)을 읽을 때에는 reasoning과 acting의 아이디어를 현재 실행기의 durable state model로 과장하지 않는다. [The Raft Consensus Algorithm](https://raft.github.io/raft.pdf)을 읽을 때에는 leader election과 committed log의 조건을 투표 기반 agent panel에 자동으로 이식하지 않는다. [Sagas 논문](https://www.cs.cornell.edu/andru/cs711/2002fa/reading/sagas.pdf)을 읽을 때에는 compensation을 cancel이나 rollback의 동의어로 바꾸지 않는다.
 
 코드도 마찬가지다. 한 함수가 어떤 이벤트를 emit한다는 것은 그 함수·그 revision·그 조건에서의 사실이다. 전체 hosted service, 다른 provider, 다른 운영 환경에서도 동일한 receipt와 권한 semantics가 있다는 증거는 아니다. 좁고 정확한 문장을 서로 연결하는 편이, 넓고 편한 문장을 하나 만드는 것보다 오래 간다.
 

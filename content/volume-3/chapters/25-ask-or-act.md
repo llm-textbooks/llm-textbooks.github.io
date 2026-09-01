@@ -101,7 +101,7 @@ ask rate가 낮으면 과감한 것처럼 보이고, 높으면 신중한 것처�
 |stale-decision reject|오래된 동의를 차단했는가|정상적인 정책 migration을 오탐할 수 있음|
 |human minutes / saved loss|사람 시간이 어떤 손실을 막았는가|희귀 대형 사고를 평균으로 가림|
 
-HiL-Bench는 사람이 개입하는 task에서 ask의 precision과 recall을 분리해 다룬다. [HiL-Bench](https://arxiv.org/abs/2604.09408) 다만 benchmark 점수가 실제 조직의 책임 분배와 동의의 법적 의미까지 보장하지는 않는다. 운영 trace에는 질문의 reason code, 제시한 선택지, 결정 latency, 그리고 최종적으로 action digest가 바뀌었는지를 함께 남긴다.
+HiL-Bench는 사람이 개입하는 task에서 ask의 precision과 recall을 분리해 다룬다. [HiL-Bench](https://arxiv.org/abs/2604.09408v4) 다만 benchmark 점수가 실제 조직의 책임 분배와 동의의 법적 의미까지 보장하지는 않는다. 운영 trace에는 질문의 reason code, 제시한 선택지, 결정 latency, 그리고 최종적으로 action digest가 바뀌었는지를 함께 남긴다.
 
 ## 25.6 fault injection: 질문을 실패시키는 방법
 
@@ -175,5 +175,5 @@ Run:       Rejected; logical effect call is never created
 
 - [LangGraph Human-in-the-loop](https://langchain-ai.github.io/langgraph/concepts/human_in_the_loop/)
 - [LangGraph interrupts](https://langchain-ai.github.io/langgraph/concepts/human_in_the_loop/)
-- [HiL-Bench](https://arxiv.org/abs/2604.09408)
+- [HiL-Bench](https://arxiv.org/abs/2604.09408v4)
 - [Codex approval orchestration](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/tools/orchestrator.rs#L56-L260)

@@ -25,7 +25,7 @@ flowchart TD
  H[Hidden dependency: same API, lock, snapshot] -.not represented.-> G
 ```
 
-LLMCompiler는 planner, task fetching unit, executor로 function-call orchestration을 구성한다. [LLMCompiler](https://arxiv.org/abs/2312.04511)의 이 구조는 task 수준 병렬성의 직관을 준다. Graph of Thoughts도 thought를 정점·dependency로 다루고 결합·개선을 제안한다. [Graph of Thoughts](https://arxiv.org/abs/2308.09687)는 모든 추론이 선형 chain일 필요가 없다는 점을 보여 준다. 두 연구는 production scheduler의 hidden dependency detector나 effect transaction을 제공한다는 주장과는 구별해야 한다.
+LLMCompiler는 planner, task fetching unit, executor로 function-call orchestration을 구성한다. [LLMCompiler](https://arxiv.org/abs/2312.04511v3)의 이 구조는 task 수준 병렬성의 직관을 준다. Graph of Thoughts도 thought를 정점·dependency로 다루고 결합·개선을 제안한다. [Graph of Thoughts](https://arxiv.org/abs/2308.09687v4)는 모든 추론이 선형 chain일 필요가 없다는 점을 보여 준다. 두 연구는 production scheduler의 hidden dependency detector나 effect transaction을 제공한다는 주장과는 구별해야 한다.
 
 ## 16.2 실패 장면: edge가 없어서 동시에 망한 두 worker
 
@@ -189,8 +189,8 @@ MCP tool result나 A2A Task 완료는 node input을 얻었다는 신호일 수 �
 
 ### 원전
 
-- [LLMCompiler](https://arxiv.org/abs/2312.04511)
-- [Graph of Thoughts](https://arxiv.org/abs/2308.09687)
+- [LLMCompiler](https://arxiv.org/abs/2312.04511v3)
+- [Graph of Thoughts](https://arxiv.org/abs/2308.09687v4)
 - [OpenTelemetry trace SDK](https://github.com/open-telemetry/opentelemetry-specification/blob/29ae8c7710d2ea52e21a5ff81fb1cd657bcd3306/specification/trace/sdk.md#L288-L346)
 - [pi-agent tool execution ordering](https://github.com/badlogic/pi-mono/blob/853a80d26c90a14c1886f0ebb8ffaae133ca2185/packages/agent/src/agent-loop.ts#L409-L553)
 - [MCP tool result와 tool error](https://github.com/modelcontextprotocol/modelcontextprotocol/blob/3ff697dcbea0804f3f397b864cfbbaaa10cba71a/docs/specification/2025-06-18/server/tools.mdx#L384-L430)
