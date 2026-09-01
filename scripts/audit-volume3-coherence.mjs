@@ -57,7 +57,7 @@ for (const relative of book.chapters) {
   if (inFence || fenceCount % 2 !== 0) failures.push({ file: relative, reason: "unbalanced-code-fence" });
 
   const chapterRefs = [...text.matchAll(/(?<!권)(?<!부)(?<!-)\b(\d{1,2})장/gu)].map((match) => Number(match[1]));
-  const invalidRefs = chapterRefs.filter((number) => number < 1 || number > 41);
+  const invalidRefs = chapterRefs.filter((number) => number < 1 || number > 45);
   if (invalidRefs.length) failures.push({ file: relative, reason: "invalid-chapter-reference", values: invalidRefs });
   rows.push({ file: relative, chapterRefs: chapterRefs.length, executableFences, illustrativeFences });
 }

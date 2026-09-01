@@ -8,8 +8,7 @@ const book = YAML.parse(fs.readFileSync(bookPath, "utf8"));
 const failures = [];
 const rows = [];
 const forbidden = [
-  [/\bontology\b/iu, "reader-facing-ontology-term"],
-  [/온톨로지/u, "reader-facing-ontology-term"],
+  [/(?:온톨로지|ontology)(?:에서|로부터) (?:추출|뽑|가져)/iu, "ontology-backbone-residue"],
   [/\/home\/ziozzang/u, "local-absolute-path"],
   [/llmis-(?:core|code|agent|prov|sw):/u, "internal-curie"],
   [/물론입니다|요청하신 내용을 정리하면|도움이 되셨길 바랍니다|추가 질문이 있으시면/u, "chatbot-frame-residue"],
@@ -53,9 +52,9 @@ for (const relative of book.chapters) {
   }
 }
 
-const numbered = book.chapters.filter((relative) => /^chapters\/(?:0[1-9]|[1-3][0-9]|4[01])-/.test(relative));
-if (book.chapters.length !== 43) failures.push({ file: "book.yaml", reason: "unexpected-document-count", value: book.chapters.length, expected: 43 });
-if (numbered.length !== 41) failures.push({ file: "book.yaml", reason: "unexpected-numbered-chapter-count", value: numbered.length, expected: 41 });
+const numbered = book.chapters.filter((relative) => /^chapters\/(?:0[1-9]|[1-3][0-9]|4[0-5])-/.test(relative));
+if (book.chapters.length !== 47) failures.push({ file: "book.yaml", reason: "unexpected-document-count", value: book.chapters.length, expected: 47 });
+if (numbered.length !== 45) failures.push({ file: "book.yaml", reason: "unexpected-numbered-chapter-count", value: numbered.length, expected: 45 });
 
 const report = { schemaVersion: 1, chapters: rows.length, failures: failures.length, rows, findings: failures };
 fs.writeFileSync(path.join(ROOT, "_site/volume3-preview-editorial-report.json"), JSON.stringify(report, null, 2) + "\n");

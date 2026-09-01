@@ -57,7 +57,7 @@ flowchart TD
 
 ## 경로 1 — 직선 경로: 처음부터 하나의 실행을 끝까지 만들기
 
-이 경로는 새 시스템을 설계하거나, 에이전트 기능을 기능 목록이 아닌 실행 모델로 처음 잡고 싶은 독자를 위한 길이다. 총 41장을 순서대로 읽는 것이 기본이지만, 첫 통과에서 모든 세부 구현을 암기할 필요는 없다. 대신 각 부가 다음 부에 무엇을 넘기는지 붙잡는다.
+이 경로는 새 시스템을 설계하거나, 에이전트 기능을 기능 목록이 아닌 실행 모델로 처음 잡고 싶은 독자를 위한 길이다. 총 45장을 순서대로 읽는 것이 기본이지만, 첫 통과에서 모든 세부 구현을 암기할 필요는 없다. 대신 각 부가 다음 부에 무엇을 넘기는지 붙잡는다.
 
 ### 1단계: 한 요청의 경계를 세운다 — 1–3장
 
@@ -106,6 +106,10 @@ sequenceDiagram
 ### 6단계: 사람·지속성·운영으로 닫는다 — 25–41장
 
 25–27장은 ask-or-act, consent, approval, interrupt, steer, resume을 다룬다. 28–31장은 event log, checkpoint, replay, outbox/inbox/saga, lease, heartbeat, fencing, fault injection으로 실패 이후의 판단을 다룬다. 32–36장은 telemetry, evaluation, SLO, multi-tenancy, operations을 통해 관측과 운영의 경계를 세운다. 37–40장은 전체 실행을 작은 재현 가능한 lab으로 닫고, 41장은 처음 보는 프레임워크에도 적용할 독해 rubric을 남긴다.
+
+### 7단계: 네 렌즈로 실행계를 다시 읽는다 — 42–45장
+
+42–45장은 앞의 계약을 실제 구현에 다시 투영한다. 42장은 Codex와 pi-agent의 실행 loop, Claude Ralph의 공개 Stop-hook 계약을 비교하며 종료·재시도·도구 결과 합류 조건을 읽는다. 43장은 prompt prefix에서 policy·graph generation까지 cache key와 invalidation을 확장한다. 44장은 child run과 goal을 snapshot·budget·join·completion proof로 닫는다. 45장은 온톨로지를 검색 장식이 아니라 지식·근거·정책·효과를 잇는 실행 제어면으로 사용한다.
 
 직선 경로를 마쳤다면 다음 체크리스트에 답할 수 있어야 한다.
 
@@ -191,10 +195,12 @@ flowchart LR
 | 재현·재개·복구를 설계하기 | 27–31 | 37, 40 | checkpoint·replay·reconcile oracle |
 | SLO와 운영 체계를 만들기 | 32–36 | 31, 39–40 | bounded telemetry와 incident playbook |
 | 낯선 framework를 평가하기 | 3, 41 | 1, 11–13, 28 | source-to-failure rubric |
+| loop·cache 병목을 해부하기 | 42–43 | 6, 8–10, 32, 34 | 재현 가능한 cache identity와 loop 불변식 |
+| child goal과 ontology 제어면을 설계하기 | 44–45 | 12–18, 21–30 | stale commit·권한·근거를 닫는 graph ledger |
 
-## 10부 전체 목차를 문제로 읽는 법
+## 11부 전체 목차를 문제로 읽는 법
 
-열 부분을 순서가 아니라 질문의 묶음으로 다시 보면 필요한 장을 더 빨리 찾을 수 있다.
+열한 부분을 순서가 아니라 질문의 묶음으로 다시 보면 필요한 장을 더 빨리 찾을 수 있다.
 
 1. **실행의 최소 단위(1–3장)** — “이 요청”이 실제로 무엇인가?
 2. **모델이 보는 세계(4–10장)** — 모델의 입력·stream·retry는 어떤 상태에 의존하는가?
@@ -206,6 +212,7 @@ flowchart LR
 8. **관측과 운영 판단(32–36장)** — metrics가 말하지 못하는 것을 어떤 receipt와 oracle로 보완하는가?
 9. **재현 가능한 실습(37–40장)** — 좁은 실험이 실제 failure boundary를 어떻게 드러내는가?
 10. **낯선 시스템의 독해(41장)** — 새 이름을 만나도 같은 질문으로 어떻게 판별하는가?
+11. **실행계 재설계(42–45장)** — loop·cache·child goal·ontology를 같은 revision과 receipt로 어떻게 묶는가?
 
 ## 세 경로에 공통인 종료 조건
 

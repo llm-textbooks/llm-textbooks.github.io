@@ -94,6 +94,14 @@ parts:
     exit_artifact: "재실행 가능한 AgentRun dossier와 framework 해부 보고서"
     next_handoff: "실험 결과를 다음 개정의 regression fixture와 운영 판정으로 되돌린다."
     chapters: [chapters/37-minimal-agentrun-golden-lab.md, chapters/38-multiagent-coordination-lab.md, chapters/39-retrieval-permission-effect-lab.md, chapters/40-crash-recovery-deployment-lab.md, chapters/41-new-framework-autopsy.md]
+  - title: "XI부. 실행계를 다시 설계하는 네 개의 렌즈"
+    question: "루프·캐시·서브에이전트·온톨로지를 하나의 실행 계약으로 어떻게 묶는가?"
+    promise: "Codex CLI·Claude Code 공개 계약·pi-agent·Open Ontologies를 코드 경계와 반례로 교차해 운영 설계로 바꾼다."
+    prerequisites: ["I–X부의 loop·effect·recovery 계약"]
+    routes: {straight: "42→45장을 읽는다.", operations: "43장 cache invalidation과 44장 stale child에서 시작한다.", source_digging: "42장의 실제 loop 함수와 45장의 graph gate를 따라간다."}
+    exit_artifact: "loop·cache·child goal·knowledge/policy/effect graph가 같은 revision과 receipt로 닫힌 실행 설계"
+    next_handoff: "이 네 렌즈를 새 framework와 실제 운영 incident에 반복 적용한다."
+    chapters: [chapters/42-loop-engineering.md, chapters/43-cache-engineering.md, chapters/44-subagents-goals.md, chapters/45-ontology-agent-control-plane.md]
 
 chapters:
   - chapters/00-preface.md
@@ -139,3 +147,7 @@ chapters:
   - chapters/39-retrieval-permission-effect-lab.md
   - chapters/40-crash-recovery-deployment-lab.md
   - chapters/41-new-framework-autopsy.md
+  - chapters/42-loop-engineering.md
+  - chapters/43-cache-engineering.md
+  - chapters/44-subagents-goals.md
+  - chapters/45-ontology-agent-control-plane.md
