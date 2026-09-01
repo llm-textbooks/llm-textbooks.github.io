@@ -2,7 +2,7 @@
 
 멀티 에이전트 서비스를 여러 고객에게 제공할 때 가장 위험한 착각은 pod를 나눴으니 tenant도 나뉘었다고 믿는 일이다. namespace, API key, 벡터 필터, 큐, trace는 서로 다른 경계이며, 어느 하나도 나머지를 자동으로 대신하지 않는다. 이 장의 목표는 고성능 배포 구성을 외우는 데 있지 않다. 요청이 ingress에서 receiver receipt까지 이동하는 동안 **누가 무엇을 읽고, 얼마를 쓰고, 어디에 효과를 남길 수 있는지**를 독립적으로 판정하는 법을 익히는 데 있다.
 
-> **실습 상태 — 설계용 배포 계약.** 이 장의 `kubectl` 명령과 `manifests/*.yaml` 경로는 완성된 배포 패키지가 아니라 독자가 구현해야 할 manifest 계약을 설명한다. 현재 저장소에는 해당 Kubernetes manifest가 없으므로 그대로 실행되는 명령으로 읽지 않는다. 실행 검증을 마친 로컬 fixture는 37–40장에서 별도로 표시한다.
+> **실습 상태 — 정적 검증 완료, cluster 미실행.** 저장소의 `labs/volume-3/kubernetes`에는 kind 또는 격리된 staging namespace에 적용할 수 있는 namespace 범위의 Kustomize manifest가 있다. ServiceAccount/RBAC, ResourceQuota, default-deny NetworkPolicy, Service, Deployment rolling update, readiness·preStop, PDB를 포함한다. 이 checkout에서는 Kubernetes cluster·CNI·receiver를 실행하지 않았으므로 network 격리, drain, recovery의 runtime 보장은 주장하지 않는다.
 
 ## 35.1 tenant는 문자열이 아니라 권한 있는 실행 좌표다
 
@@ -78,15 +78,20 @@ sequenceDiagram
 
 ## 35.4 실습: 두 tenant가 서로의 작업을 굶기지 않는지 확인한다
 
-다음은 product 설치 안내가 아니라, local kind cluster 또는 사내 staging에 맞게 바꿔 쓸 수 있는 운영 runbook의 뼈대다. 실제 namespace와 image digest는 조직 값으로 바꾼다. 임의의 production cluster에 그대로 적용하면 안 된다.
+다음 manifest는 local kind 또는 격리된 staging namespace에 적용할 수 있는 최소 배포 묶음이다. `busybox` HTTP fixture는 AgentRun이나 durable receiver가 아니다. 따라서 manifest의 readiness는 TCP port가 열렸음을 검사할 뿐 schema·policy·receiver compatibility를 증명하지 않는다. production cluster, shared namespace, 고객 secret에는 적용하지 않는다.
+
+먼저 cluster를 전혀 만들지 않는 repository-local oracle을 실행한다. 이 oracle은 ServiceAccount/RBAC, quota, NetworkPolicy, Service selector, PDB, rolling update, probe, preStop, 그리고 의도적 selector 불일치를 검사한다.
 
 ```bash
-kubectl create namespace agent-lab
-kubectl -n agent-lab apply -f manifests/serviceaccounts.yaml
-kubectl -n agent-lab apply -f manifests/networkpolicy.yaml
-kubectl -n agent-lab apply -f manifests/agent-api.yaml
+npm run verify:kubernetes-lab
+```
+
+그 뒤에만 CNI의 NetworkPolicy enforcement가 확인된 disposable cluster에서 baseline overlay를 적용한다. `rollout status`는 object readiness일 뿐 AgentRun effect safety의 oracle이 아니다.
+
+```bash
+kubectl apply -k labs/volume-3/kubernetes/overlays/kind
 kubectl -n agent-lab rollout status deploy/agent-api --timeout=180s
-kubectl -n agent-lab get pods -o wide
+kubectl -n agent-lab get deploy,pods,pdb,networkpolicy,resourcequota -o wide
 ```
 
 **예상 oracle**은 `rollout status`의 성공 문자열이 아니다. 다음 세 관측을 함께 확보해야 한다.
@@ -95,10 +100,10 @@ kubectl -n agent-lab get pods -o wide
 kubectl -n agent-lab get endpoints agent-api -o yaml
 kubectl -n agent-lab logs deploy/agent-api --since=5m | rg 'admission|draining|receipt'
 kubectl -n agent-lab port-forward svc/agent-api 8080:8080
-curl -fsS http://127.0.0.1:8080/healthz
+curl -fsS http://127.0.0.1:8080/
 ```
 
-- 새 revision의 readiness는 schema/policy/receiver connectivity 같은 **계약 검사**를 통과한 뒤에만 true여야 한다.
+- 위 `curl /`은 HTTP fixture의 listen 상태만 보며, 이 fixture의 TCP readiness와 실제 worker의 readiness를 혼동하지 않는다. 실제 revision은 schema/policy/receiver connectivity 같은 **계약 검사**를 통과한 뒤에만 true여야 한다.
 - tenant A와 B에 동일한 request shape을 보내면 audit record의 tenant, principal, queue class가 각각 유지돼야 한다.
 - A의 요청이 거절돼도 B의 request가 A의 memory key, cached retrieval, tool credential을 읽지 않아야 한다.
 - draining 시작 후 새 Run claim은 0이고, 남은 Run은 `completed`, `cancelled`, `unknown` 중 하나의 명시적 terminal disposition을 가져야 한다.
@@ -131,12 +136,23 @@ kubectl -n agent-lab rollout status deploy/agent-api --timeout=180s
 
 restart는 crash-after-apply를 재현하지 않는다. 그것은 대부분의 RPC가 아직 시작되지 않은 지점에서 끝날 수 있다. effect boundary를 시험하려면 receiver가 apply한 뒤 receipt response를 지연시키는 lab stub, 또는 고정 logical call id를 가진 controlled process kill이 필요하다. 종료 뒤의 oracle은 pod가 다시 떴다는 사실이 아니라 receiver lookup에서 `apply_count=1`인지, local ledger가 `Unknown`을 거쳐 같은 key로 reconciliation했는지다.
 
+### 의도적 manifest 결함: selector는 template label을 선택해야 한다
+
+`overlays/intentional-defect`는 Deployment selector를 `agent-api-defective-selector`로 바꿔 Pod template의 `agent-api` label과 일부러 어긋나게 한다. 이 overlay는 apply 대상이 아니다. local oracle이 이 불일치를 거부하는지 확인하기 위한 음성 입력이다. Kubernetes API에서 selector와 template label이 맞지 않는 Deployment는 유효한 rollout 계약이 될 수 없다.
+
+```bash
+npm run verify:kubernetes-lab
+# expected: intentional-defect overlay rejected by the local selector oracle
+```
+
+`kubectl apply -k labs/volume-3/kubernetes/overlays/intentional-defect`는 실행하지 않는다. 결함 검출은 정상 overlay가 실제 CNI에서 egress를 차단했거나, preStop이 intake를 닫았거나, receiver가 receipt를 대사했다는 증거도 아니다.
+
 ### cleanup
 
 실습 후 laboratory namespace와 port-forward를 정리한다. production namespace, shared CRD, 실제 customer secret을 지우는 명령은 이 책의 실습 범위가 아니다.
 
 ```bash
-kubectl delete namespace agent-lab --wait=true
+kubectl delete -k labs/volume-3/kubernetes/overlays/kind --wait=true
 ```
 
 ## 35.5 배포 검토 체크리스트
@@ -149,6 +165,8 @@ kubectl delete namespace agent-lab --wait=true
 - [ ] drain 중 새 claim을 막고, in-flight Run의 terminal evidence를 보존하는가?
 - [ ] cancellation을 effect abort나 rollback의 증거로 사용하지 않는가?
 - [ ] trace label에 raw prompt, secret, high-cardinality run id를 넣지 않는가?
+- [ ] PDB의 `minAvailable`을 effect drain 완료의 증거로 오해하지 않는가?
+- [ ] NetworkPolicy가 실제 CNI에서 enforce되고 ingress source·DNS·receiver egress가 기대대로 막히거나 허용되는지 packet-level로 확인했는가?
 
 ## 35.6 이 장이 보장하지 않는 것
 

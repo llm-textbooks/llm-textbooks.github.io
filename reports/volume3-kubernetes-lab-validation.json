@@ -1,0 +1,92 @@
+{
+  "schemaVersion": 1,
+  "lab": "volume3-kubernetes-staging",
+  "executionKind": "local YAML contract validation; no Kubernetes cluster, API server, CNI, image pull, Pod, receiver, or external tool call",
+  "clusterExecution": false,
+  "staticChecks": [
+    {
+      "message": "namespace must be marked disposable",
+      "pass": true
+    },
+    {
+      "message": "ServiceAccount token automount must be disabled",
+      "pass": true
+    },
+    {
+      "message": "RBAC must grant only named ConfigMap get",
+      "pass": true
+    },
+    {
+      "message": "RoleBinding must bind agent-api to narrow Role",
+      "pass": true
+    },
+    {
+      "message": "ResourceQuota must bound pod and CPU request budget",
+      "pass": true
+    },
+    {
+      "message": "base must contain default-deny plus ingress allow NetworkPolicy",
+      "pass": true
+    },
+    {
+      "message": "default-deny must select ingress and egress",
+      "pass": true
+    },
+    {
+      "message": "ingress policy must target agent-api labels",
+      "pass": true
+    },
+    {
+      "message": "Service must select agent-api and named HTTP port",
+      "pass": true
+    },
+    {
+      "message": "Deployment selector must match Pod template labels",
+      "pass": true
+    },
+    {
+      "message": "Deployment must use two replicas and zero-unavailable rolling update",
+      "pass": true
+    },
+    {
+      "message": "Pod must use tokenless agent-api ServiceAccount",
+      "pass": true
+    },
+    {
+      "message": "Deployment must declare grace period and preStop hook",
+      "pass": true
+    },
+    {
+      "message": "Deployment must declare named-port readiness and liveness probes",
+      "pass": true
+    },
+    {
+      "message": "container must declare resource requests and limits",
+      "pass": true
+    },
+    {
+      "message": "container must use restricted security context",
+      "pass": true
+    },
+    {
+      "message": "PDB must preserve one selected agent-api Pod",
+      "pass": true
+    },
+    {
+      "message": "intentional-defect overlay must be rejected: selector does not match template label",
+      "pass": true
+    }
+  ],
+  "intentionalDefect": {
+    "overlay": "labs/volume-3/kubernetes/overlays/intentional-defect",
+    "expected": "Deployment selector/template label mismatch is rejected",
+    "detected": true
+  },
+  "toolsFound": {
+    "kubectl": null,
+    "kustomize": null,
+    "kubeconform": null,
+    "kind": null
+  },
+  "failures": []
+}

@@ -1,0 +1,27 @@
+# Default deny is intentional.  This lab has no external model or tool egress.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress-egress
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress", "Egress"]
+---
+# The Service selects these Pods.  In a real installation replace this broad
+# same-namespace peer with the ingress-controller namespace/identity expected
+# by the chosen CNI, then verify it with a packet-level test.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-agent-api-from-lab
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: agent-api
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector: {}
+      ports:
+        - protocol: TCP
+          port: 8080

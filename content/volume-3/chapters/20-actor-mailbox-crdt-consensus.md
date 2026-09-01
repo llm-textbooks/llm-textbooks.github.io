@@ -179,6 +179,72 @@ uv run --with pytest --with rdflib \
 
 crash 뒤 첫 질문은 '재시도할까?'가 아니다. message delivery가 미확정인지, local state apply가 미확정인지, replicated command가 미확정인지, receiver effect가 미확정인지 먼저 분류한다. mailbox duplicate면 message ID를, local apply면 generation/transition receipt를, consensus command면 log index와 quorum 상태를, 외부 변경이면 effect key와 receiver receipt를 조회한다. receipt가 있으면 새 handler는 기존 결과를 연결만 한다. receipt가 없으면 해당 layer의 policy가 허용할 때만 새 attempt를 만든다. 이 순서가 actor restart를 duplicate side effect로 바꾸지 않게 한다.
 
+## 20.9 실행 ledger: restart, merge, term을 한 incident에 겹치지 않게 둔다
+
+이번에는 서로 다른 네 문장을 실제로 분리해 본다. 아래 fixture는 Akka나 Raft cluster를 흉내 내어 성능을 재는 코드가 아니다. 고정된 local ledger를 실행해, 한 문장을 다른 문장으로 잘못 승격하는 순간을 잡는 test다. Akka의 실제 supervision source와 Raft·CRDT 원전은 각각 뒤에서 따로 읽는다.
+
+```bash
+uv run --with pytest --with rdflib \
+  pytest -q research/agents/fixtures/test_actor_crdt_consensus_vertical_wave43.py
+```
+
+pass oracle은 세 묶음이다.
+
+|사건|관찰 값|이 값이 말하지 않는 것|
+|---|---|---|
+|duplicate + crash|`receiver apply_count_after_restart == 1`|actor library가 exactly-once를 제공한다는 주장|
+|poison message|`dead-letter:schema-invalid`, restart 1회|dead letter가 이미 발행한 effect를 되돌린다는 주장|
+|CRDT permutation|set union은 6개 순열에서 하나의 final state|외부 append effect도 같은 순서라는 주장|
+|term change|index 11은 quorum 2로 commit, token 7 write는 token 8 receiver가 거절|Raft commit이 외부 API 완료 receipt라는 주장|
+
+fixture의 재시작 경로는 다음처럼 **dispatch 후 crash**를 의도적으로 만든다. 그러므로 local handler의 terminal flag는 믿을 수 없다. recovery는 새 effect를 보내기 전에 receiver를 effect key로 조회한다.
+
+```python
+# 동반 fixture의 축약본: 실제 receiver는 in-process ledger다.
+receiver_receipts[effect_key] = "receipt-ticket-42-close-001"
+event("handler-crash-after-dispatch", durable_disposition="unknown")
+
+# actor generation 2
+event("reconciliation-query", receiver_receipt_found=True)
+durable_messages[message_id] = "applied-from-receipt"
+event("duplicate-dropped", durable_disposition="applied-from-receipt")
+```
+
+중요한 순서는 `crash → unknown → receipt query → durable disposition → duplicate drop`이다. 반대로 duplicate를 먼저 drop하면, crash 전에 receiver가 실제로 적용했는지와 아직 적용되지 않았는지를 구별할 기록이 사라진다. receipt가 없을 때만 새 attempt를 고려하며, 그때도 idempotency key와 receiver contract가 없으면 자동 재시도는 안전하다고 말할 수 없다.
+
+CRDT 부분도 같은 방식으로 읽는다. `{"alpha", "beta", "gamma"}`의 union은 입력 순열 여섯 개에서 모두 같은 집합이 된다. 하지만 다음 효과는 여섯 개의 서로 다른 trace를 만든다.
+
+```text
+alpha -> beta -> gamma
+gamma -> beta -> alpha
+... (총 6개 순서)
+```
+
+즉 replica state에 적용한 merge law가 참이어도, deploy·결제·ticket close처럼 순서가 의미인 명령을 merge로 해결한 것은 아니다. 명령에는 순서화된 log, receiver-side idempotency, 또는 명시적 compensation contract가 필요하다. `state convergence`와 `effect convergence`를 같은 metric으로 보고하면 이 차이를 잃는다.
+
+마지막 ledger는 term 7의 leader가 `n1,n2` acknowledgement로 index 11을 commit한 뒤, term 8 leader가 receiver fence token을 8로 올리는 장면이다. 늦게 돌아온 term 7 writer는 거절되고, term 8 reconciliation은 이미 존재하는 `receipt-deploy-11`을 연결한다. 이때 확인해야 할 키는 셋이다.
+
+```text
+replicated command: (term=7, log_index=11, quorum=2)
+authority epoch:     receiver_fence_token=8
+effect observation:  receipt_id=receipt-deploy-11
+```
+
+이 세 키는 우연히 같은 incident에 등장해도 서로 대체되지 않는다. log index는 command order, fence는 stale owner 거절, receipt는 receiver의 실제 apply를 판정한다. 특히 fence comparison은 receiver가 수행해야 한다. caller가 '나는 term 8'이라고 적은 telemetry만으로는 term 7의 늦은 I/O를 막지 못한다.
+
+### Akka source를 읽을 때의 실무 질문
+
+고정 [Akka Typed `SupervisorStrategy.scala`](https://github.com/akka/akka/blob/a7ebe0ca46a55d62270b959942e6698727e400aa/akka-actor-typed/src/main/scala/akka/actor/typed/SupervisorStrategy.scala#L16-L40)는 `resume`, `restart`, `stop`을 구분한다. 같은 파일의 [restart stash contract](https://github.com/akka/akka/blob/a7ebe0ca46a55d62270b959942e6698727e400aa/akka-actor-typed/src/main/scala/akka/actor/typed/SupervisorStrategy.scala#L274-L288)는 restart 대기 중 들어온 message를 stash했다가 새 behavior에 전달할 수 있으며, capacity를 넘으면 drop될 수 있음을 적는다.
+
+그래서 운영 review에서는 'restart했는가?' 대신 다음을 묻는다.
+
+- restart 동안 들어온 message의 상한과 drop disposition은 무엇인가?
+- poison message는 왜 retryable이 아닌가? schema error, policy deny, receiver outage를 같은 queue에 넣지 않았는가?
+- actor generation이 바뀐 뒤 이전 effect key와 receipt lookup contract는 보존되는가?
+- child를 stop/keep하는 선택이 이미 발행된 effect attempt의 ownership을 흐리지 않는가?
+
+이 fixture는 Akka process, mailbox dispatcher, persistence plugin, cluster sharding을 실행하지 않는다. 따라서 위 source는 API/구현 경계의 근거이고, fixture는 receipt-first recovery라는 설계 반례의 근거다. 둘을 합쳐도 특정 Akka deployment의 failure guarantee가 되지는 않는다.
+
 ### 원전
 
 - [Actor Model](https://arxiv.org/pdf/1008.1459)

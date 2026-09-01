@@ -180,6 +180,51 @@ oracle은 정확히 다음 순서다: `committed`, `rejected-stale-cas`, `quaran
 
 `rejected-stale-cas`는 worker가 틀렸다는 판정이 아니다. 그 worker의 input generation이 더 이상 현재 decision에 사용할 수 없다는 뜻이다. recovery worker는 최신 board generation을 읽고 source freshness·scope를 다시 검사한 뒤 새 `attempt_id`로 proposal을 만든다. quarantine record는 조용히 삭제하지 말고 reason과 접근 범위를 남긴다. terminal oracle이 `not-terminal`이면 board가 아니라 각 branch의 terminal disposition을 먼저 복원한다. 그리고 이미 effect attempt가 있었다면 board의 상태 대신 receiver receipt를 조회한다.
 
+## 18.8 재시작까지 넣은 작은 수직 실습: 삭제된 사실을 늦은 writer가 되살리지 못하게 하기
+
+앞 절의 한 process 실습은 write gate의 모양을 보여 준다. 이제 저장소를 닫았다 다시 열어도 같은 판단이 유지되는지를 본다. 이 예제는 표준 라이브러리 SQLite 파일 하나만 쓴다. 실제 AgentRun이나 LangGraph를 흉내 내는 예제가 아니다. 따라서 여기서 얻는 결론도 좁다. **한 durable row에서 CAS·tombstone·재시작 reconciliation을 분리해 시험하는 법**만 관찰한다.
+
+장면은 다음과 같다. `worker-a`와 `worker-b`는 모두 `policy-v0`, generation 0을 읽는다. A가 먼저 `policy-v1-from-a`를 쓰고 generation을 1로 올린다. B는 같은 base 0을 들고 도착하므로 stale CAS로 거절되어야 한다. 그 뒤 삭제 요청이 generation 1을 tombstone으로 바꾸며 generation 2를 만든다. 마지막으로 오래 멈춰 있던 writer가 base 1로 `late-resurrection`을 쓰려 한다. 이 writer는 ‘stale’이라는 일반적인 말보다 더 강한 `rejected-tombstone`을 받아야 한다. 이미 삭제된 record에는 재평가 후 재시도조차 허용되지 않는다는 뜻이다.
+
+```mermaid
+sequenceDiagram
+    participant A as worker-a
+    participant B as worker-b
+    participant S as SQLite board
+    A->>S: CAS(base=0, policy-v1-from-a)
+    S-->>A: committed, generation=1
+    B->>S: CAS(base=0, policy-v1-from-b)
+    S-->>B: rejected-stale-cas
+    Note over S: tombstone(base=1), generation=2
+    B->>S: CAS(base=1, late-resurrection)
+    S-->>B: rejected-tombstone
+    Note over S: close → reopen
+    S-->>S: unknown intent → abandoned-tombstone
+```
+
+함수와 상태를 함께 보면 경계가 선명해진다. `_cas_write(conn, key, expected, value)`는 row의 `generation`과 `tombstoned`를 먼저 읽고, 조건부 `UPDATE`가 정확히 한 행을 바꿨을 때만 `committed`를 반환한다. `_tombstone(conn, key, expected)`도 같은 generation 조건을 써서 삭제 요청 자체가 늦은 요청으로 기존 값을 지우지 못하게 한다. `attempts` table은 외부 effect ledger가 아니다. process가 닫히기 직전에 local intent가 `unknown-after-crash`로 남았다는 좁은 사실을 보관한다. reopen 뒤에는 tombstone row를 다시 읽어 그 intent를 `abandoned-tombstone`으로만 바꾼다. 이 경로는 receiver에 질의를 하지 않으므로 외부 변경의 exactly-once 증명이 될 수 없다.
+
+```bash
+uv run --with pytest \
+  pytest -q research/agents/fixtures/test_blackboard_sqlite_vertical_wave43.py
+```
+
+oracle은 disposition 네 개를 혼동하지 않는 것이다.
+
+|순서|전이|oracle|다음 행동|
+|---:|---|---|---|
+|1|A, base 0 write|`committed`|generation 1을 visible snapshot으로 사용|
+|2|B, base 0 write|`rejected-stale-cas`|최신 source와 generation을 다시 읽어 새 proposal 생성|
+|3|base 1 tombstone|`tombstoned`|일반 reader에서 제외하고 purge workflow로 전달|
+|4|base 1 late write|`rejected-tombstone`|자동 merge·재시도 금지|
+|5|restart의 unknown intent|`abandoned-tombstone`|재생성 대신 operator review 또는 별도의 restore 정책|
+
+여기서 특히 중요한 것은 `rejected-stale-cas`와 `rejected-tombstone`의 차이다. 전자는 이전 판단이 낡았다는 정보다. 최신 상태를 읽고 verifier를 다시 통과하면 같은 작업을 새 attempt로 제안할 수 있다. 후자는 그 key-space의 record가 철회됐다는 정보다. 늦은 writer의 value 품질과 무관하게 자동 복원 경로를 막아야 한다. tombstone을 stale conflict처럼 처리하면 retention·offboarding·incident cleanup 뒤에 과거 observation이 다시 planner-visible state로 돌아오는 복구 버그가 생긴다.
+
+재시작의 복구 순서도 뒤집지 않는다. (1) storage를 열고 schema와 tenant namespace를 검사하고, (2) tombstone·generation을 확인하고, (3) `unknown-after-crash` intent를 reconcile queue로 모으고, (4) 그 뒤에만 planner read를 연다. unknown intent가 effect를 동반했다면 이 fixture의 disposition으로 결론 내리지 않는다. 26장에서 다루듯 receiver receipt 또는 idempotency key를 조회해 별도로 reconcile한다.
+
+이 실습이 인용하는 [LangGraph `BinaryOperatorAggregate`의 고정 source](https://github.com/langchain-ai/langgraph/blob/11ee185999b86bfea2d8c0e69cef9a5e37acf686/libs/langgraph/langgraph/channels/binop.py#L65-L155)는 supplied value를 순서대로 reducer에 적용하고 한 super-step 안의 두 번째 `Overwrite`를 거절하는 구현을 보여 준다. 그 사실은 유용한 비교점이다. 하지만 그 channel이 SQLite CAS, tombstone, writer authority, restart reconciliation을 제공한다는 뜻은 아니다. framework source에서 읽은 local update law와 서비스가 별도로 설계해야 할 durable ownership law를 같은 보장으로 합치지 말자.
+
 ### 원전
 
 - [LangGraph BinaryOperatorAggregate](https://github.com/langchain-ai/langgraph/blob/11ee185999b86bfea2d8c0e69cef9a5e37acf686/libs/langgraph/langgraph/channels/binop.py#L65-L155)

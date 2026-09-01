@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: agent-lab
+  labels:
+    app.kubernetes.io/part-of: volume3-kubernetes-lab
+    lab.llm-textbooks.io/disposable: "true"

@@ -1,6 +1,6 @@
 # 40장. crash recovery 배포 실습: 죽은 worker가 남긴 효과를 어떻게 판정할까
 
-> **실습 상태 — 실행 가능.** 아래 wrapper는 현재 저장소에 존재하는 고정 fixture를 실행한다. 다만 Kubernetes rolling deployment와 외부 분산 receiver 명령은 구현 계약이며, 이 로컬 회귀 결과를 production 분산 보장으로 일반화하지 않는다.
+> **실습 상태 — 두 증거를 분리한다.** 아래 Python wrapper는 현재 저장소의 durable receiver fixture를 실행한다. `labs/volume-3/kubernetes`의 Kustomize manifest는 local YAML oracle로 정적 검증했다. 이 checkout에서는 Kubernetes cluster·CNI·Pod·외부 receiver를 실행하지 않았으므로 rolling deployment와 NetworkPolicy enforcement는 아직 runtime 관측이 아니다.
 
 ## 먼저 재현할 세 경계
 
@@ -71,6 +71,16 @@ rolling update는 새 pod가 ready가 된 뒤 old pod를 없애는 lifecycle로 
 |reconcile|new owner가 unknown sweep|same logical identity 사용|receipt 또는 no-apply 답변|
 
 Kubernetes controller의 work queue도 shutdown 때 intake를 닫고 worker를 기다린다. 하지만 platform의 graceful shutdown만으로 receiver effect의 정확성을 얻을 수는 없다. process가 정상 종료 신호를 받지 못하는 kill, node loss, partition을 별도 fault로 다뤄야 한다.
+
+### Kubernetes manifest가 확인하는 범위와 확인하지 못하는 범위
+
+이 책의 최소 manifest는 `Deployment`의 `maxUnavailable: 0`, `maxSurge: 1`, `minReadySeconds`, `terminationGracePeriodSeconds: 30`, TCP readiness/liveness, `preStop` hook, 두 replica와 `minAvailable: 1` PDB를 선언한다. 이 조합은 controller가 새 Pod ready 이후 old Pod를 줄일 수 있는 object-level 조건을 표현한다. 하지만 bundled HTTP fixture의 `preStop`은 hook 문법만 보이며, AgentRun intake close나 durable `Prepared` flush를 구현하지 않는다.
+
+```bash
+npm run verify:kubernetes-lab
+```
+
+이 명령은 cluster를 만들지 않는다. baseline selector·PDB·Service·NetworkPolicy·RBAC·quota·probe·rolling-update 조건과 intentional selector mismatch를 읽는 local oracle이다. 실제 kind/staging 적용은 35장의 disposable-cluster 경계에서만 수행하고, 그때도 `rollout status`를 receipt reconciliation의 성공으로 사용하지 않는다.
 
 ## 40.3 실습 환경을 고정한다
 
@@ -268,6 +278,8 @@ readiness probe는 빈 새 record만 읽어서는 안 된다. 배포 중 실제�
 ### 실제 장애 명령의 안전 경계
 
 process kill을 자동화할 때 PID가 lab child인지 부모 PID와 executable path로 검증한다. temporary directory는 생성 직후 canonical path가 repository 아래인지 확인한다. network fault는 적용 전 rule inventory를 저장하고 정확히 생성한 rule만 제거한다. cleanup 뒤에는 port bind 시도와 process wait로 survivor 0을 확인한다.
+
+Kubernetes manifest의 intentional-defect overlay도 같은 원칙을 따른다. selector/template label 불일치는 local oracle로만 검출하며 실제 cluster에 apply하지 않는다. 이 음성 검사는 API-level rollout contract의 한 조항을 확인할 뿐, CNI의 network isolation, image pull, Pod scheduling, graceful termination, receiver lookup을 대신하지 않는다.
 
 ### lab 판정 체크리스트
 
