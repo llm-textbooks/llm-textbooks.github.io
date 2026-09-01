@@ -1,6 +1,8 @@
 # 12장. 승인, 권한, sandbox는 서로의 대용품이 아니다
 
-## 12.0 최초 allow는 사용 기한이 없는 표가 아니다
+> 선수 지식: [11장](./11-tool-registry-routing.md)의 invocation gate. 여기서는 사람의 동의, 정책 판정, 실행 격리, 수신자 확인이 막는 위험을 각각 분리한다.
+
+## 최초 allow는 사용 기한이 없는 표가 아니다
 
 한 장애 주입 실행에서 후보 `a-design`은 최초 권한 검사에 통과했다. 그 뒤 viewer 관계를 제거하고 효과 직전에 더 강한 일관성 옵션으로 다시 검사하자 deny가 됐다. 수신자 프로세스는 시작되지 않았고 dispatch 전 cancellation 요청과 확인이 모두 남았으며 잔여 작업은 0이었다. 이 관찰이 보여 주는 범위는 좁고 중요하다. **계획 시점의 allow를 실행 시점까지 들고 가면 안 된다.**
 
@@ -219,6 +221,6 @@ approval은 사람을 보안 장비로 취급하는 방식이 아니라, 자동�
 
 권한 설계의 좋은 종료 상태는 ‘아무것도 못 한다’가 아니라, 기대한 action은 근거와 함께 통과하고 예상하지 않은 action은 왜 멈췄는지 설명 가능한 상태다. 그 균형은 모델 tuning이 아니라 capability, receipt, sandbox, receiver 확인을 함께 운영할 때 나온다.
 
-### policy 변경의 배포
+### 12.14.1 policy 변경의 배포
 
 policy도 code처럼 staged rollout이 필요하다. 처음에는 shadow mode로 기존 결정과 새 결정의 차이를 기록하고, high-risk deny 규칙은 break-glass 절차와 함께 넣으며, 변경 뒤 stale approval·deny surge·unknown effect를 관찰한다. 새 revision을 배포한 순간 과거 receipt를 어떻게 처리하는지 명시하지 않으면 pause/resume 경로에서 가장 늦게, 가장 위험한 방식으로 결함이 드러난다.

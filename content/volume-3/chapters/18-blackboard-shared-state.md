@@ -129,15 +129,6 @@ schema를 바꿀 때 writer와 reader를 동시에 바꾸지 못하는 기간이
 
 shared board가 느려지면 모든 worker가 retry를 시작해 write storm을 만들 수 있다. queue depth, CAS conflict, storage latency를 보고 per-key serialization 또는 admission backoff를 적용한다. 하지만 backpressure 때문에 observation을 드롭할 때도 어떤 class를 버렸는지 기록해야 한다. low-trust proposal을 drop하는 것과 effect receipt를 drop하는 것은 같은 loss가 아니다. board availability 목표와 audit completeness 목표를 분리한다.
 
-### 장을 닫기 전 체크리스트
-
-- [ ] record에 tenant, generation, writer, provenance, visibility가 있는가?
-- [ ] stale write와 taint가 서로 다른 상태인가?
-- [ ] CAS의 local 보장을 CRDT/consensus로 과장하지 않는가?
-- [ ] reducer의 순서 의존성을 검사하는가?
-- [ ] untrusted observation은 quarantine을 거쳐야 하는가?
-- [ ] write acknowledgement와 replica/backup 전파를 구분하는가?
-
 ### blackboard write에는 generation과 authority를 함께 묶는다
 
 `put(key, value)`만 있는 shared state에서는 취소된 writer가 최신 결과를 덮을 수 있다. 최소 write 계약은 다음과 같다.
@@ -224,6 +215,15 @@ oracle은 disposition 네 개를 혼동하지 않는 것이다.
 재시작의 복구 순서도 뒤집지 않는다. (1) storage를 열고 schema와 tenant namespace를 검사하고, (2) tombstone·generation을 확인하고, (3) `unknown-after-crash` intent를 reconcile queue로 모으고, (4) 그 뒤에만 planner read를 연다. unknown intent가 effect를 동반했다면 이 fixture의 disposition으로 결론 내리지 않는다. 26장에서 다루듯 receiver receipt 또는 idempotency key를 조회해 별도로 reconcile한다.
 
 이 실습이 인용하는 [LangGraph `BinaryOperatorAggregate`의 고정 source](https://github.com/langchain-ai/langgraph/blob/11ee185999b86bfea2d8c0e69cef9a5e37acf686/libs/langgraph/langgraph/channels/binop.py#L65-L155)는 supplied value를 순서대로 reducer에 적용하고 한 super-step 안의 두 번째 `Overwrite`를 거절하는 구현을 보여 준다. 그 사실은 유용한 비교점이다. 하지만 그 channel이 SQLite CAS, tombstone, writer authority, restart reconciliation을 제공한다는 뜻은 아니다. framework source에서 읽은 local update law와 서비스가 별도로 설계해야 할 durable ownership law를 같은 보장으로 합치지 말자.
+
+### 장을 닫기 전 체크리스트
+
+- [ ] record에 tenant, generation, writer, provenance, visibility가 있는가?
+- [ ] stale write와 taint가 서로 다른 상태인가?
+- [ ] CAS의 local 보장을 CRDT/consensus로 과장하지 않는가?
+- [ ] reducer의 순서 의존성을 검사하는가?
+- [ ] untrusted observation은 quarantine을 거쳐야 하는가?
+- [ ] write acknowledgement와 replica/backup 전파를 구분하는가?
 
 ### 원전
 

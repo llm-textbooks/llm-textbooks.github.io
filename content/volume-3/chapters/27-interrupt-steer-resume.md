@@ -166,8 +166,6 @@ EffectAbsent is claimable only from the receiver contract or bounded reconciliat
 
 이 네 문장을 assertion으로 고정하면 “취소 버튼이 성공했으니 아무 일도 없었다”는 회귀를 잡을 수 있다. bounded reconciliation이 끝나지 않았다면 terminal label은 `CancelledUnknownEffect`처럼 불확실성을 보존해야 한다. 재개는 이 상태를 새 호출로 덮지 말고, 같은 logical effect와 idempotency key를 먼저 조회해야 한다.
 
-### 장을 닫기 전 체크리스트
-
 ### protocol 취소와 프로그램 재개의 교차walk
 
 |관측|확실히 말할 수 있는 것|말할 수 없는 것|
@@ -200,6 +198,8 @@ sequenceDiagram
 ```
 
 pi 계열에서 `AbortSignal`이 tool callback으로 전달되는지, Codex에서 parallel join이 loser task를 어떻게 정리하는지, Jikji runner가 progress/checkpoint를 어디에 쓰는지를 함수 단위로 본다. 같은 `cancel` 메서드가 있어도 signal 전달, task join, durable checkpoint, receiver fence 중 어느 층인지 먼저 표시한다. Claude Code의 managed core는 공개 소스로 이 전 경로를 확인할 수 없으므로 공개 hook과 문서 계약 이상을 추정하지 않는다.
+
+### 장을 닫기 전 체크리스트
 
 - [ ] interrupt, steer, follow-up, cancel, resume의 event 이름과 state owner가 다른가?
 - [ ] effect가 restartable node의 interrupt 이전에 놓이지 않았는가?

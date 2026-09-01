@@ -139,15 +139,6 @@ worker의 token/latency estimate는 provider 가격, cache hit, tool queue, mode
 
 이 장의 contract-net state machine은 bid의 법적 구속력, economic incentive compatibility, byzantine bidder resistance, global clock correctness, multi-region exactly-once settlement를 보장하지 않는다. 그런 속성은 별 receiver·storage·identity·failure model과 함께 검증해야 한다. protocol 이름만으로 이 비보장을 숨기지 않는 것이 system design의 출발점이다.
 
-### 장을 닫기 전 체크리스트
-
-- [ ] CFP/proposal/award와 실제 effect receipt가 별 상태인가?
-- [ ] bid에 expiry, scope, capacity reservation, input digest가 있는가?
-- [ ] lease 만료 뒤 late winner를 receiver가 fence하는가?
-- [ ] reauction이 old result를 overwrite하지 못하게 하는가?
-- [ ] quote, cost, capacity estimate의 calibration을 사후 측정하는가?
-- [ ] 공개 LLM market runtime 미관측이라는 경계를 문서에 남겼는가?
-
 ### award는 권한이 아니라 lease 제안이다
 
 winner에게 영구 권한을 주지 말고 `(awardId, taskDigest, leaseUntil, fencingToken, budgetReservation)`을 발급한다. receiver는 proposal 점수나 A2A Task 상태가 아니라 fencing token과 effect key를 검사한다.
@@ -257,6 +248,15 @@ research/agents/runtime-evidence/contract-net-auction-sqlite-wave44/manifest.jso
 [보존된 FIPA Contract Net 명세](https://web.archive.org/web/20240101000000id_/http://www.fipa.org/specs/fipa00029/SC00029H.html)는 CFP·proposal·accept/reject·completion 대화를 설명한다. [JADE `ContractNetInitiator` API](https://jade.tilab.com/doc/api/jade/proto/ContractNetInitiator.html)는 그 initiator 쪽 callback을 제공한다. [AutoGen selector](https://github.com/microsoft/autogen/blob/027ecf0a379bcc1d09956d46d12d44a3ad9cee14/python/packages/autogen-agentchat/src/autogen_agentchat/teams/_group_chat/_selector_group_chat.py#L152-L217)는 다음 speaker 후보를 제한하고 한 명을 선택한다.
 
 세 원전 중 어느 것도 이 실습의 reservation table, `active_fence`, receiver receipt row, crash 뒤 reconciliation을 제공하지 않는다. 따라서 protocol을 채택했다는 사실과 안전한 경매형 delegation을 만들었다는 주장을 분리해야 한다. 이 간격을 코드와 oracle로 드러내는 것이 경매 비유를 시스템 설계로 바꾸는 출발점이다.
+
+### 장을 닫기 전 체크리스트
+
+- [ ] CFP/proposal/award와 실제 effect receipt가 별 상태인가?
+- [ ] bid에 expiry, scope, capacity reservation, input digest가 있는가?
+- [ ] lease 만료 뒤 late winner를 receiver가 fence하는가?
+- [ ] reauction이 old result를 overwrite하지 못하게 하는가?
+- [ ] quote, cost, capacity estimate의 calibration을 사후 측정하는가?
+- [ ] 공개 LLM market runtime 미관측이라는 경계를 문서에 남겼는가?
 
 ### 원전
 

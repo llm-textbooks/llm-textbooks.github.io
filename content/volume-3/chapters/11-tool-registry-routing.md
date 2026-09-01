@@ -1,6 +1,8 @@
 # 11장. 도구 이름을 안다는 것은 실행 권한을 뜻하지 않는다
 
-## 11.0 dispatch는 교집합이다
+> 선수 지식: [5장](./05-tokenizer-tool-schema.md)의 schema와 [10장](./10-stochastic-control.md)의 proposal/admission 분리. 이 장을 마치면 registry 선택에서 receiver dispatch까지 각 거절 사유를 복원할 수 있다.
+
+## dispatch는 교집합이다
 
 도구 registry가 이름과 JSON을 인정해도 바로 handler를 부르지 않는다. 실제 paired 실행에서 검색 후보와 effect-time 권한 결과가 같았지만, 원문 해시가 빠진 실행만 수신자 호출이 차단됐다.
 
@@ -167,6 +169,6 @@ route가 장애를 낼 때 무조건 fallback을 켜면 data residency나 tenant
 
 도구를 새로 연결할 때 가장 먼저 만들 artifact는 demo가 아니라 failure matrix다. dispatch 전 deny, handler start 뒤 cancel, receiver commit 뒤 timeout, output redaction, route failover 각각에서 어떤 owner가 사실을 말하는지 표로 적는다. 이 표가 없으면 registry는 곧 함수 목록으로 퇴화한다.
 
-### schema의 진화
+### 11.11.1 schema의 진화
 
 tool schema를 바꾸면 cached prompt와 오래된 child 결과가 이전 argument shape를 들고 돌아올 수 있다. registry generation을 명시하고 compatibility adapter의 수명을 제한한다. 자동 변환이 action meaning을 바꾸거나 field를 조용히 버릴 가능성이 있으면, safe deny와 재proposal이 더 낫다. schema migration은 API 편의가 아니라 권한 경계의 변경이다.

@@ -174,8 +174,6 @@ kubectl delete -k labs/volume-3/kubernetes/overlays/kind --wait=true
 
 배포를 검토할 때 마지막으로 확인할 항목은 경계의 비용이다. tenant별 queue, index, cache, credential을 늘리면 isolation은 좋아질 수 있으나 운영·메모리 비용도 늘어난다. 반대로 전부 공유하면 평균 utilization은 좋아 보여도 한 tenant의 speculative fan-out, provider retry, cache churn이 다른 tenant의 tail을 지배한다. 따라서 어떤 경계를 물리적으로 분리하고 어떤 경계를 논리 gate로 남길지, 그리고 각각의 침해를 어떤 audit event로 탐지할지를 release design에 명시한다. “우리는 multi-tenant다”는 설명이 아니라, tenant가 어떤 키·큐·credential·receipt namespace에서 다른 tenant와 만나지 않는가가 배포 계약이다.
 
-## 원전 바로가기
-
 ## 35.7 tenant 경계에는 generation을 포함한다
 
 `tenant_id=A`만 확인해서는 정책 투영의 시대가 맞는지 알 수 없다. 실제 partition 실험에서 과거 generation `g1`의 allow payload가 격리 replica에 남아 있었고, 연결된 majority는 `g2` deny로 전진했다. generation 조건 없는 native filter는 stale payload를 반환했다. `tenant=A AND policy_generation=g2`로 fence하자 결과가 비어 fail-closed했다. client post-filter는 payload를 받은 뒤 버렸으므로 노출 경계를 이미 넘었다.
@@ -291,6 +289,8 @@ multi-tenant 안전성은 namespace 개수로 평가하지 않는다. identity�
 backup은 정상 serving path를 우회해 여러 tenant의 record를 한 artifact에 모을 수 있다. restore할 때 오래된 policy generation과 fencing counter까지 되살리면 이미 retire된 권한이 재등장한다. 복구 절차는 tenant별 restore scope, encryption key, generation floor, current fence를 다시 확인해야 한다. 운영자가 tenant A만 복구한다고 요청했는데 shared cache·vector namespace·receipt table 전체가 돌아오면 격리 실패다.
 
 offboarding 역시 delete API 한 번으로 끝나지 않는다. primary row, derived embedding, cache, checkpoint, audit retention, backup disposition을 lifecycle 표로 관리한다. 법적 보존이 필요한 audit과 즉시 삭제해야 할 serving data를 같은 정책으로 묶지 않는다. deletion 완료 receipt에는 범위와 제외된 보존 항목을 적고, 검색 결과와 receiver 조회에서 해당 tenant가 사라졌는지 postcondition을 검사한다.
+
+## 원전 바로가기
 
 - [Kubernetes Deployment controller: ownership 재검증](https://github.com/kubernetes/kubernetes/blob/98e9da3000734733127c8ac3bdb77b42ad61c31b/pkg/controller/deployment/deployment_controller.go#L521-L545)
 - [Kubernetes NetworkPolicy API](https://github.com/kubernetes/kubernetes/blob/98e9da3000734733127c8ac3bdb77b42ad61c31b/staging/src/k8s.io/api/networking/v1/types.go#L30-L156)

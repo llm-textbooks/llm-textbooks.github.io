@@ -173,8 +173,6 @@ SQLite loopback receiver는 multi-region quorum, actual payment semantics, malic
 
 이 골든 artifact는 framework 교체의 기준선이기도 하다. 새 runtime의 command 이름과 event schema가 달라도, 동일 failpoint에서 같은 안전한 disposition을 내지 못한다면 migration risk가 있다. 반대로 내부 구현이 달라도 stable logical identity와 durable receiver receipt를 유지한다면, 표현이 아니라 계약 수준에서 비교할 수 있다.
 
-## 원전 바로가기
-
 ## 37.10 골든 랩 확장: partition과 관측 손실을 분리한다
 
 checkpoint가 무엇을 복구하는지는 [28장](28-event-log-checkpoint-replay.md), fencing generation이 오래된 writer를 막는 범위는 [30장](30-lease-heartbeat-fencing.md), 장애별 terminal 판정은 [31장](31-fault-injection-recovery.md)의 계약을 따른다. 이 장은 세 계약을 새로 정의하지 않고 하나의 회귀 실험으로 묶는다.
@@ -247,6 +245,8 @@ golden 비교는 timestamp와 임시 port를 그대로 diff하지 않는다. 안
 - [ ] queue·fan-out·retry budget이 manifest에 있는가?
 - [ ] tenant와 policy generation이 함께 fence되는가?
 - [ ] 모든 child process와 network fault가 정리됐는가?
+
+## 원전 바로가기
 
 - [Pi agent loop의 tool-result reduction](https://github.com/badlogic/pi-mono/blob/853a80d26c90a14c1886f0ebb8ffaae133ca2185/packages/agent/src/agent-loop.ts#L279-L370)
 - [Pi reducer의 deterministic state transition](https://github.com/badlogic/pi-mono/blob/853a80d26c90a14c1886f0ebb8ffaae133ca2185/packages/agent/src/harness/reducer.ts#L312-L391)

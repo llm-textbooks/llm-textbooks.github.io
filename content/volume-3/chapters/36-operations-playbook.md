@@ -148,8 +148,6 @@ rm -f run.json
 
 incident record는 blame을 위한 문서가 아니다. 동일한 input과 fault에서 다음 교대자가 같은 oracle을 재검사할 수 있게 하는 재현 패키지다. 그래서 raw 대화 전문보다 identity tuple, revision, receipt, 거절 사유, 변경 시각이 먼저다.
 
-## 원전 바로가기
-
 ## 36.8 partition·unknown effect 통합 incident playbook
 
 재현 실험의 사후조건은 [37장](37-minimal-agentrun-golden-lab.md), 조정 계층의 CAS·fencing은 [38장](38-multiagent-coordination-lab.md), 검색에서 effect까지의 admission은 [39장](39-retrieval-permission-effect-lab.md), 실행 가능한 회귀 테스트는 [40장](40-crash-recovery-deployment-lab.md)에서 이어진다.
@@ -279,6 +277,8 @@ RPO는 lost event, missing receipt, stale generation에서 각각 건수로 낸�
 사후 회고는 “network 문제”에서 멈추지 않는다. 왜 generation 없는 query가 허용됐는지, 왜 retry가 receiver lookup보다 먼저였는지, 왜 dashboard 공백이 effect absence로 읽혔는지를 control gap으로 바꿔 regression trial에 추가한다.
 
 incident commander와 effect owner도 분리할 수 있다. commander는 containment와 communication을 조정하지만 결제·배포 같은 업무 효과의 재실행 권한을 자동으로 얻지 않는다. 재실행 승인에는 현재 policy, action digest, receiver postcondition이 다시 필요하다. status page에 쓰는 사용자 문장도 `지연`, `거절`, `결과 확인 중`을 구분해 아직 모르는 효과를 실패나 성공으로 단정하지 않는다.
+
+## 원전 바로가기
 
 - [OpenTelemetry SDK sampling 결정 시점](https://github.com/open-telemetry/opentelemetry-specification/blob/29ae8c7710d2ea52e21a5ff81fb1cd657bcd3306/specification/trace/sdk.md#L288-L346)
 - [OpenTelemetry span limits](https://github.com/open-telemetry/opentelemetry-specification/blob/29ae8c7710d2ea52e21a5ff81fb1cd657bcd3306/specification/trace/sdk.md#L117-L171)

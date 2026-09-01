@@ -1,5 +1,7 @@
 # 6장. 압축은 기억이 아니라 손실을 관리하는 프로토콜이다
 
+> 선수 지식: [4장](./04-context-assembly.md)의 입력 소유권과 [5장](./05-tokenizer-tool-schema.md)의 토큰 예산. 이 장을 마치면 압축 가능한 서사와 별도 원장에 남겨야 할 통제 상태를 나눌 수 있다.
+
 긴 실행에서 문맥 압축은 선택 사항이 아니다. 모델 context window는 유한하고, tool output·검색 문서·child 결과·사용자 대화는 계속 늘어난다. “요약을 잘하는 모델”만으로는 부족하다. 요약은 원래 history와 동치가 아니며, 무엇을 버렸는지 모르면 승인·권한·미완료 효과 같은 상태까지 문장 속에서 사라질 수 있다.
 
 결론은 단순하다. 압축은 자연어를 줄이는 기능이 아니라 **generation을 바꾸는 상태 전이**다. summary는 model-visible memory의 한 형태일 뿐, durable effect ledger·approval record·tenant scope·lease를 대신하면 안 된다. 좋은 compaction은 토큰을 아끼면서도 어떤 종류의 사실을 절대로 문장 요약에 맡기지 않을지 명시한다.
@@ -175,7 +177,7 @@ pi-agent의 context compaction과 harness는 turn boundary와 structural linkage
 4. [Codex context-window state](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/session/context_window.rs#L52-L120)
 5. [pi-agent loop](https://github.com/badlogic/pi-mono/blob/853a80d26c90a14c1886f0ebb8ffaae133ca2185/packages/agent/src/agent-loop.ts#L279-L310)
 
-## 6.14 소스 디깅: 세대 전환을 추적한다
+## 6.12 소스 디깅: 세대 전환을 추적한다
 
 압축 전후를 두 문장으로 비교하면 요약 품질만 보인다. 실행기는 `generation g`의 history를 읽어 `generation g+1`을 설치한다. narrative는 줄일 수 있지만 승인, 미확정 효과, lease, policy revision, child base generation 같은 control state는 문장에 섞어 압축해서는 안 된다.
 

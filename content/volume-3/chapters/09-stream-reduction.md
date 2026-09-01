@@ -1,6 +1,8 @@
 # 9장. 스트림을 줄인다는 것은 문장을 잇는 일이 아니다
 
-## 9.0 terminal은 하나가 아니다
+> 선수 지식: [8장](./08-model-request-retry.md)의 request attempt와 EOF 경계. 여기서는 provider event를 transcript·도구 상태·외부 효과 원장으로 각각 투영하는 reducer를 설계한다.
+
+## terminal은 하나가 아니다
 
 한 실행에는 최소 네 종류의 종결이 있다.
 

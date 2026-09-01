@@ -1,5 +1,7 @@
 # 5장. 토크나이저·채팅 템플릿·도구 스키마: 모델이 실제로 읽는 계약
 
+> 선수 지식: [4장](./04-context-assembly.md)의 context generation. 여기서는 조립된 객체가 문자열·토큰·도구 제안으로 바뀌는 경계와, 유효한 JSON이 곧 실행 허가가 아닌 이유를 추적한다.
+
 도구 호출 실패를 “모델이 JSON을 못 만들었다”로 끝내면 중요한 절반을 놓친다. 모델은 JSON Schema를 직접 읽는 것이 아니라, 채팅 템플릿이 렌더한 문자열 또는 provider가 직렬화한 wire format을 토큰으로 읽는다. 같은 대화와 같은 Python dict라도 tokenizer revision, chat template, special token 정책, tool description, truncation 위치가 달라지면 모델의 입력은 달라진다.
 
 이 장은 tokenization을 부수적인 전처리로 보지 않는다. 에이전트에서 tokenizer와 schema renderer는 **권한을 부여하지는 않지만 행동 언어를 정의하는 컴파일러 경계**다. 이 경계를 모르면 “도구가 보였는데 왜 호출하지 않았지?”, “학습 때는 되던 JSON이 서빙에서 왜 깨지지?”, “token budget이 남았는데 provider가 왜 거절했지?” 같은 질문에 답할 수 없다.
@@ -166,7 +168,7 @@ Prometheus는 high-cardinality label을 피하라고 권고한다. [Prometheus l
 
 ## 이 장의 원전 바로가기
 
-## 5.14 소스 디깅: 문자열이 token과 도구 계약이 되는 순간
+## 5.11 소스 디깅: 문자열이 token과 도구 계약이 되는 순간
 
 토크나이저를 단어 분리기로만 보면 chat template과 tool schema가 왜 실행 결과를 바꾸는지 놓친다. 모델이 받는 것은 role 객체나 Python dict가 아니라 special token을 포함한 정수열이다. 직렬화 함수가 공백 하나, role marker 하나, JSON property 순서 하나를 바꾸면 token 경계와 길이가 달라진다. 길이가 달라지면 truncation 위치가 움직이고, 잘린 위치가 tool call JSON 한가운데라면 문법과 실행 가능성도 함께 바뀐다.
 

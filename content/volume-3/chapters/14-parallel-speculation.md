@@ -1,5 +1,7 @@
 # 14장. 먼저 움직인 일이 왜 더 느리고 더 위험해지는가
 
+> 선수 지식: [9장](./09-stream-reduction.md)의 순서·terminal과 [13장](./13-logical-call-effect.md)의 effect disposition. 이 장에서는 병렬 fan-out의 지연 이득을 취소 비용·중복 작업·미확정 효과와 함께 계산한다.
+
 ## 손익분기식부터 세운다
 
 갈래 수를 늘리기 전에 다음 순가치를 같은 단위로 환산한다.

@@ -142,7 +142,7 @@ replay는 장애 때 처음 실행하면 안 된다. 매 release에서 표본 ru
 
 이 drill은 production effect를 재발사하지 않아야 한다. network egress를 막고, replay mode에서는 live tool call이 hard fail하도록 만들어 accidental execution을 검출한다. 작동하는 replay는 사고를 되감는 시간 여행이 아니라, 우리가 무엇을 알고 무엇을 모르는지 반복해서 검증하는 훈련이다.
 
-### 장을 닫기 전 체크리스트
+### replay drill 중간 점검
 
 - [ ] event, checkpoint, artifact/receipt store의 owner와 책임이 다른가?
 - [ ] local ordinal, causal relation, wall time을 혼동하지 않는가?
@@ -151,8 +151,6 @@ replay는 장애 때 처음 실행하면 안 된다. 매 release에서 표본 ru
 - [ ] missing artifact와 schema drift를 fail-closed로 다루는가?
 - [ ] external effect를 replay하지 않고 receipt query로 reconcile하는가?
 - [ ] event drop·duplicate·mutation·kill을 fault로 주입했는가?
-
-### 원전
 
 ## 28.12 receipt가 없는 replay는 효과를 추측한다
 
@@ -194,6 +192,8 @@ telemetry exporter가 event를 잃었다고 효과가 사라진 것은 아니다
 - [ ] local commit과 receipt hash가 연결되는가?
 - [ ] telemetry가 비어도 durable 상태로 결론을 낼 수 있는가?
 - [ ] 복구 뒤 pending·unknown·completed가 서로 다른 상태인가?
+
+### 원전
 
 - [Temporal workflow execution timeouts](https://docs.temporal.io/workflow-execution/timeout)
 - [Temporal workflow interface](https://github.com/temporalio/sdk-typescript/blob/1327f2d5ae77210555bbafc01fbdeaca3e9499eb/packages/workflow/src/workflow.ts#L254-L261)

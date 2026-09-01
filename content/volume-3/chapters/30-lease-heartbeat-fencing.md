@@ -131,6 +131,8 @@ Plan -> policy(actionDigest, revision)
 
 ## 30.7 heartbeat 운영 규칙: 건강 신호를 권한으로 승격하지 않는다
 
+heartbeat 처리기는 소유권을 판정하는 곳이 아니라 관측 사실을 적는 곳이어야 한다. `last_seen_at`이 갱신됐다는 이유만으로 lease를 연장하거나 write를 허용하면, control plane의 건강 신호가 receiver의 권한 검사를 우회한다. 반대로 heartbeat 한 번이 늦었다고 즉시 기존 holder를 취소하면 GC pause나 일시적인 network delay가 중복 owner를 만든다. 안전한 순서는 `suspect 기록 → durable lease 원장 확인 → 새 generation 발급 → receiver가 old token 거절`이다. 어느 단계도 “프로세스가 살아 보인다”는 한 비트로 대체할 수 없다.
+
 ## 30.8 replica partition에서 lease 직관이 깨지는 지점
 
 세 프로세스의 replicated vector store에서 한 peer를 나머지 둘과 양방향 격리했다. 격리 peer의 낮은 consistency read는 성공했지만 `all` read와 strong write는 실패했다. 연결된 majority의 strong write는 성공했고, 통신을 복구한 뒤 visible point 집합은 다시 수렴했다. 이 관측을 “모든 partition에서 quorum이 안전하다”로 넓히면 안 된다. 다만 heartbeat가 보이는 peer와 write 권한을 가진 경로가 같지 않음을 보여 준다.

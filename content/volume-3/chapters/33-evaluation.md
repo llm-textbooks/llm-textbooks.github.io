@@ -133,6 +133,14 @@ flowchart TD
 
 ### 평가 배포 전 체크리스트
 
+- [ ] task·environment·model·prompt·tool·oracle revision을 한 manifest에 고정했는가?
+- [ ] single-agent와 multi-agent의 token·호출·tool·시간 예산을 같은 단위로 공개했는가?
+- [ ] answer score와 receiver terminal state, policy violation, 비용을 별도 oracle로 채점했는가?
+- [ ] timeout·provider error·policy refusal·`Unknown`을 오답 한 칸에 합치지 않았는가?
+- [ ] shared provider·retrieval snapshot·verifier가 만드는 trial 상관을 신뢰구간에 반영했는가?
+- [ ] 최고 점수뿐 아니라 전체 trajectory, 실패 분류, 중단된 trial을 재검사할 수 있는가?
+- [ ] 공개 점수가 production reliability나 장기 외부 효과를 보장하지 않는다고 명시했는가?
+
 ## 33.9 하나의 recall을 네 계단으로 분해한다
 
 같은 query 결과도 다음 분모는 서로 다르다.

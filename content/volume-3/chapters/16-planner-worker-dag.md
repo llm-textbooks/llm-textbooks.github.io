@@ -129,16 +129,6 @@ OpenTelemetry는 sampling decision이 span 생성 시점에 이루어지고 down
 |effect|prepare와 commit authority 분리|manual approval|
 |orphan|receipt 조회 전 success 금지|reconcile queue|
 
-### 장을 닫기 전 체크리스트
-
-- [ ] DAG edge가 output dependency를 구체적으로 설명하는가?
-- [ ] edge 부재를 resource independence 증명으로 읽지 않는가?
-- [ ] ready, admitted, observed, admissible, committed 상태가 분리되는가?
-- [ ] 결과 envelope에 revision·schema·source·attempt identity가 있는가?
-- [ ] worker budget이 verifier reserve를 잠식하지 않는가?
-- [ ] retry가 같은 effect identity를 중복 commit하지 않는가?
-- [ ] trace sampling의 빈칸을 실행 부재로 해석하지 않는가?
-
 ## 16.8 계획을 artifact로 취급하는 법
 
 planner output을 자유 텍스트 checklist로만 남기면 worker가 무엇을 보장했는지 사후에 알 수 없다. plan 자체에 schema revision, task IDs, predecessor IDs, input/output contracts, resource declarations, expected effect class, stop conditions를 둔다. plan을 수정하면 새 plan revision을 만들고, 이미 실행된 task를 조용히 새 graph의 정점으로 재해석하지 않는다. 이 방식은 model planner가 완벽한 DAG를 낸다는 가정이 아니라, 잘못된 계획을 관측 가능하게 만든다.
@@ -186,6 +176,16 @@ MCP tool result나 A2A Task 완료는 node input을 얻었다는 신호일 수 �
 - plan revision 변경 뒤 late result가 다음 node를 열지 못하는가?
 - cancel acknowledgement 뒤 residual work와 비용이 계측되는가?
 - effect node는 current policy와 receiver fence를 다시 확인하는가?
+
+### 장을 닫기 전 체크리스트
+
+- [ ] DAG edge가 output dependency를 구체적으로 설명하는가?
+- [ ] edge 부재를 resource independence 증명으로 읽지 않는가?
+- [ ] ready, admitted, observed, admissible, committed 상태가 분리되는가?
+- [ ] 결과 envelope에 revision·schema·source·attempt identity가 있는가?
+- [ ] worker budget이 verifier reserve를 잠식하지 않는가?
+- [ ] retry가 같은 effect identity를 중복 commit하지 않는가?
+- [ ] trace sampling의 빈칸을 실행 부재로 해석하지 않는가?
 
 ### 원전
 

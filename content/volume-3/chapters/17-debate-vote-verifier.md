@@ -146,15 +146,6 @@ judge threshold를 바꿀 때는 holdout과 shadow traffic에서 precision/recal
 
 새 debate flow를 배포하기 전에는 같은 task를 single-agent baseline과 비교한다. total token과 wall deadline을 맞추고, source retrieval을 고정한 뒤 debate가 실제로 verifier pass claim을 늘렸는지 본다. 다음에는 source snapshot을 일부러 stale로 바꾸고, proposer 수가 늘어도 stale rejection이 작동하는지 본다. 마지막으로 receiver를 failure injection하여 selection event가 commit metric에 섞이지 않는지 확인한다. 이 rehearsal의 목적은 최고 점수를 만드는 것이 아니라 protocol의 거짓 성공 경로를 찾는 데 있다.
 
-### 장을 닫기 전 체크리스트
-
-- [ ] vote count와 independent evidence cohort를 따로 기록하는가?
-- [ ] verifier predicate가 source·time·scope·receipt를 명시하는가?
-- [ ] judge confidence가 commit authority로 승격되지 않는가?
-- [ ] 새로운 근거 없는 debate의 stop rule이 있는가?
-- [ ] negative claim은 complete inventory 없이는 unknown인가?
-- [ ] 선택, approval, receiver receipt가 별 상태인가?
-
 ### 표 수가 아니라 독립 proof 수를 센다
 
 세 agent가 같은 검색 결과와 같은 prompt를 읽었다면 3표가 아니라 하나의 evidence cohort일 수 있다. proof identity를 `(source digest, extraction span, retrieval snapshot, verifier predicate)`로 만들고 동일 identity의 표는 한 번만 센다.
@@ -198,6 +189,15 @@ uv run --with pytest --with rdflib \
 ### 복구: 결론을 재생성하지 말고 판정부터 재개한다
 
 verifier가 timeout이면 `approved`로 바꾸지도, 반대 vote로 세지도 않는다. `verification_unknown`을 branch terminal로 남기고, 같은 `state_generation`과 같은 predicate를 가진 새 `attempt_id`를 만든다. branch가 stale generation을 읽었다면 새 조사 branch를 만들되, 이전 답을 새 evidence로 재사용하지 않는다. 외부 중단 command가 이미 보내졌다면 decision record와 receiver receipt를 먼저 조회한다. receipt가 없을 때 재시도할 수 있는지는 13장에서 다룬 idempotency contract의 질문이며, debate의 자신감이 답해 주지 않는다.
+
+### 장을 닫기 전 체크리스트
+
+- [ ] vote count와 independent evidence cohort를 따로 기록하는가?
+- [ ] verifier predicate가 source·time·scope·receipt를 명시하는가?
+- [ ] judge confidence가 commit authority로 승격되지 않는가?
+- [ ] 새로운 근거 없는 debate의 stop rule이 있는가?
+- [ ] negative claim은 complete inventory 없이는 unknown인가?
+- [ ] 선택, approval, receiver receipt가 별 상태인가?
 
 ### 원전
 

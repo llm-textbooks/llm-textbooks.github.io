@@ -1,5 +1,7 @@
 # 10장. 확률적 제안과 결정적 통제면
 
+> 선수 지식: [5장](./05-tokenizer-tool-schema.md)의 도구 제안 경계와 [9장](./09-stream-reduction.md)의 terminal 판정. 이 장에서는 logits가 바꾸는 후보 분포와 정책이 바꾸는 실행 가능성을 분리한다.
+
 언어 모델이 “이 도구를 호출하라”고 출력했을 때 그것은 명령인가, 제안인가? 안전한 시스템에서는 제안이다. 모델의 logits, temperature, sampling seed, top-p는 다음 token 또는 tool-action 후보의 분포를 바꾼다. 반면 권한, 대상 revision, 비용 한도, tenant scope, 승인 만료는 확률로 결정하면 안 된다. 이 장은 두 면을 갈라 읽는 법을 다룬다.
 
 ## 10.1 낮은 temperature가 안전을 만들지 않는 이유

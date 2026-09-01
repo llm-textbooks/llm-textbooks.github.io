@@ -1,6 +1,8 @@
 # 8장. 재시도는 같은 요청을 다시 보내는 일이 아니다
 
-## 8.0 retry budget과 effect identity를 분리한다
+> 선수 지식: [1장](./01-agent-run.md)의 logical call·attempt와 [6장](./06-context-compaction.md)의 context generation. 이 장을 마치면 전송 재시도, 모델 재질문, 도구 재실행을 서로 다른 예산과 복구 절차로 분리할 수 있다.
+
+## retry budget과 effect identity를 분리한다
 
 재시도 판단은 예외 이름 하나로 하지 않는다. 같은 논리 모델 요청에 새 transport attempt를 붙일 수 있는지, 이전 stream이 tool proposal을 dispatch했는지, 그 tool의 효과가 조회 가능한지를 함께 본다.
 
@@ -178,7 +180,7 @@ provider request를 기록했다고 나중에 완전히 replay할 수 있는 것
 
 사용자가 보는 오류는 ‘재시도 2회’보다 “답변 생성 연결이 끊겼고, 이전 도구 실행 여부는 확인 중입니다”에 가까워야 한다. text stream만 실패했는지, effect가 미확정인지, 자동 retry budget이 남았는지를 구분해 보이면 사용자는 새 요청을 보내 중복을 만드는 대신 적절히 기다리거나 확인을 요청할 수 있다.
 
-## 8.13 소스 디깅: retry loop의 네 경계
+## 8.12 소스 디깅: retry loop의 네 경계
 
 logical request 생성, 오류 분류, backoff/budget, 새 attempt admission을 각각 찾는다. 같은 prompt digest라도 provider route와 response ID는 바뀔 수 있다. tool proposal이 dispatch됐다면 model retry보다 effect reconciliation이 먼저다.
 

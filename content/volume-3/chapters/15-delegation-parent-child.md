@@ -111,18 +111,7 @@ flowchart LR
 
 bounded shutdown도 ‘모든 자식이 깨끗이 종료’라는 말과 다르다. Codex의 [`shutdown_all_threads_bounded`](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/thread_manager.rs#L1190-L1246)는 timed-out/failed thread를 나중의 retry·inspection을 위해 남기고 completed thread만 제거한다. 이 패턴의 핵심은 timeout을 success로 바꾸지 않는 데 있다.
 
-## 15.7 부모-자식 리뷰 체크리스트
-
-- [ ] child input에 parent ID, snapshot revision, scope, policy revision, budget이 있는가?
-- [ ] child의 관찰·acceptance·receiver receipt를 서로 다른 상태로 기록하는가?
-- [ ] parent 상태가 바뀐 뒤 child 결과의 compatibility를 재검사하는가?
-- [ ] approval이 audience·action·expiry가 있는 capability로 좁혀졌는가?
-- [ ] write는 child가 아니라 단일 commit authority를 거치는가?
-- [ ] cancellation signal과 remote terminal receipt를 혼동하지 않는가?
-- [ ] rejected output이 next-turn context로 조용히 흘러들지 않는가?
-- [ ] child count가 아니라 verification·orphan·stale rejection을 함께 측정하는가?
-
-## 15.8 설계 리뷰에서 끝까지 물을 질문
+## 15.7 설계 리뷰에서 끝까지 물을 질문
 
 위임 API를 볼 때 `spawn(prompt)`처럼 보이는 편리한 표면만 읽지 않는다. 첫째, 부모가 child에 전달한 context가 어떤 revision인지 묻는다. 둘째, child가 읽을 수 있는 resource와 parent가 읽을 수 있는 resource가 정말 같은지 묻는다. 셋째, child output이 parent state에 들어가는 한 줄을 찾는다. 그 줄 앞에는 freshness·policy·source·taint 검사가 있어야 한다. 넷째, parent가 취소됐을 때 child process, provider request, tool receiver, durable effect가 각각 어떤 terminal status를 갖는지 확인한다.
 
@@ -138,8 +127,6 @@ bounded shutdown도 ‘모든 자식이 깨끗이 종료’라는 말과 다르�
 |write authority는?|audience·expiry·idempotency key|parent가 승인했으니 가능|
 
 이 질문은 framework 고유 API를 비판하기 위한 것이 아니다. wrapper나 application layer가 비어 있는 protocol을 채우는 위치를 찾기 위한 것이다. framework가 child session history를 잘 복원해도 application의 customer record mutation에는 별 receiver fence가 필요할 수 있다. 반대로 read-only research child라면 더 복잡한 commit protocol을 붙이는 비용이 불필요할 수 있다. effect class에 따라 admission을 달리한다.
-
-### 작은 수직 예제
 
 ### 위임 ID를 한 줄로 뭉개지 않는다
 
@@ -169,6 +156,17 @@ commit(effectKey)      -> receiverReceipt
 부모가 ‘장애 원인을 조사’하고 두 child를 만든다고 하자. C1은 logs를 읽고 C2는 runbook을 읽는다. 둘의 output은 처음에는 private candidate다. C1의 timestamp가 incident window 밖이면 stale/relevance verifier가 reject한다. C2의 runbook이 retired revision이면 current policy verifier가 reject한다. 둘 다 통과하면 parent는 source-backed investigation note로 promotion한다. 그래도 remediation command는 별 task다. parent는 affected service, approval, current deploy revision을 다시 확인해 action digest를 만들고 receiver receipt를 기다린다. 이 수직 경로에서 child 수를 늘려도 commit authority는 하나다.
 
 다음 장에서는 이 관계를 더 크게 펼친다. 여러 child를 만든다고 자동으로 workflow가 생기지 않는다. planner가 만든 task graph가 무엇을 선언하고 무엇을 전혀 알지 못하는지 살펴본다.
+
+## 15.8 부모-자식 리뷰 체크리스트
+
+- [ ] child input에 parent ID, snapshot revision, scope, policy revision, budget이 있는가?
+- [ ] child의 관찰·acceptance·receiver receipt를 서로 다른 상태로 기록하는가?
+- [ ] parent 상태가 바뀐 뒤 child 결과의 compatibility를 재검사하는가?
+- [ ] approval이 audience·action·expiry가 있는 capability로 좁혀졌는가?
+- [ ] write는 child가 아니라 단일 commit authority를 거치는가?
+- [ ] cancellation signal과 remote terminal receipt를 혼동하지 않는가?
+- [ ] rejected output이 next-turn context로 조용히 흘러들지 않는가?
+- [ ] child count가 아니라 verification·orphan·stale rejection을 함께 측정하는가?
 
 ### 원전
 

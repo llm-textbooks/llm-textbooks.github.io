@@ -133,8 +133,6 @@ Prometheus histogram은 tail latency를 집계하기 좋은 도구지만, bucket
 
 좋은 SLO는 숫자를 낮춰 보이게 하는 문구가 아니다. overload와 failure에서 누가 기다리고, 누가 거절되고, 무엇이 미상으로 남으며, 얼마를 더 썼는지를 정직하게 드러내는 운영 계약이다.
 
-### 코드·운영 원전
-
 ## 34.9 speculation은 latency를 사는 fan-out 지출이다
 
 독립 branch (n)개를 동시에 실행할 때 첫 성공 latency는 줄 수 있지만 총비용은 대략 다음처럼 늘어난다.
@@ -250,6 +248,8 @@ autoscaler도 queue depth 하나만 보지 않는다. admission reject가 queue 
 비용 회고에서는 성공 요청의 단가만 보고하지 않는다. canceled loser, rejected-after-retrieval, stale-policy retry, receipt lookup, 사람 검토에 쓴 비용을 원인별로 붙인다. 그래야 speculation을 줄일지, policy를 앞당길지, receiver 조회를 개선할지 결정할 수 있다.
 
 측정 구간과 통화·단가 revision도 함께 고정한다.
+
+## 원전 바로가기
 
 - [Kubernetes HPA의 queue·reconcile 경계](https://github.com/kubernetes/kubernetes/blob/98e9da3000734733127c8ac3bdb77b42ad61c31b/pkg/controller/podautoscaler/horizontal.go#L223-L306)
 - [OpenTelemetry BatchSpanProcessor의 queue/export contract](https://github.com/open-telemetry/opentelemetry-specification/blob/29ae8c7710d2ea52e21a5ff81fb1cd657bcd3306/specification/trace/sdk.md#L420-L482)

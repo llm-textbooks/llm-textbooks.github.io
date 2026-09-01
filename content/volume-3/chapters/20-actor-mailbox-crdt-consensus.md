@@ -130,15 +130,6 @@ actor handler를 rolling update할 때 old/new handler가 같은 mailbox를 읽�
 
 message parent ID와 trace parent는 useful correlation이지만 authoritative causality proof는 아니다. sender가 `A caused B`라고 텍스트에 쓰는 것과 receiver가 어느 command를 apply했는지는 다르다. causal claim에는 observed event, timestamp source, direction, source span을 두고, order가 필요한 state command에는 replicated log/receipt를 사용한다. graph edge 하나가 자연어 원인 결론을 자동으로 허가하지 않는다.
 
-### 장을 닫기 전 체크리스트
-
-- [ ] actor owner·mailbox ordering·supervision을 명시하는가?
-- [ ] reducer의 algebraic law와 순서 의존성을 검사하는가?
-- [ ] CRDT의 merge law와 anti-entropy를 실제로 구분하는가?
-- [ ] vote selection을 consensus commit으로 부르지 않는가?
-- [ ] consensus commit을 factual verification으로 부르지 않는가?
-- [ ] restart/retry가 effect deduplication과 연결되는가?
-
 ### delivery, merge, agreement, truth를 네 층으로 분리한다
 
 actor mailbox는 메시지를 전달하고 actor-local 순서를 제공할 수 있다. CRDT는 특정 자료형의 merge convergence를 제공한다. consensus는 복제 상태 기계가 log 순서에 합의하게 한다. verifier는 claim이 근거를 만족하는지 판정한다. 어느 층도 다른 층을 자동 포함하지 않는다.
@@ -244,6 +235,15 @@ effect observation:  receipt_id=receipt-deploy-11
 - child를 stop/keep하는 선택이 이미 발행된 effect attempt의 ownership을 흐리지 않는가?
 
 이 fixture는 Akka process, mailbox dispatcher, persistence plugin, cluster sharding을 실행하지 않는다. 따라서 위 source는 API/구현 경계의 근거이고, fixture는 receipt-first recovery라는 설계 반례의 근거다. 둘을 합쳐도 특정 Akka deployment의 failure guarantee가 되지는 않는다.
+
+### 장을 닫기 전 체크리스트
+
+- [ ] actor owner·mailbox ordering·supervision을 명시하는가?
+- [ ] reducer의 algebraic law와 순서 의존성을 검사하는가?
+- [ ] CRDT의 merge law와 anti-entropy를 실제로 구분하는가?
+- [ ] vote selection을 consensus commit으로 부르지 않는가?
+- [ ] consensus commit을 factual verification으로 부르지 않는가?
+- [ ] restart/retry가 effect deduplication과 연결되는가?
 
 ### 원전
 
