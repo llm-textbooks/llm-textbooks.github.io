@@ -10,7 +10,27 @@
 
 새벽 2시, 운영자가 배포 agent를 돌린다. 모델이 `deploy(prod, canary=10)`을 제안하고 gate가 통과시킨다. 30초 뒤 운영자가 잘못된 대상임을 알아채고 취소를 누른다. UI는 곧바로 “취소됨”으로 바뀌고 transcript에는 `AbortedToolOutput`이 남는다.
 
-아침에 확인해 보니 canary는 배포되어 있었다. 무슨 일이 있었나. 취소 신호는 handler가 HTTP 요청을 보낸 **뒤**에 도착했다. loop는 local wait를 중단했고 그 사실을 정직하게 기록했다. 그러나 loop가 기록한 것은 “우리가 기다리기를 그만두었다”이지 “receiver가 적용하지 않았다”가 아니다. 두 문장이 같은 `cancelled` 하나로 눌린 순간, 시스템은 알 수 없는 것을 안다고 말했다.
+아침에 확인해 보니 canary는 배포되어 있었다. 무슨 일이 있었나. 취소 신호는 handler가 HTTP 요청을 보낸 **뒤**에 도착했다.
+
+```mermaid
+sequenceDiagram
+  participant O as operator
+  participant L as loop/controller
+  participant H as tool handler
+  participant X as deploy receiver
+  O->>L: deploy(prod, canary=10) 승인
+  L->>H: dispatch
+  H->>X: HTTP request 전송
+  O->>L: 취소
+  L->>H: abort local wait
+  L->>L: AbortedToolOutput 기록
+  Note over L: 기록된 사실 = "기다리기를 그만두었다"
+  X->>X: canary 적용
+  Note over X: receiver는 취소를 모른다
+  O->>X: (아침) receipt 조회로만 판정 가능
+```
+
+loop는 local wait를 중단했고 그 사실을 정직하게 기록했다. 그러나 loop가 기록한 것은 “우리가 기다리기를 그만두었다”이지 “receiver가 적용하지 않았다”가 아니다. 두 문장이 같은 `cancelled` 하나로 눌린 순간, 시스템은 알 수 없는 것을 안다고 말했다.
 
 이 장이 고치려는 것이 그 눌림이다. 어디까지가 관측이고 어디부터가 판정인지를 loop의 상태 전이로 갈라 두면, 같은 사고가 나도 아침에 던질 질문이 “왜 취소가 안 됐지”가 아니라 “receiver key로 receipt를 조회했나”가 된다.
 

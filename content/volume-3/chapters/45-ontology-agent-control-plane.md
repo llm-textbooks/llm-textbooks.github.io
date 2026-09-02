@@ -14,6 +14,19 @@
 
 세 실패 중 어느 것도 모델이 문장을 잘못 만들어서 생긴 것이 아니다. 실체를 가리키는 일, 사실이 유효한 시점을 정하는 일, 권한을 언제 다시 묻는가 하는 일이 전부 검색 점수 하나로 눌려 있었기 때문이다.
 
+```mermaid
+flowchart LR
+  Q["환불해 줘"] --> V[vector 후보: score 0.91]
+  V -->|점수 하나로 통과| X[환불 실행]
+  X --> F1[동명이인 주문<br/>entity 미판정]
+  X --> F2[취소로 정정된 결제<br/>valid time 미검사]
+  X --> F3[교대 때 회수된 권한<br/>effect-time recheck 생략]
+  V -.->|제어면이 요구하는 경로| E[entity resolution]
+  E -.-> T[valid/recorded time gate]
+  T -.-> A[effect-time authorization]
+  A -.-> C[commit + receipt]
+```
+
 ## 45.1 네 그래프를 한 덩어리로 만들지 않는다
 
 에이전트가 읽는 제품 카탈로그와 에이전트가 수행한 결제 기록은 모두 triple로 표현할 수 있다. 그렇다고 같은 의미의 그래프는 아니다. 최소한 다음 네 층을 분리해야 한다.
