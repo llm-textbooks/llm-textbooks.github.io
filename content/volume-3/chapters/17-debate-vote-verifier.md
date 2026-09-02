@@ -35,7 +35,7 @@ vote는 후보를 좁히는 입력이 될 수 있다. 다만 `decision_authority
 
 Self-consistency는 여러 reasoning path를 샘플링해 answer를 고르는 접근이고, [Self-Consistency](https://arxiv.org/abs/2203.11171v4)는 이 선택의 조건을 다룬다. [Multiagent Debate](https://arxiv.org/abs/2305.14325v1)는 debate가 factuality·reasoning에 미칠 수 있는 영향을 연구한다. 이는 어떤 production 요청에서도 agent 수를 늘리면 정확해진다는 보장이 아니다. model revision, sampling temperature, prompts, judge, task split, evidence access가 바뀌면 결과의 의미도 바뀐다.
 
-Jikji의 고정 debate 구현은 proposal, `AGREE` 처리, `WINNER:` 선택 같은 control flow를 제공한다. 이 사실은 parsing과 turn loop가 있다는 뜻이다. 그것이 factual predicate, calibrated uncertainty, 독립 evidence, durable decision record를 자동으로 만든다는 뜻은 아니다. 특히 텍스트 `AGREE`는 surface token일 뿐, vote로 볼 수 없다.
+debate framework의 전형적인 구현은 proposal, `AGREE` 처리, `WINNER:` 선택 같은 control flow를 제공한다. 이 사실은 parsing과 turn loop가 있다는 뜻이다. 그것이 factual predicate, calibrated uncertainty, 독립 evidence, durable decision record를 자동으로 만든다는 뜻은 아니다. 특히 텍스트 `AGREE`는 surface token일 뿐, vote로 볼 수 없다.
 
 ```mermaid
 flowchart LR
@@ -184,7 +184,9 @@ uv run --with pytest --with rdflib \
 
 통과 oracle은 다섯 test다. 그중 `test_unanimous_correlated_votes_are_not_independent_confirmation`은 `(False, "correlated-evidence-cohort")`를, `test_verifier_requires_predicate_and_receipt_not_confidence_alone`은 predicate 없는 0.99 confidence를 거절해야 한다. `test_stopping_is_an_explicit_disposition`은 두 round 동안 새 독립 근거가 0이면 `stopped-information-stagnation`을 요구한다. 즉 성공 메시지가 아니라 `run_id`, `branch_id`, `evidence_cohort`, `predicate revision`, `stop disposition`이 이 실습의 관측값이다.
 
-실제 코드의 debate control flow를 함께 읽으려면 [Jikji의 고정 revision `debate.go`](https://github.com/epoko77-ai/jikji/blob/9c47ef0b5e261914cbf1b96ab9b8ee82e1f581a6/pkg/agent/debate.go#L1-L240)를 연다. 이 코드는 한 구현의 제어 흐름을 보여 줄 뿐, 위 fixture의 cohort gate나 receipt 규칙을 자동으로 제공하지 않는다. 코드가 보장하는 범위와 우리가 추가하는 결정 계약을 분리하는 것이 중요하다.
+실제 구현의 debate control flow를 읽을 때도 같은 규율을 적용한다. 어떤 코드든 한 구현의 제어 흐름을 보여 줄 뿐, 위 fixture의 cohort gate나 receipt 규칙을 자동으로 제공하지 않는다. 코드가 보장하는 범위와 우리가 추가하는 결정 계약을 분리하는 것이 중요하다.
+
+표 수와 독립 근거 수가 왜 다른지는 provenance graph에서 가장 선명하게 보인다. 세 답의 공통 조상을 접어 실질 evidence 수를 세고, 그 값을 effect admission의 입력으로 쓰는 방법은 [45장](./45-ontology-agent-control-plane.md)에서 다룬다.
 
 ### 복구: 결론을 재생성하지 말고 판정부터 재개한다
 
@@ -203,4 +205,3 @@ verifier가 timeout이면 `approved`로 바꾸지도, 반대 vote로 세지도 �
 
 - [Self-Consistency](https://arxiv.org/abs/2203.11171v4)
 - [Improving Factuality and Reasoning through Multiagent Debate](https://arxiv.org/abs/2305.14325v1)
-- [Jikji debate control-flow anchor](https://github.com/epoko77-ai/jikji/blob/9c47ef0b5e261914cbf1b96ab9b8ee82e1f581a6/pkg/agent/debate.go#L1-L240)

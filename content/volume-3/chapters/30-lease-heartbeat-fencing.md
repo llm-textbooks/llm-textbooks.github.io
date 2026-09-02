@@ -251,4 +251,4 @@ flowchart TD
 
 이 질문 가운데 하나라도 답이 없으면 “heartbeat가 있으니 안전하다”는 결론을 내릴 수 없다. heartbeat는 조사 후보를 만들고, lease는 owner를 정하며, fencing은 receiver의 write를 막고, receipt는 이미 일어난 효과를 증명한다.
 
-운영 지표도 네 책임을 섞지 않는다. `heartbeat_age_seconds`는 worker 관측, `lease_expiry_seconds`와 `fence_rejection_total`은 ownership, `receipt_lookup_outcome`은 effect reconciliation을 나타낸다. 경보는 heartbeat 지연 하나로 takeover를 실행하지 말고 ledger 확인, token 증가, receiver 거절 확인을 차례로 요구한다. 복구 훈련에서는 old worker를 일부러 늦게 깨워 새 token 뒤 write가 실제 거절되는지까지 확인한다. 이 마지막 반례가 없으면 lease table만 증가하고 receiver는 여전히 stale write를 받을 수 있다.
+운영 지표도 네 책임을 섞지 않는다. `heartbeat_age_seconds`는 worker 관측, `lease_expiry_seconds`와 `fence_rejection_total`은 ownership, `receipt_lookup_outcome`은 effect reconciliation을 나타낸다. 경보는 heartbeat 지연 하나로 takeover를 실행하지 말고 ledger 확인, token 증가, receiver 거절 확인을 차례로 요구한다. 복구 훈련에서는 old worker를 일부러 늦게 깨워 새 token 뒤 write가 실제 거절되는지까지 확인한다. 이 마지막 반례가 없으면 lease table만 증가하고 receiver는 여전히 stale write를 받을 수 있다. background로 띄운 subagent도 같은 규칙 아래에 있다. parent session이 사라진 뒤에도 도는 child는 lease와 heartbeat 없이는 비용만 태우는 고아가 된다. 그 orphan deadline과 chargeback 계약은 [44장](./44-subagents-goals.md)에서 다룬다.

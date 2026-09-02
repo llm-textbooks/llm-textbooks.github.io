@@ -1,8 +1,10 @@
 # 44장. 서브에이전트와 목표: 많은 대화를 하나의 완료 증명으로 바꾸기
 
-서브에이전트는 병렬 prompt가 아니다. 목표도 할 일 목록의 제목이 아니다. 둘을 그렇게 취급하면, 다섯 개의 worker가 각각 그럴듯한 문장을 반환한 순간 ‘작업 완료’라고 말하게 된다. 그러나 운영에서 완료란 더 좁다. **권한 있는 주체가, 현재의 정책과 상태에서, 요구한 산출물과 외부 효과를 검증했고, 그 판정과 영수증을 다시 찾을 수 있는 상태**다.
+서브에이전트는 병렬 prompt가 아니다. 목표도 할 일 목록의 제목이 아니다. 둘을 그렇게 취급하면, 다섯 개의 worker가 각각 그럴듯한 문장을 반환한 순간 ‘작업 완료’라고 말하게 된다. 그러나 운영에서 완료란 더 좁다. 금요일 저녁 배포를 예로 들자. 자식 셋이 “코드 수정 완료”, “테스트 통과”, “배포 요청 보냄”을 돌려주었다. 세 문장은 모두 사실이다. 그런데 배포 receiver는 요청을 받은 적이 없다. 응답이 timeout으로 끊겼고 아무도 다시 조회하지 않았기 때문이다. 완료란 이 조회까지 끝난 상태다. 즉 **권한을 가진 사람이 현재 policy로 산출물을 검증했고, 외부 effect마다 receipt가 붙어 있으며, 그 판정을 나중에 다시 꺼내 볼 수 있는 상태**다.
 
 이 장은 `spawn → work → message → join → verify → commit → close`를 하나의 실행 protocol로 다룬다. 특히 `fork`, background 실행, budget, cancel, resume는 편의 기능이 아니라 이 protocol의 서로 다른 상태 전이다. 독자가 프레임워크의 API 이름을 외우는 대신, 새 구현을 열었을 때 어느 함수를 추적하고 어떤 결손을 application layer가 메워야 하는지 알게 되는 것이 목표다.
+
+> 선수 지식: [15장](./15-delegation-parent-child.md)의 parent/child identity와 [26장](./26-approval-consent-receipt.md)의 승인·receipt. 이 장을 마치면 child terminal과 goal terminal을 다른 사건으로 기록할 수 있다.
 
 > **근거의 경계.** 이 장의 Codex 관찰은 공개 revision [`0344625`](https://github.com/openai/codex/tree/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e), pi-agent 관찰은 [`853a80d`](https://github.com/badlogic/pi-mono/tree/853a80d26c90a14c1886f0ebb8ffaae133ca2185)에 고정한다. Claude Code는 공개 revision [`a1e64dc`](https://github.com/anthropics/claude-code/tree/a1e64dc407dd57dfb4ea283b0f8049adf3eabee5)의 changelog·plugin·hook 계약만 말한다. 후자의 managed core scheduler, snapshot 저장 형식, effect reconciliation, prompt-cache invalidation은 공개 소스에서 판정할 수 없다. ‘보이지 않는다’는 ‘없다’는 뜻이 아니다.
 
@@ -47,7 +49,7 @@ stateDiagram-v2
 
 ### 44.1.1 목표 원장은 parent의 메모가 아니다
 
-목표 하나에는 적어도 다음 identity를 둔다.
+목표 하나에는 [42장](./42-loop-engineering.md)의 실행 identity에 더해 다음 필드를 둔다. 아래 표에서 `goal_*`, `budget_envelope`, `completion_proof_digest`가 goal 원장에만 있는 축이고, 나머지는 실행 원장에서 그대로 이어받는 축이다.
 
 |필드|왜 필요한가|나쁜 대체물|
 |---|---|---|
@@ -59,7 +61,7 @@ stateDiagram-v2
 |`state_revision`, `source_revision`|stale branch를 판별|마지막 수정 시각|
 |`completion_proof_digest`|무엇을 보고 완료라 했는지|`done=true`|
 
-원장은 append-only event log여야 한다는 뜻만은 아니다. 현재 projection과 원본 event의 관계도 정해야 한다. 예컨대 `budget_reserved` 이벤트를 먼저 기록하고 child를 만들며, `child_terminal`만으로 reserve를 전액 release하지 않는다. 아직 join verifier와 receiver query 비용이 남아 있기 때문이다. 완료 결정을 내린 actor와 그 decision의 policy generation도 남긴다. 그래야 나중에 ‘worker가 완료라 말했다’와 ‘owner가 완료 증명을 승인했다’를 구분한다.
+원장을 append-only event log로 두라는 말로 끝나지 않는다. 현재 projection과 원본 event의 관계도 정해야 한다. 예컨대 `budget_reserved` 이벤트를 먼저 기록하고 child를 만들며, `child_terminal`만으로 reserve를 전액 release하지 않는다. 아직 join verifier와 receiver query 비용이 남아 있기 때문이다. 완료 결정을 내린 actor와 그 decision의 policy generation도 남긴다. 그래야 나중에 ‘worker가 완료라 말했다’와 ‘owner가 완료 증명을 승인했다’를 구분한다.
 
 ## 44.2 fork는 복제본이 아니라 분기된 인과성이다
 
@@ -105,15 +107,17 @@ def join_child(parent, result, ledger):
 
 ## 44.3 Codex에서 읽을 수 있는 loop와 goal의 좁은 사실
 
-Codex 공개 구현에서 한 turn의 중심은 [`run_turn`](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/session/turn.rs#L155-L530)이다. 이 함수는 pre-sampling compaction, MCP requirement, `StepContext`, tool construction, stream/후속 행동을 이어 붙인다. 중요한 것은 loop가 ‘모델을 한 번 부른다’가 아니라, 매 cycle에서 현재 history·mailbox·token 상태를 보고 다음 sampling, compaction 또는 stop을 고른다는 점이다. [`run_sampling_request`](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/session/turn.rs#L1361-L1462)는 retry마다 현재 history로 request를 다시 만들고, initial prompt와 replay할 pending item을 보존한다.
+Codex 공개 구현에서 한 turn의 중심은 [`run_turn`](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/session/turn.rs#L155-L602)이다. 이 함수는 pre-sampling compaction, MCP requirement, `StepContext`, tool construction, stream/후속 행동을 이어 붙인다. 중요한 것은 loop가 ‘모델을 한 번 부른다’가 아니라, 매 cycle에서 현재 history·mailbox·token 상태를 보고 다음 sampling, compaction 또는 stop을 고른다는 점이다. [`run_sampling_request`](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/session/turn.rs#L1361-L1461)는 retry마다 현재 history로 request를 다시 만들고, initial prompt와 replay할 pending item을 보존한다.
 
-tool output은 임의 순서의 텍스트가 아니다. [`try_run_sampling_request`](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/session/turn.rs#L2206-L2810)는 stream event에서 tool future를 만들고 `FuturesOrdered`로 in-flight tool을 drain한다. parallel tool dispatcher는 병렬 허용 도구에는 read lock, 비병렬 도구에는 write lock을 쓰며 cancellation 때 dispatch를 abort하고 `AbortedToolOutput`을 만든다. [`parallel.rs`](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/tools/parallel.rs#L42-L214)에서 알 수 있는 것은 local dispatch lifecycle이다. receiver가 실제 write를 했는지, rollback했는지는 별 receipt protocol 없이는 알 수 없다.
+tool output은 임의 순서의 텍스트가 아니다. [`try_run_sampling_request`](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/session/turn.rs#L2206-L2806)는 stream event에서 tool future를 만들고 `FuturesOrdered`로 in-flight tool을 drain한다. parallel tool dispatcher는 병렬 허용 도구에는 read lock, 비병렬 도구에는 write lock을 쓰며 cancellation 때 dispatch를 abort하고 `AbortedToolOutput`을 만든다. [`parallel.rs`](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/tools/parallel.rs#L42-L264)에서 알 수 있는 것은 local dispatch lifecycle이다. receiver가 실제 write를 했는지, rollback했는지는 별 receipt protocol 없이는 알 수 없다.
 
 ### 44.3.1 subagent API는 조직도이지 transaction manager가 아니다
 
-V2 multi-agent 도구의 spawn/send/follow-up/interrupt/wait handler와 canonical naming 규칙은 공개 tree에서 찾을 수 있다. [`multi_agents_spec.rs`](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/tools/handlers/multi_agents_spec.rs#L100-L190), [`spawn`](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/tools/handlers/multi_agents_v2/spawn.rs), [`wait`](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/tools/handlers/multi_agents_v2/wait.rs)를 따라가면 parent-child tree, 메시지 전달, follow-up, interrupt, terminal 대기를 각각 별 operation으로 모델링한 것을 볼 수 있다.
+V2 multi-agent 도구의 spawn/send/follow-up/interrupt/wait handler와 canonical naming 규칙은 공개 tree에서 찾을 수 있다. [spawn 선언](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/tools/handlers/multi_agents_spec.rs#L100-L141), [send_message 선언](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/tools/handlers/multi_agents_spec.rs#L181-L211), [wait 선언](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/tools/handlers/multi_agents_spec.rs#L280-L290), [canonical naming 규칙](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/tools/handlers/multi_agents_spec.rs#L739-L750), [`spawn` handler](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/tools/handlers/multi_agents_v2/spawn.rs#L93-L269), [`wait` handler](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/tools/handlers/multi_agents_v2/wait.rs#L128-L205)를 따라가면 parent-child tree, 메시지 전달, follow-up, interrupt, mailbox 활동 대기를 각각 별 operation으로 모델링한 것을 볼 수 있다.
 
-이 분리는 아주 중요하다. `spawn` 성공은 child가 일을 시작할 수 있게 됐다는 admission일 뿐이다. `send` 성공은 inbox에 message가 전달됐다는 뜻일 수 있으나 child가 그 내용을 채택·실행했다는 뜻이 아니다. `wait`의 terminal은 child execution의 상태지 parent goal의 proof가 아니다. application은 그 위에 result schema, join predicate, effect owner, completion authority를 올려야 한다.
+이 분리는 아주 중요하다. `spawn` 성공은 child가 일을 시작할 수 있게 됐다는 admission일 뿐이다. `send` 성공은 inbox에 message가 전달됐다는 뜻일 수 있으나 child가 그 내용을 채택·실행했다는 뜻이 아니다. 도구 선언 자체가 “Does not trigger a new turn”이라고 말한다. V2의 `wait_agent`는 특정 child의 terminal을 기다리는 join조차 아니다. target 인자가 없이 `timeout_ms` 하나를 받고, 반환은 `{message, timed_out}`이며 outcome은 mailbox 활동, steering, timeout 세 가지다. 즉 ‘어떤 agent에 업데이트가 있다’는 알림 관측이지 child terminal의 상태도, parent goal의 proof도 아니다. (V1 `wait_agent`는 targets를 받아 final status를 기다리므로, 같은 이름이라도 버전에 따라 의미론이 다르다.) application은 그 위에 result schema, join predicate, effect owner, completion authority를 올려야 한다.
+
+아래는 framework API가 아니라 application이 그 위에 올려야 할 layer의 스케치다.
 
 ```text
 spawn_child(goal, snapshot, scope, child_budget) -> child_run_id
@@ -124,7 +128,7 @@ commit_by_owner(effect_key) -> receiver receipt
 close_goal(proof_digest, decision_actor) -> terminal goal event
 ```
 
-goal 기능도 같은 절제가 필요하다. feature-gated Codex goal 도구의 [`create`](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/ext/goal/src/tool.rs) 경로는 unfinished goal이 있을 때 replacement를 거절하고 active durable thread goal을 만든다. [`accounting.rs`](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/ext/goal/src/accounting.rs)는 own/descendant token delta와 wall time을 계산해 persistence한다. 이는 ‘goal은 child까지 포함해 비용을 볼 수 있다’는 코드 근거다. 그러나 모든 환경에서 이 feature가 켜져 있거나, token budget이 receiver 비용·human review·external cloud invoice까지 포함한다는 일반 법칙은 아니다.
+goal 기능도 같은 절제가 필요하다. feature-gated Codex goal 도구의 [`create`](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/ext/goal/src/tool.rs#L191-L232) 경로는 unfinished goal이 있을 때 replacement를 거절하고 active durable thread goal을 만든다. [`accounting.rs`](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/ext/goal/src/accounting.rs#L177-L207)는 own/descendant token delta와 wall time을 계산해 progress snapshot으로 만들고, durable write는 그 snapshot을 받은 [tool.rs의 usage 기록 경로](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/ext/goal/src/tool.rs#L340-L353)가 `state_db`에 수행한다. 계산 층과 persistence 층이 분리되어 있다. 이는 ‘goal은 child까지 포함해 비용을 볼 수 있다’는 코드 근거다. 그러나 모든 환경에서 이 feature가 켜져 있거나, token budget이 receiver 비용·human review·external cloud invoice까지 포함한다는 일반 법칙은 아니다.
 
 실무에서는 token budget을 spending report가 아니라 **admission reserve**로 만든다.
 
@@ -140,32 +144,24 @@ Claude Code의 공개 저장소는 plugin, settings, hook, command와 changelog�
 
 그러나 release note는 다음 질문의 답이 아니다.
 
-|확인 가능한 공개 표면|공개 근거만으로 판정할 수 없는 것|
-|---|---|
-|fork/background/subagent/goal의 UX 변화|host scheduler가 child를 어떤 queue로 배치하는가|
-|prompt-cache 관련 release note|정확한 cache key, TTL, invalidation 순서|
-|hook event와 allow/deny/ask 형태|internal tool effect와 hook의 완전한 ordering|
-|resume/compaction 관련 문서 변화|checkpoint fsync, snapshot merge, receiver reconciliation|
+|확인 가능한 공개 표면|공개 근거만으로 판정할 수 없는 것|black-box로 확인할 실험과 통과 oracle|
+|---|---|---|
+|fork/background/subagent/goal의 UX 변화|host scheduler가 child를 어떤 queue로 배치하는가|background 30분 경계에서 budget report가 도착하는가|
+|prompt-cache 관련 release note|정확한 cache key, TTL, invalidation 순서|fork 후 policy revoke 시 effect가 거절되는가|
+|hook event와 allow/deny/ask 형태|internal tool effect와 hook의 완전한 ordering|cancel 직후 같은 idempotency key로 receiver 조회 시 receipt 부재|
+|resume/compaction 관련 문서 변화|checkpoint fsync, snapshot merge, receiver reconciliation|compaction 뒤 source citation이 살아 있는가|
 
 공개 Ralph Wiggum plugin은 이 경계를 특히 선명하게 보여 준다. [`hooks.json`](https://github.com/anthropics/claude-code/blob/a1e64dc407dd57dfb4ea283b0f8049adf3eabee5/plugins/ralph-wiggum/hooks/hooks.json)은 Stop hook을 등록하고, [`stop-hook.sh`](https://github.com/anthropics/claude-code/blob/a1e64dc407dd57dfb4ea283b0f8049adf3eabee5/plugins/ralph-wiggum/hooks/stop-hook.sh#L13-L176)는 state file과 `<promise>` match로 반복을 막거나 같은 prompt를 다시 요구한다. plugin state의 atomic move는 plugin 상태 파일의 원자적 교체라는 관찰이지, host 전체의 checkpoint protocol 또는 external effect atomicity의 증명은 아니다.
 
-hook은 policy extension point일 수 있지만 receiver authorization의 대체물이 아니다. 공개 hook 개발 안내는 `PreToolUse`의 allow/deny/ask/updatedInput, Stop/SubagentStop, PreCompact 같은 event와 plugin/user hook 병합·병렬 실행 표면을 설명한다. [hook development](https://github.com/anthropics/claude-code/blob/a1e64dc407dd57dfb4ea283b0f8049adf3eabee5/plugins/plugin-dev/skills/hooks/SKILL.md) 이때 fail-open hook 예제의 동작을 host default로 일반화하면 안 된다. plugin의 exception policy와 platform authorization은 다른 층이다.
+hook은 policy extension point일 수 있지만 receiver authorization의 대체물이 아니다. 공개 hook 개발 안내는 `PreToolUse`의 allow/deny/ask/updatedInput, Stop/SubagentStop, PreCompact 같은 event와 plugin/user hook 병합·병렬 실행 표면을 설명한다. [hook development](https://github.com/anthropics/claude-code/blob/a1e64dc407dd57dfb4ea283b0f8049adf3eabee5/plugins/plugin-dev/skills/hook-development/SKILL.md) 이때 fail-open hook 예제의 동작을 host default로 일반화하면 안 된다. plugin의 exception policy와 platform authorization은 다른 층이다.
 
-따라서 Claude Code를 운영에 넣을 때에는 공개 계약을 acceptance test로 삼고, 미공개 core 속성은 black-box fault test로 확인한다. 예: cancel 직후 receiver에 같은 idempotency key로 조회, fork 후 policy revoke, background 30분 경계의 budget report, compaction 뒤 source citation의 survivability를 시험한다. 관찰한 release behavior와 우리 시스템의 durable proof를 섞어 하나의 보장이라고 부르지 않는다.
+따라서 Claude Code를 운영에 넣을 때에는 공개 계약을 acceptance test로 삼고, 미공개 core 속성은 위 표의 black-box fault test로 확인한다. 관찰한 release behavior와 우리 시스템의 durable proof를 섞어 하나의 보장이라고 부르지 않는다.
 
 ## 44.5 pi-agent: 작고 보이는 loop를 과장하지 않는다
 
-pi-agent는 loop 자체가 공개 TypeScript라서 실험하기 좋은 기준점이다. [`Agent`](https://github.com/badlogic/pi-mono/blob/853a80d26c90a14c1886f0ebb8ffaae133ca2185/packages/agent/src/agent.ts#L347-L590)는 admission, snapshot, run lifecycle, reducer를 보여 주고, [`agent-loop.ts`](https://github.com/badlogic/pi-mono/blob/853a80d26c90a14c1886f0ebb8ffaae133ca2185/packages/agent/src/agent-loop.ts#L156-L780)는 context transform, stream, truncated call fence, dispatch, sequential/parallel 실행, preflight/postflight를 분리한다.
+pi-agent는 loop 자체가 공개 TypeScript라서 실험하기 좋은 기준점이다. [`Agent`](https://github.com/badlogic/pi-mono/blob/853a80d26c90a14c1886f0ebb8ffaae133ca2185/packages/agent/src/agent.ts#L347-L591)는 admission, snapshot, run lifecycle, reducer를 보여 주고, [`agent-loop.ts`](https://github.com/badlogic/pi-mono/blob/853a80d26c90a14c1886f0ebb8ffaae133ca2185/packages/agent/src/agent-loop.ts#L156-L757)는 context transform, stream, truncated call fence, dispatch, sequential/parallel 실행, preflight/postflight(코드의 실제 hook 이름은 `beforeToolCall`/`afterToolCall`)를 분리한다.
 
-특히 병렬 실행에서 `Promise.all`을 쓰더라도 result message는 원 tool-call 순서로 복원한다는 구현은 좋은 lesson이다. 완료 시각 순서를 history의 인과 순서로 쓰지 않겠다는 선택이다. [parallel dispatch/reduction](https://github.com/badlogic/pi-mono/blob/853a80d26c90a14c1886f0ebb8ffaae133ca2185/packages/agent/src/agent-loop.ts#L487-L552)와 [order test](https://github.com/badlogic/pi-mono/blob/853a80d26c90a14c1886f0ebb8ffaae133ca2185/packages/agent/src/agent-loop.test.ts#L625-L680)를 함께 보라. 또 truncated tool call fence는 완성되지 않은 argument를 effect로 보내지 않는 안전 문턱이다.
-
-```ts
-// pi-agent, executeToolCallsParallel의 핵심 순서 보존점(고정 revision).
-const orderedFinalizedCalls = await Promise.all(finalizedCalls.map(/* … */));
-for (const finalized of orderedFinalizedCalls) messages.push(createToolResultMessage(finalized));
-```
-
-이 짧은 부분 인용이 말하는 것은 ‘모든 실행이 직렬’이라는 뜻이 아니다. 실행은 병렬일 수 있고, **model-visible reducer에 넣는 결과의 순서는 admission 때 정한 call order**라는 뜻이다. side effect의 실제 commit order까지 이 배열이 보장한다고 읽어서는 안 된다.
+truncated tool-call fence와 병렬 실행의 순서 복원은 이 package에서 가장 배울 것이 많은 두 지점인데, 두 코드가 무엇을 보장하고 무엇을 보장하지 않는지는 [42장](./42-loop-engineering.md)에서 함수 단위로 읽었다. 이 장에 필요한 결론은 하나다. child가 돌려준 결과 배열의 순서는 admission 때 정한 call order이지, receiver가 실제로 commit한 순서가 아니다. goal 원장은 후자를 receipt로만 확인한다.
 
 하지만 이 package에서 built-in child-run owner, distributed work queue, durable cross-process replay, receiver idempotency, multi-agent goal ledger가 보인다고 말할 근거는 없다. harness reducer와 compaction 구현은 context/history의 상태 처리 근거이지, 외부 receiver의 exactly-once 보장이 아니다. pi-agent를 multi-agent control plane으로 쓰려면 그 바깥에 다음을 만든다.
 
@@ -201,14 +197,7 @@ flowchart TD
 
 message는 mutable chat transcript의 append만으로 충분하지 않다. `message_id`, sender, intended recipient, creation time, causal parent event, visibility, payload digest를 둔다. at-least-once queue라면 consumer는 `message_id`를 deduplicate하고, ‘deliver됨’과 ‘semantic adoption됨’을 분리한다. child가 같은 follow-up을 두 번 받았다고 external tool을 두 번 실행하지 않게 하려면 tool layer는 별 `logical_call_id/effect_key`를 사용한다.
 
-cancel도 네 군데를 따로 기록한다.
-
-|단계|기록할 상태|성공으로 오인하면 안 되는 것|
-|---|---|---|
-|intent|`cancel_requested`와 requester/scope|사용자가 stop을 눌렀음|
-|local|stream/task aborted 여부|remote provider가 중단됨|
-|tool|handler가 시작/종료/abort된 위치|receiver effect가 없음|
-|receiver|idempotency-key receipt query|effect가 rollback됨|
+cancel은 intent, local abort, tool dispatch, receiver라는 네 지점에서 각각 다른 사실을 남긴다. 네 지점의 기록 계약과 “아직 알 수 없는 것”은 [42장](./42-loop-engineering.md)의 취소 행렬에 정리되어 있다. 여기서 필요한 것은 그 네 기록을 goal 원장이 어떻게 소비하는가다.
 
 cancel이 tool dispatch 전이면 새 attempt를 만들지 않으면 된다. dispatch 후 process가 죽었다면 `unknown`이 정직한 상태다. 이때 retry는 새 effect를 만들어서는 안 되며, 같은 `effect_key`로 receiver receipt를 조회한다. receiver가 `applied`라고 하면 local state를 receipt에서 복구하고, `not_seen`이면 같은 key로 안전하게 재시도하며, 모르면 escalation한다. 이것이 ‘cancelled’보다 중요한 reconciliation이다.
 
@@ -278,7 +267,7 @@ child terminal success는 높지만 stale rejection, orphan, receipt unknown, ve
 
 ## 44.9 운영 dashboard와 알림
 
-Prometheus label에 `goal_id`, raw user, branch UUID를 넣지 않는다. 이런 고카디널리티 값은 trace/log의 digest로 보낸다. metric은 bounded label (`goal_class`, `tool_class`, `terminal_reason`, `tenant_tier`)만 쓴다.
+metric label은 bounded 값(`goal_class`, `tool_class`, `terminal_reason`, `tenant_tier`)만 쓴다. `goal_id`·branch UUID 같은 고카디널리티 값을 label에서 빼고 trace·audit의 digest로 보내는 이유는 [32장](./32-trace-metric-log-receipt.md)과 [43장](./43-cache-engineering.md)에서 다룬다.
 
 |metric|질문|즉시 볼 분해|
 |---|---|---|
@@ -335,16 +324,20 @@ flowchart LR
 - [ ] Claude Code처럼 core가 비공개인 제품은 공개 contract와 black-box 실험 결과를 분리해 기록하는가?
 - [ ] pi-agent처럼 작은 loop를 쓸 때 child owner·durable replay·receipt protocol을 application layer에 명시했는가?
 
-## 44.12 다음으로: goal을 제어하는 지식은 무엇이어야 하는가
+## 44.12 이 장이 보장하지 않는 것
+
+goal 원장을 갖췄다고 목표가 정말 달성되는 것은 아니다. 원장은 누가 무엇을 근거로 완료라고 말했는지를 되찾게 해 줄 뿐이다. `unresolved`가 비었다는 표시도 receiver가 조회 API를 제공할 때만 의미가 있고, 그렇지 않은 receiver에서는 `unknown`이 영원히 해소되지 않는다. budget reserve는 duplicate effect를 줄이지만 provider가 늦게 확정하는 usage까지 예측하지 못한다. Codex의 goal 확장은 feature gate 뒤에 있고 모든 배포에서 켜져 있다고 가정할 수 없다. Claude Code의 scheduler·checkpoint·cache invalidation은 공개 자료로 판정 불가이며, 이 장의 black-box 실험은 그 자리에 우리 계약을 넣기 위한 절차이지 제품 내부의 증명이 아니다.
+
+## 44.13 다음으로: goal을 제어하는 지식은 무엇이어야 하는가
 
 이 장의 원장은 ‘모든 정보를 prompt에 넣는 memory’가 아니다. 목표, actor, capability, source, policy, revision, effect, receipt의 관계를 명시해 **어떤 후보가 어떤 action의 근거가 될 수 있는지** 제한하는 제어면이다. 다음 장은 이 관계를 그래프와 ontology로 표현할 때 vector retrieval이 맡는 일과 맡지 못하는 일, 시간·provenance·권한을 planning과 effect-time admission에 어떻게 연결하는지를 다룬다.
 
 ### 원전
 
-- [Codex `run_turn`](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/session/turn.rs#L155-L530), [`run_sampling_request`](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/session/turn.rs#L1361-L1462), [`try_run_sampling_request`](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/session/turn.rs#L2206-L2810)
-- [Codex parallel tool dispatch](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/tools/parallel.rs#L42-L214)
-- [Codex multi-agent specification](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/tools/handlers/multi_agents_spec.rs#L100-L190), [spawn handler](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/tools/handlers/multi_agents_v2/spawn.rs), [wait handler](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/tools/handlers/multi_agents_v2/wait.rs)
-- [Codex goal tool](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/ext/goal/src/tool.rs), [goal accounting](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/ext/goal/src/accounting.rs)
-- [Claude Code public changelog](https://github.com/anthropics/claude-code/blob/a1e64dc407dd57dfb4ea283b0f8049adf3eabee5/CHANGELOG.md), [Ralph Wiggum Stop hook](https://github.com/anthropics/claude-code/blob/a1e64dc407dd57dfb4ea283b0f8049adf3eabee5/plugins/ralph-wiggum/hooks/stop-hook.sh#L13-L176), [hook development contract](https://github.com/anthropics/claude-code/blob/a1e64dc407dd57dfb4ea283b0f8049adf3eabee5/plugins/plugin-dev/skills/hooks/SKILL.md)
-- [pi-agent `Agent` lifecycle/reducer](https://github.com/badlogic/pi-mono/blob/853a80d26c90a14c1886f0ebb8ffaae133ca2185/packages/agent/src/agent.ts#L347-L590), [agent loop and tool phases](https://github.com/badlogic/pi-mono/blob/853a80d26c90a14c1886f0ebb8ffaae133ca2185/packages/agent/src/agent-loop.ts#L156-L780), [parallel-order test](https://github.com/badlogic/pi-mono/blob/853a80d26c90a14c1886f0ebb8ffaae133ca2185/packages/agent/src/agent-loop.test.ts#L625-L680)
+- [Codex `run_turn`](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/session/turn.rs#L155-L602), [`run_sampling_request`](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/session/turn.rs#L1361-L1461), [`try_run_sampling_request`](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/session/turn.rs#L2206-L2806)
+- [Codex parallel tool dispatch](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/tools/parallel.rs#L42-L264)
+- [Codex multi-agent specification](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/tools/handlers/multi_agents_spec.rs#L100-L141), [spawn handler](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/tools/handlers/multi_agents_v2/spawn.rs#L93-L269), [wait handler](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/tools/handlers/multi_agents_v2/wait.rs#L128-L205)
+- [Codex goal tool](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/ext/goal/src/tool.rs#L191-L232), [goal accounting](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/ext/goal/src/accounting.rs#L177-L207)
+- [Claude Code public changelog](https://github.com/anthropics/claude-code/blob/a1e64dc407dd57dfb4ea283b0f8049adf3eabee5/CHANGELOG.md), [Ralph Wiggum Stop hook](https://github.com/anthropics/claude-code/blob/a1e64dc407dd57dfb4ea283b0f8049adf3eabee5/plugins/ralph-wiggum/hooks/stop-hook.sh#L13-L176), [hook development contract](https://github.com/anthropics/claude-code/blob/a1e64dc407dd57dfb4ea283b0f8049adf3eabee5/plugins/plugin-dev/skills/hook-development/SKILL.md)
+- [pi-agent `Agent` lifecycle/reducer](https://github.com/badlogic/pi-mono/blob/853a80d26c90a14c1886f0ebb8ffaae133ca2185/packages/agent/src/agent.ts#L347-L591), [agent loop and tool phases](https://github.com/badlogic/pi-mono/blob/853a80d26c90a14c1886f0ebb8ffaae133ca2185/packages/agent/src/agent-loop.ts#L156-L757), [parallel-order test](https://github.com/badlogic/pi-mono/blob/853a80d26c90a14c1886f0ebb8ffaae133ca2185/packages/agent/test/agent-loop.test.ts#L586-L680)
 - [Prometheus metric and label practices](https://prometheus.io/docs/practices/naming/#labels)

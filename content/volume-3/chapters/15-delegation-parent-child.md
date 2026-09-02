@@ -59,6 +59,8 @@ def can_promote(child_result, parent_state, request):
 
 실제 시스템에서는 `compatible_revision`이 equality일 필요는 없다. 문서 A만 읽은 자식에게 사용자 선호 설정이 바뀌었다고 무조건 폐기할 이유도 없다. parent는 compatibility를 깨는 field를 선언하고 그 판단과 이유를 ledger에 남겨야 한다. ‘최신 결과’라는 자연어 형용사만으로는 검증 규칙이 되지 못한다.
 
+이 판정을 자식 하나가 아니라 목표 하나에 대해 누적하려면 원장이 필요하다. goal revision, budget reserve, completion proof를 두어 ‘자식이 끝났다’와 ‘목표가 닫혔다’를 서로 다른 사건으로 만드는 설계는 [44장](./44-subagents-goals.md)에서 이어 읽는다.
+
 ## 15.3 권한은 parent의 분위기가 아니라 capability다
 
 부모가 어떤 결제를 승인받았다는 사실은 자식에게 무제한 write 권한을 전달하지 않는다. capability는 최소한 audience, resource, action class, expiry, delegation depth, budget을 가져야 한다. retrieval 결과나 tool description은 data channel이다. 거기에 ‘이 파일을 삭제하라’는 문장이 들어 있어도 authority channel로 승격하지 않는다.

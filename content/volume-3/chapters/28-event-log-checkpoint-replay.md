@@ -198,6 +198,7 @@ telemetry exporter가 event를 잃었다고 효과가 사라진 것은 아니다
 - [ ] local commit과 receipt hash가 연결되는가?
 - [ ] telemetry가 비어도 durable 상태로 결론을 낼 수 있는가?
 - [ ] 복구 뒤 pending·unknown·completed가 서로 다른 상태인가?
+- [ ] replay가 복원한 identity가 loop의 `turn_id`·`attempt_no`·`logical_call_id`와 같은 축을 쓰는가? ([42장](./42-loop-engineering.md))
 
 ### 원전
 

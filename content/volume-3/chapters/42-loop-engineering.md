@@ -1,8 +1,18 @@
 # 42장. 루프 엔지니어링: 에이전트를 제어계로 설계하는 법
 
-에이전트의 loop는 `while (true)`가 아니다. 불완전한 관측을 받아 다음 행동을 고르고, 그 행동의 비용·위험·시간을 제한하며, 결과를 다시 상태에 접어 넣는 **제어계**다. 모델이 좋은 다음 문장을 만들 수 있어도 loop가 경계를 잃으면 같은 파일을 세 번 고치고, 이미 적용한 원격 변경을 재시도하고, 취소 뒤의 결과를 성공으로 잘못 기록한다. 반대로 loop가 견고하면 모델의 한 번의 실수는 작고 판정 가능한 사건으로 남는다.
+에이전트의 loop는 `while (true)`가 아니다. 불완전한 관측을 받아 다음 행동을 고르고, 그 행동의 비용·위험·시간을 제한하며, 결과를 다시 상태에 접어 넣는 **제어계**다. 모델이 좋은 다음 문장을 만들 수 있어도 loop가 경계를 잃으면 같은 파일을 세 번 고치고, 이미 적용한 원격 변경을 재시도하고, 취소 뒤의 결과를 성공으로 잘못 기록한다. 반대로 loop가 견고하면 모델이 한 번 실수해도 그 실수는 작고 판정 가능한 사건으로 남는다.
 
 이 장의 목표는 “몇 번 반복할까”라는 조언이 아니다. 어떤 상태를 snapshot으로 고정할지, streaming delta를 어디에서 하나의 사실로 줄일지, tool future를 어느 순서로 회수할지, retry·cancel·postflight가 어떤 불변식을 지켜야 하는지를 코드 경로와 함께 설계하는 것이다. 이 관점은 2장의 상태 기계, 8장의 모델 요청 재시도, 9장의 stream reduction, 13장의 logical call/effect, 15장의 위임, 27장의 interrupt, 28장의 replay를 한 개의 실행 고리로 묶는다.
+
+> 선수 지식: [2장](./02-react-state-machine.md)의 상태 전이, [9장](./09-stream-reduction.md)의 terminal 판정, [13장](./13-logical-call-effect.md)의 effect disposition. 이 장을 마치면 한 loop의 종료·재시도·tool join 불변식을 코드 위치와 시험 oracle로 답할 수 있다.
+
+## 42.0 실패 장면: 취소 버튼을 누른 뒤에 배포가 끝났다
+
+새벽 2시, 운영자가 배포 agent를 돌린다. 모델이 `deploy(prod, canary=10)`을 제안하고 gate가 통과시킨다. 30초 뒤 운영자가 잘못된 대상임을 알아채고 취소를 누른다. UI는 곧바로 “취소됨”으로 바뀌고 transcript에는 `AbortedToolOutput`이 남는다.
+
+아침에 확인해 보니 canary는 배포되어 있었다. 무슨 일이 있었나. 취소 신호는 handler가 HTTP 요청을 보낸 **뒤**에 도착했다. loop는 local wait를 중단했고 그 사실을 정직하게 기록했다. 그러나 loop가 기록한 것은 “우리가 기다리기를 그만두었다”이지 “receiver가 적용하지 않았다”가 아니다. 두 문장이 같은 `cancelled` 하나로 눌린 순간, 시스템은 알 수 없는 것을 안다고 말했다.
+
+이 장이 고치려는 것이 그 눌림이다. 어디까지가 관측이고 어디부터가 판정인지를 loop의 상태 전이로 갈라 두면, 같은 사고가 나도 아침에 던질 질문이 “왜 취소가 안 됐지”가 아니라 “receiver key로 receipt를 조회했나”가 된다.
 
 ## 42.1 loop는 세 겹의 feedback이다
 
@@ -14,7 +24,7 @@
 |turn 고리|assistant item·tool result|다음 model request 또는 terminal|answer, budget, policy, interrupt|tool 결과와 텍스트 순서 붕괴|
 |run 고리|turn terminal·operator signal|resume, handoff, escalation|goal verdict, deadline, failure budget|retry가 새 업무를 몰래 생성|
 
-제어계의 언어로 쓰면 model은 제안기(proposer)이고, reducer는 관측기(observer), scheduler와 policy gate는 제어기(controller), tool receiver는 plant다. 이 비유가 중요한 이유는 feedback이 곧 진실이 아니기 때문이다. chat transcript는 관측값이고, receiver receipt는 외부 효과에 관한 더 강한 관측값이다. trace는 또 다른 관측 채널이지 권한이나 commit의 대체물이 아니다.
+제어계의 언어로 쓰면 model은 제안기(proposer)이고, reducer는 관측기(observer), scheduler와 policy gate는 제어기(controller), tool receiver는 plant다. 이 비유는 feedback을 진실로 착각하는 순간 무너진다. 실제 사고는 이렇게 난다. tool이 `200`을 돌려주고 reducer가 그것을 history에 넣는다. 다음 turn의 controller는 “배포는 끝났다”를 전제로 다음 단계를 고른다. 그런데 `200`은 receiver의 API gateway가 요청을 접수했다는 뜻이었고, 실제 rollout은 5분 뒤 실패했다. controller가 읽은 것은 plant의 상태가 아니라 관측 채널 하나였다. chat transcript는 관측값이고, receiver receipt는 외부 효과에 관한 더 강한 관측값이다. trace는 또 다른 관측 채널이지 권한이나 commit의 대체물이 아니다.
 
 ```mermaid
 flowchart LR
@@ -60,24 +70,25 @@ Effect = (logical_call_id, receiver_key, receipt?, status)
 
 ### turn admission과 model-visible snapshot
 
-[`run_turn`](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/session/turn.rs#L155-L255)은 이전 비동기 작업의 정리, 취소 가능한 pre-sampling 준비, 필요한 MCP server 확인, step context 포착, tool 조립을 model request 앞에 둔다. 순서 자체가 의도다. 모델이 보게 되는 세계를 먼저 고정하고 나서 sampling을 시작해야, 같은 turn 안에서 tool catalog나 context 정책이 바뀌는 것을 무심코 섞지 않는다.
+[`run_turn`](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/session/turn.rs#L155-L232)은 이전 비동기 hook 결과 회수, 취소 가능한 pre-sampling compaction, 필요한 MCP server 확인, 그리고 tool 조립을 안에 포함하는 step context 포착을 model request 앞에 둔다. 원전 주석도 “Capture once so context, advertised tools, and tool calls share one request view”라고 못박는다. 순서 자체가 의도다. 모델이 보게 되는 세계를 먼저 고정하고 나서 sampling을 시작해야, 같은 turn 안에서 tool catalog나 context 정책이 바뀌는 것을 무심코 섞지 않는다.
 
 아래는 구조만 남긴 짧은 의사 코드다. 실제 구현의 타입과 보조 경로는 원전을 확인한다.
 
 ```rust
 // turn.rs의 실행 순서를 축약한 설명용 의사 코드
-prepare_previous_async_work().await;
-check_cancelled()?;
-let step = capture_step_context(...).await?;
-let tools = build_tools(&step, ...).await?;
-run_sampling_request(step, tools, cancellation_token).await
+drain_async_hook_results(...).await;             // 이전 turn의 비동기 hook 결과 회수
+run_pre_sampling_compact(..., &cancellation_token).await?;
+let required = required_mcp_servers_for_input(...).or_cancel(&token).await?;
+// step 포착이 곧 tool 조립이다: built_tools()가 이 안에서 호출된다.
+let step = capture_step_context_with_required_mcp_servers(turn_ctx, &token, &required).await?;
+run_sampling_request(sess, step, ..., token.child_token()).await
 ```
 
-이 snapshot이 database transaction이라는 뜻은 아니다. 이는 Codex가 해당 turn의 model-visible context를 구성하는 경계를 코드로 드러낸다는 뜻이다. 외부 파일, MCP server, 원격 policy가 포착 직후에도 변하지 않는다는 보장은 별도 version/recheck 설계가 필요하다. context compaction과 compatibility 조건은 6장의 [pre-sampling compaction 경로](06-context-compaction.md)에서 이어 읽는다.
+이 snapshot이 database transaction이라는 뜻은 아니다. 이는 Codex가 해당 turn의 model-visible context를 구성하는 경계를 코드로 드러낸다는 뜻이다. 외부 파일, MCP server, 원격 policy가 포착 직후에도 변하지 않는다는 보장은 별도 version/recheck 설계가 필요하다. context compaction과 compatibility 조건은 6장의 [pre-sampling compaction 경로](./06-context-compaction.md)에서 이어 읽는다.
 
 ### `run_sampling_request`와 `try_run_sampling_request`: retry가 고리 바깥으로 새지 않게 하기
 
-Codex의 [`run_sampling_request`](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/session/turn.rs#L1361-L1446)는 sampling attempt를 감싸고, 내부 [`try_run_sampling_request`](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/session/turn.rs#L2206-L2295) 경로의 결과를 retry policy에 넘긴다. 바깥 함수가 attempt budget·delay·telemetry의 owner가 되고, 안쪽 함수가 한 번의 provider stream을 만드는 분리는 중요하다. 한 번의 실패가 “새 turn을 시작하라”가 아니라 “동일 sampling 작업의 다음 attempt를 허용할까”라는 좁은 결정이 된다.
+Codex의 [`run_sampling_request`](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/session/turn.rs#L1361-L1461)는 sampling attempt를 감싸고, 내부 [`try_run_sampling_request`](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/session/turn.rs#L2206-L2250) 경로의 결과를 retry policy에 넘긴다. 바깥 함수가 attempt budget·delay·telemetry의 owner가 되고, 안쪽 함수가 한 번의 provider stream을 만드는 분리는 중요하다. 한 번의 실패가 “새 turn을 시작하라”가 아니라 “동일 sampling 작업의 다음 attempt를 허용할까”라는 좁은 결정이 된다. 다만 이때 보존되는 것은 attempt budget이지 request payload가 아니다. Codex는 retry attempt마다 현재 history에서 prompt를 다시 조립하므로([turn.rs#L1391-L1398](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/session/turn.rs#L1391-L1398)), payload identity가 필요하면 별도의 logical request digest를 스스로 붙여야 한다.
 
 ```mermaid
 stateDiagram-v2
@@ -93,13 +104,13 @@ stateDiagram-v2
   SamplingAttempt --> Failed: non-retryable / budget exhausted
 ```
 
-[`responses_retry.rs`](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/responses_retry.rs#L1-L150)는 retryable condition과 capped exponential delay를 별도 policy로 둔다. 이 separation은 “예외면 재시도”보다 안전하다. provider transport의 early EOF는 retryable일 수 있지만, schema rejection, explicit policy deny, receiver가 이미 apply했을 가능성이 있는 timeout은 같은 bucket에 들어가면 안 된다. 8장에서 다룬 [EOF-before-completion 경계](08-model-request-retry.md)가 바로 그 이유다.
+Codex는 retryable condition과 delay/budget policy를 다른 파일에 둔다. 무엇이 retryable인지는 [`CodexErr::is_retryable`](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/protocol/src/error.rs#L371-L406)이, 얼마나·몇 번 기다릴지는 [`responses_retry.rs`의 retry handler](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/responses_retry.rs#L44-L129)가 정한다. 이 separation은 “예외면 재시도”보다 안전하다. provider transport의 early EOF는 retryable일 수 있지만, schema rejection, explicit policy deny, receiver가 이미 apply했을 가능성이 있는 timeout은 같은 bucket에 들어가면 안 된다. 8장에서 다룬 [EOF-before-completion 경계](./08-model-request-retry.md)가 바로 그 이유다.
 
 ### stream reducer와 tool future: response는 끝났지만 effect는 아직 끝나지 않을 수 있다
 
-Codex의 [`run_event_loop`](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/session/turn.rs#L2296-L2520)은 cancellation, EOF-before-completion, stream item identity를 분기한다. 이어 [item dispatch 구간](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/session/turn.rs#L2521-L2720)은 완성된 response item을 history로 finalize하거나 in-flight tool future로 보낸다.
+Codex는 `try_run_sampling_request` 안의 [인라인 stream event loop](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/session/turn.rs#L2280-L2330)에서 cancellation, EOF-before-completion, stream item identity를 서로 다른 분기로 나눈다. 이어 [item dispatch 지점](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/session/turn.rs#L2413-L2423)은 완성된 response item을 history로 finalize하거나 in-flight tool future로 보내고, stream loop가 끝난 뒤에도 [`drain_in_flight`](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/session/turn.rs#L2774-L2780)가 남은 tool future를 순서대로 회수한다.
 
-이 둘을 분리하지 않으면 “model response completed”를 “모든 tool이 성공”으로 잘못 번역한다. 실제로는 assistant가 두 tool call을 낸 뒤 provider stream이 완결될 수 있고, 각각의 future는 그 후에도 실행·승인·취소·결과 축소 단계를 지난다. UI의 생성 완료는 turn의 terminal verdict가 아니다.
+이 둘을 분리하지 않으면 “model response completed”를 “모든 tool이 성공”으로 잘못 읽는다. 실제로는 assistant가 두 tool call을 낸 뒤 provider stream이 완결될 수 있고, 각각의 future는 그 후에도 실행·승인·취소·결과 축소 단계를 지난다. UI의 생성 완료는 turn의 terminal verdict가 아니다.
 
 ```mermaid
 sequenceDiagram
@@ -121,9 +132,9 @@ sequenceDiagram
   T-->>R: ordered tool result
 ```
 
-tool route의 더 안쪽에서는 [`ToolRouter::dispatch_tool_call_with_code_mode_result`](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/tools/router.rs#L302-L387)가 response item을 normalized invocation으로 만들고, [`ToolRegistry::dispatch_tool_call`](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/tools/registry.rs#L493-L773)가 validation·pre-tool hook·execution·post-tool hook을 잇는다. 이 함수의 경계가 말해 주는 것은 proposal이 곧 execution이 아니라는 점이다. code-mode, namespace, payload validation 같은 정규화가 tool handler 이전에 있다.
+tool route의 더 안쪽에서는 [`ToolRouter::build_tool_call`](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/tools/router.rs#L245-L298)이 response item을 normalized `ToolCall`로 만들고, 운영 dispatch 경로인 [`ToolRouter::dispatch_tool_call_with_terminal_outcome`](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/tools/router.rs#L325-L346)이 그것을 invocation으로 감싸 [`ToolRegistry::dispatch_any_with_terminal_outcome`](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/tools/registry.rs#L493-L772)에 넘긴다. registry는 payload kind 검사·pre-tool hook·execution·post-tool hook을 잇는다. 이 함수의 경계가 말해 주는 것은 proposal이 곧 execution이 아니라는 점이다. code-mode, namespace, payload kind 검사 같은 정규화가 tool handler 이전에 있다.
 
-postflight는 특히 오해하기 쉽다. registry의 [post-tool hook 주석과 경로](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/tools/registry.rs#L651-L773)는 결과를 가공하거나 차단할 수 있는 지점을 보여 주지만, 이미 실행된 tool의 외부 효과를 되돌리는 transaction을 뜻하지 않는다. postflight는 output publication gate일 수 있고, rollback은 receiver의 별도 계약이다.
+postflight는 특히 오해하기 쉽다. registry의 [post-tool hook 경로](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/tools/registry.rs#L689-L755)는 결과를 가공하거나 차단할 수 있는 지점을 보여 주지만, 이미 실행된 tool의 외부 효과를 되돌리는 transaction을 뜻하지 않는다. 원전 주석이 그대로 말한다. “A PostToolUse block rejects the result, not the already-completed tool execution.” postflight는 output publication gate일 수 있고, rollback은 receiver의 별도 계약이다.
 
 ### cancel의 네 지점
 
@@ -140,7 +151,7 @@ postflight는 특히 오해하기 쉽다. registry의 [post-tool hook 주석과 
 
 ## 42.3 pi-agent가 보여 주는 loop의 두 가지 절제: fence와 순서
 
-공개 pi-mono revision [`853a80d26c90a14c1886f0ebb8ffaae133ca2185`](https://github.com/badlogic/pi-mono/tree/853a80d26c90a14c1886f0ebb8ffaae133ca2185)의 [`agent-loop.ts`](https://github.com/badlogic/pi-mono/blob/853a80d26c90a14c1886f0ebb8ffaae133ca2185/packages/agent/src/agent-loop.ts#L220-L724)는 loop의 의도를 읽기 좋은 TypeScript 사례다. 여기서 얻을 수 있는 관찰은 active run, context assembly, abort propagation, tool result reduction의 local 동작이다. host persistence나 외부 receiver의 recovery까지 보장한다고 말하지 않는다.
+공개 pi-mono revision [`853a80d26c90a14c1886f0ebb8ffaae133ca2185`](https://github.com/badlogic/pi-mono/tree/853a80d26c90a14c1886f0ebb8ffaae133ca2185)의 [`agent-loop.ts`의 `runLoop`](https://github.com/badlogic/pi-mono/blob/853a80d26c90a14c1886f0ebb8ffaae133ca2185/packages/agent/src/agent-loop.ts#L156-L278)는 loop의 의도를 읽기 좋은 TypeScript 사례다. 여기서 얻을 수 있는 관찰은 active run, context assembly, abort propagation, tool result reduction의 local 동작이다. host persistence나 외부 receiver의 recovery까지 보장한다고 말하지 않는다.
 
 ### truncated-call fence: parse 가능함과 실행 가능함은 다르다
 
@@ -149,6 +160,8 @@ response가 length reason으로 끝난 경우, pi-agent는 [truncated tool-call 
 > `JSON.parse`가 성공했다는 사실은 protocol상 완결된 action이라는 증거가 아니다.
 
 가령 스트림이 `{"path":"/prod","recursive":false}`까지 왔지만 provider finish reason이 length라면, 문자열은 우연히 parse될 수 있다. 그러나 모델이 그 call을 완성했는지, 뒤에 approval token이나 두 번째 argument가 이어졌을지는 모른다. fence는 이 불확실성을 “나중에 model을 다시 물어볼 일”로 남기지, 실제 파일 시스템에 투영하지 않는다.
+
+여기서 fence는 [30장](./30-lease-heartbeat-fencing.md)의 fencing token과 다른 뜻이다. 30장의 fence는 receiver가 오래된 writer의 write를 거절하게 만드는 단조 증가 토큰이고, 이 절의 fence는 완성되지 않은 proposal이 handler에 도달하지 못하게 막는 admission 차단이다. 이름이 같다고 같은 보장이 아니다.
 
 ```mermaid
 flowchart TD
@@ -166,7 +179,22 @@ fence가 제공하는 것은 안전한 **admission**이다. 사용자가 이어�
 
 ### sequential/parallel: 실행 완료 순서와 대화 순서는 다른 계약이다
 
-pi-agent의 [tool execution과 ordered reduction](https://github.com/badlogic/pi-mono/blob/853a80d26c90a14c1886f0ebb8ffaae133ca2185/packages/agent/src/agent-loop.ts#L409-L553)은 sequential/parallel 옵션에서 실행 방식은 달라져도 결과 message를 원래 tool-call 순서로 재구성한다. 이것은 작은 UX 정렬이 아니다. 다음 model request가 읽는 transcript가 scheduler 타이밍에 따라 바뀌지 않게 하는 deterministic reducer 정책이다.
+pi-agent의 [tool execution과 ordered reduction](https://github.com/badlogic/pi-mono/blob/853a80d26c90a14c1886f0ebb8ffaae133ca2185/packages/agent/src/agent-loop.ts#L409-L553)은 sequential/parallel 옵션에서 실행 방식은 달라져도 결과 message를 원래 tool-call 순서로 재구성한다. 이것은 작은 UX 정렬이 아니다. 다음 model request가 읽는 transcript가 scheduler 타이밍에 따라 바뀌지 않게 하는 deterministic reducer 정책이다. 이 선택은 config만의 문제도 아니다. 배치 안에 `executionMode: "sequential"`인 tool이 하나라도 있으면 배치 전체가 순차로 강등되고([agent-loop.ts#L417-L423](https://github.com/badlogic/pi-mono/blob/853a80d26c90a14c1886f0ebb8ffaae133ca2185/packages/agent/src/agent-loop.ts#L417-L423)), 병렬 경로에서도 준비 단계는 순차이며 실행 단계만 겹친다([#L497-L546](https://github.com/badlogic/pi-mono/blob/853a80d26c90a14c1886f0ebb8ffaae133ca2185/packages/agent/src/agent-loop.ts#L497-L546)).
+
+```ts
+// pi-agent agent-loop.ts#L538-L546, executeToolCallsParallel의 순서 보존점(고정 revision 원문).
+const orderedFinalizedCalls = await Promise.all(
+	finalizedCalls.map((entry) => (typeof entry === "function" ? entry() : Promise.resolve(entry))),
+);
+const messages: ToolResultMessage[] = [];
+for (const finalized of orderedFinalizedCalls) {
+	const toolResultMessage = createToolResultMessage(finalized);
+	await emitToolResultMessage(toolResultMessage, emit);
+	messages.push(toolResultMessage);
+}
+```
+
+이 부분 인용이 말하는 것은 ‘모든 실행이 직렬’이라는 뜻이 아니다. 실행은 병렬일 수 있고, **model-visible reducer에 넣는 결과의 순서는 admission 때 정한 call order**라는 뜻이다. side effect의 실제 commit order까지 이 배열이 보장한다고 읽어서는 안 된다.
 
 |정책|시작 순서|완료 순서|reducer 순서|언제 적합한가|
 |---|---|---|---|---|
@@ -178,87 +206,35 @@ pi-agent의 [tool execution과 ordered reduction](https://github.com/badlogic/pi
 
 ## 42.4 Ralph와 Claude Code: 공개 계약의 범위에서만 읽기
 
-Claude Code 공개 저장소의 고정 revision [`f275fa282e76c5e5456912268f2c367a7f4f4797`](https://github.com/anthropics/claude-code/tree/f275fa282e76c5e5456912268f2c367a7f4f4797)는 settings, hooks, plugins와 command surface를 제공하지만 product core loop 구현을 공개하지 않는다. 그러므로 “Claude Code 내부 scheduler가 이렇게 동작한다”는 문장은 이 자료로 쓸 수 없다.
+Claude Code 공개 저장소의 고정 revision [`a1e64dc407dd57dfb4ea283b0f8049adf3eabee5`](https://github.com/anthropics/claude-code/tree/a1e64dc407dd57dfb4ea283b0f8049adf3eabee5)는 settings, hooks, plugins와 command surface를 제공하지만 product core loop 구현을 공개하지 않는다. 그러므로 “Claude Code 내부 scheduler가 이렇게 동작한다”는 문장은 이 자료로 쓸 수 없다.
 
-그 대신 [Ralph loop command](https://github.com/anthropics/claude-code/blob/f275fa282e76c5e5456912268f2c367a7f4f4797/plugins/ralph-wiggum/commands/ralph-loop.md#L1-L18), [cancel command](https://github.com/anthropics/claude-code/blob/f275fa282e76c5e5456912268f2c367a7f4f4797/plugins/ralph-wiggum/commands/cancel-ralph.md#L1-L18), [hook configuration](https://github.com/anthropics/claude-code/blob/f275fa282e76c5e5456912268f2c367a7f4f4797/plugins/ralph-wiggum/hooks/hooks.json#L1-L15)은 반복 command와 취소 surface라는 **공개 계약**을 보여 준다. 이 자료에서 안전하게 얻는 설계 통찰은 두 가지다.
+그 대신 [Ralph loop command](https://github.com/anthropics/claude-code/blob/a1e64dc407dd57dfb4ea283b0f8049adf3eabee5/plugins/ralph-wiggum/commands/ralph-loop.md#L1-L18), [cancel command](https://github.com/anthropics/claude-code/blob/a1e64dc407dd57dfb4ea283b0f8049adf3eabee5/plugins/ralph-wiggum/commands/cancel-ralph.md#L1-L18), [hook configuration](https://github.com/anthropics/claude-code/blob/a1e64dc407dd57dfb4ea283b0f8049adf3eabee5/plugins/ralph-wiggum/hooks/hooks.json#L1-L15)은 반복 command와 취소 surface라는 **공개 계약**을 보여 준다. 이 자료에서 안전하게 얻는 설계 통찰은 두 가지다.
 
-첫째, outer loop의 termination은 model의 “끝냈다” 발화 하나에 맡기면 안 된다. 반복 command에는 maximum iteration, deadline, verification result, human cancel 같은 외부 stop condition이 필요하다. 둘째, cancel command가 있다는 사실은 cancel intent의 UI/command surface를 뜻한다. in-flight tool의 강제 중단, durable checkpoint, receiver rollback의 구현은 공개되지 않았으므로 Unknown이다.
+첫째, outer loop의 termination은 model의 “끝냈다” 발화 하나에 맡기면 안 된다. Ralph에서 관측되는 stop condition은 `--max-iterations`, `--completion-promise`, cancel command 세 가지이고, deadline과 verification result는 이 자료에 없으므로 설계자가 직접 얹어야 한다. 흥미로운 것은 completion promise가 바로 발화 기반 종료라는 점이다. 그래서 command 문서가 “거짓 promise로 loop를 탈출하지 말라”고 못박고, hook은 glob이 아닌 literal 비교로 `<promise>` 문자열을 검사한다([stop-hook.sh#L115-L128](https://github.com/anthropics/claude-code/blob/a1e64dc407dd57dfb4ea283b0f8049adf3eabee5/plugins/ralph-wiggum/hooks/stop-hook.sh#L115-L128)).
 
-|주장|이 자료로 말할 수 있는 범위|말할 수 없는 범위|
-|---|---|---|
-|Ralph loop|공개 command·hook·cancel surface가 존재|내부 scheduler/state machine의 실제 구현|
-|Claude settings|example 설정과 permission/sandbox surface가 문서화됨|모든 deployment의 default enforcement|
-|subagent plugin example|agent 역할을 구성하는 문서 artifact가 있음|product가 항상 그 역할을 어떤 pool로 실행하는지|
+둘째, cancel command는 in-flight turn을 죽이는 것이 아니라 loop state 파일을 지운다(`rm .claude/ralph-loop.local.md`). 즉 관측 가능한 것은 다음 iteration의 admission 차단이고, in-flight tool의 강제 중단과 receiver rollback은 여전히 Unknown이다. 반면 iteration checkpoint는 Unknown이 아니라 Observed다. [`stop-hook.sh`](https://github.com/anthropics/claude-code/blob/a1e64dc407dd57dfb4ea283b0f8049adf3eabee5/plugins/ralph-wiggum/hooks/stop-hook.sh#L1-L177)는 `.claude/ralph-loop.local.md`의 `iteration` 필드를 temp 파일과 `mv`로 원자 갱신하고([#L152-L156](https://github.com/anthropics/claude-code/blob/a1e64dc407dd57dfb4ea283b0f8049adf3eabee5/plugins/ralph-wiggum/hooks/stop-hook.sh#L152-L156)), `max_iterations` 도달 시 state 파일을 지우며 종료하고([#L50-L55](https://github.com/anthropics/claude-code/blob/a1e64dc407dd57dfb4ea283b0f8049adf3eabee5/plugins/ralph-wiggum/hooks/stop-hook.sh#L50-L55)), `{"decision":"block"}`으로 같은 prompt를 재주입한다([#L165-L174](https://github.com/anthropics/claude-code/blob/a1e64dc407dd57dfb4ea283b0f8049adf3eabee5/plugins/ralph-wiggum/hooks/stop-hook.sh#L165-L174)). 이 outer loop 자체는 공개 코드다.
+
+|공개 자료로 확인되는 것|이 자료로 말할 수 없는 것|black-box로 확인할 실험|통과 oracle|
+|---|---|---|---|
+|Stop hook이 `{"decision":"block"}`으로 같은 prompt를 재주입하는 outer loop와 iteration checkpoint|Claude Code product core loop(turn/tool scheduler)의 구현|max iteration 없이 loop를 걸고 30분 방치|iteration counter가 외부 stop condition에서 멈춤|
+|hook 등록과 allow/deny/ask 형태|hook과 tool effect의 완전한 ordering|deny hook 뒤 receiver를 같은 idempotency key로 조회|receipt 0건|
+|subagent 역할을 구성하는 문서 artifact|product가 실제로 쓰는 실행 pool|child 20개를 동시에 spawn|concurrency cap이 admission에서 거절|
 
 이 절제는 약점이 아니라 설계의 출발점이다. public contract만 가진 framework를 운영에 넣을 때는 cancellation acknowledgement, checkpoint schema, effect receipt, concurrency limit을 vendor contract 또는 자신의 wrapper에 명시적으로 추가해야 한다. 41장의 맹검 루브릭은 바로 이런 unknown을 누락하지 않기 위한 방법이다.
 
-## 42.5 목표 수행과 subagent: 일을 나누는 것이 아니라 판정 경계를 나눈다
+## 42.5 subagent는 loop 안의 loop다
 
-subagent는 “더 많은 모델 호출”이 아니라 독립된 작업 계약이다. parent가 research, edit, test를 자식에게 나눌 때 제일 먼저 정할 것은 prompt가 아니라 **완료 판정권**이다. 탐색 subagent가 “파일을 찾았다”고 말해도 parent가 effect를 만들면 안 된다. 검증 subagent의 test exit code도 배포 승인 권한을 대신하지 않는다.
+subagent는 “더 많은 모델 호출”이 아니라 자기 loop를 가진 실행 단위다. parent가 research, edit, test를 자식에게 나눌 때 제일 먼저 정할 것은 prompt가 아니라 **완료 판정권**이다. 탐색 subagent가 “파일을 찾았다”고 말해도 parent가 그 문장만으로 effect를 만들면 안 된다. 검증 subagent의 test exit code도 배포 승인 권한을 대신하지 않는다.
 
-```mermaid
-flowchart TB
-  P[Parent run: goal / global budget] --> D{decompose}
-  D --> A[Scout: candidate evidence]
-  D --> B[Builder: isolated change]
-  D --> V[Verifier: oracle only]
-  A --> J[Join reducer]
-  B --> J
-  V --> J
-  J --> G{acceptance gates}
-  G -->|pass| C[commit / next turn]
-  G -->|unknown| E[escalate or re-plan]
-  G -->|fail| R[bounded repair loop]
-```
+controller 관점에서 결론은 하나다. child의 terminal은 parent loop에 들어오는 **관측값**이지 전이 조건이 아니다. join reducer가 그 관측값을 다음 turn의 입력으로 승격하기 전에 base revision, policy revision, evidence를 확인해야 parent의 목표가 자식의 자기 보고로 닫히지 않는다. child에게 줄 scope·budget·snapshot의 설계는 [15장](./15-delegation-parent-child.md), goal 원장과 stale child 격리는 [44장](./44-subagents-goals.md)이 전담한다.
 
-|역할|입력 snapshot|허용 effect|반환해야 할 것|parent가 재검사할 것|
-|---|---|---|---|---|
-|scout|질문·source revision|읽기 전용|후보, anchor, unknown|anchor가 실제 claim을 닫는가|
-|builder|명세·workspace scope|isolated write|diff, test command, assumptions|diff scope·test oracle|
-|verifier|artifact digest·expected properties|읽기/테스트|pass/fail/coverage gap|테스트가 요구사항을 덮는가|
-|operator|goal·risk budget|승인된 external effect|receipt/incident packet|authority·receiver verdict|
+[15장](./15-delegation-parent-child.md)의 parent-child metadata와 [28장](./28-event-log-checkpoint-replay.md)의 replay를 함께 보면, child result는 transcript 문장만이 아니라 `parent_run_id`, input snapshot digest, tool/effect boundary, terminal disposition을 가진 event여야 함을 알 수 있다. 그래야 parent를 resume해도 어떤 결과가 어느 목표 revision의 산물인지 판정할 수 있다.
 
-목표 수행 loop는 보통 다음처럼 설계한다. goal을 observable acceptance condition으로 분해하고, 각 child에 revisioned input과 budget을 준 뒤, child output을 raw assertion이 아니라 evidence card로 받는다. join reducer는 child 출력의 자연어 자신감을 평균내지 않는다. 동일한 file을 동시에 고친 두 결과, 같은 external receiver를 겨냥한 두 tool call, 서로 다른 policy revision에서 나온 권고는 충돌로 취급한다.
+## 42.6 캐시는 loop의 feedback을 재사용해도 되는지 묻는다
 
-### 목표 loop의 실패 행렬
+loop engineering에서 cache는 latency 최적화이기 전에 **어떤 feedback을 다시 써도 같은 결론이 나오는가**라는 질문이다. controller에게 위험한 것은 오래된 응답이 아니라 오래된 권한이다. 09:00에 허용된 permission decision을 09:02의 effect 직전에 그대로 쓰면, loop는 자신이 통과시킨 gate가 아직 열려 있다고 착각한다.
 
-|실패|나쁜 자동 반응|더 나은 전이|필요한 metric|
-|---|---|---|---|
-|child timeout|동일 prompt 무한 재시도|partial을 보존하고 retry budget 소비|queue wait, runtime, timeout rate|
-|child가 변경했으나 test 미실행|“완료”로 join|unverified artifact로 격리|test coverage·command evidence|
-|두 child의 답이 충돌|다수결|authority/anchor를 비교하고 Unknown|conflict count·source revision|
-|parent cancel|모든 child 결과 폐기|effect phase별 cancel, orphan sweep|cancel-to-ack latency|
-|goal drift|대화 전문만 더 넣음|goal revision과 acceptance criteria 재고정|replan count·context cost|
-
-15장의 parent-child metadata와 28장의 replay를 함께 보면, child result는 transcript 문장만이 아니라 `parent_run_id`, input snapshot digest, tool/effect boundary, terminal disposition을 가진 event여야 함을 알 수 있다. 그래야 parent를 resume해도 어떤 결과가 어느 목표 revision의 산물인지 판정할 수 있다.
-
-## 42.6 캐시는 loop를 빠르게 만들기도, 틀리게 만들기도 한다
-
-loop engineering에서 cache는 단순한 latency 최적화가 아니다. 어떤 feedback을 재사용해도 되는지에 관한 **freshness 계약**이다. system prompt, tool schema, permission decision, retrieval candidate, tool result, model response를 한 cache 이름 아래에 넣으면 stale authority가 가장 위험한 위치에서 재사용된다.
-
-|cache 대상|안전한 key에 포함할 것|무효화 기준|절대 재사용하면 안 되는 경우|
-|---|---|---|---|
-|context/snapshot|history digest, system/tool/policy revision|turn fork·policy/tool 변경|다른 tenant/run|
-|retrieval candidate|tenant, corpus generation, query digest, filter|index generation·deletion watermark|candidate를 admissible evidence처럼 사용|
-|permission decision|principal, scope, args digest, policy revision, expiry|policy/role/approval 변경·expiry|effect 직전 recheck를 생략|
-|tool result|logical call id, receiver key, input digest|receiver contract가 허용한 TTL|non-idempotent effect의 timeout 뒤 추측|
-|model response|full request digest, model/config, tool schema|어느 input revision 변화든|tool 호출이 포함된 응답을 effect 없이 재생|
-
-cache cascade는 특히 조심한다. L1의 in-memory response가 hit라고 해서 L2의 policy revision도 살아 있다는 뜻은 아니다. `cache_hit=true`는 품질 metric이 아니라 조사 시작점이다. cache가 decision을 shortcut했다면 `source_generation`, `policy_revision`, `age_ms`, `revalidated`를 event로 남긴다. 20~25장의 retrieval·memory·permission 장은 이 key 설계를 더 깊게 다룬다.
-
-```mermaid
-flowchart LR
-  Q[request] --> K[derive scoped key]
-  K --> L1{L1 snapshot cache}
-  L1 -->|hit| V{revision + expiry valid?}
-  L1 -->|miss| L2[L2 shared cache]
-  L2 --> V
-  V -->|no| F[refresh from authority]
-  V -->|yes| G[effect-time policy recheck]
-  F --> G
-  G -->|allow| T[dispatch]
-  G -->|deny| D[deny; retain audit]
-```
+그래서 loop 쪽에서 지켜야 할 규칙은 두 줄이다. 첫째, `cache_hit=true`는 품질 metric이 아니라 조사 시작점이다. cache가 controller 판단을 shortcut했다면 `source_generation`, `policy_revision`, `age_ms`, `revalidated`를 event로 남긴다. 둘째, hit이든 miss든 effect 직전의 authority 재검사는 생략하지 않는다. cache 대상별 key 축, TTL과 generation의 차이, invalidation이 늦어질 때의 실패 장면은 [43장](./43-cache-engineering.md)이 전담한다.
 
 ## 42.7 관측·진단: loop를 고치는 사람이 봐야 할 숫자
 
@@ -275,7 +251,7 @@ token 사용량만 보면 loop가 왜 나빠졌는지 알 수 없다. 아래 met
 |ordered-reducer skew|settled ordinal과 emitted ordinal 차이|parallel dependency 오판|ordinal·duration·resource key|
 |cache revalidation miss|hit 뒤 revision/expiry 불일치|key가 authority를 빼먹음|generation/policy revision|
 
-trace에는 `run_id`, `turn_id`, `attempt_no`, `logical_call_id`, `tool_call_ordinal`, `snapshot_digest`, `policy_revision`을 넣는다. 단, 민감한 args나 source text를 그대로 span attribute에 넣지 않는다. 조사에는 structured ledger와 receiver receipt를 함께 본다. 32장의 trace/metric/log/receipt 분리는 이 원칙의 운영 버전이다.
+trace에는 `run_id`, `turn_id`, `attempt_no`, `logical_call_id`, `tool_call_ordinal`, `snapshot_digest`, `policy_revision`을 넣는다. 단, 민감한 args나 source text를 그대로 span attribute에 넣지 않는다. 조사에는 structured ledger와 receiver receipt를 함께 본다. [32장](./32-trace-metric-log-receipt.md)의 trace/metric/log/receipt 분리는 이 원칙의 운영 버전이며, label 설계의 구체 규칙은 32장이 소유한다.
 
 ### 30분 triage 순서
 
@@ -328,15 +304,30 @@ rg -n "run_sampling|try_run_sampling|retry|cancel|reduce|dispatch|receipt" "$LOO
 
 좋은 loop는 모델에게 더 오래 생각하라고 요구하지 않는다. 대신 생각·행동·관측·판정을 각각 필요한 강도로 고정한다. 이 구조가 있으면 loop를 늘려도 “더 많은 토큰”이 아니라 “어떤 불확실성을 한 단계 줄였는가”로 비용을 설명할 수 있다. 반대로 이 구조가 없으면 자율성은 반복 횟수만 늘리고, 실패는 더 늦게 발견된다.
 
+## 42.9 이 장이 보장하지 않는 것
+
+여기서 읽은 함수 경계는 고정 revision의 로컬 실행 계약이다. Codex의 retry policy가 어떤 provider의 어떤 error class에서도 안전하다는 뜻이 아니고, pi-agent의 fence가 임의 receiver의 idempotency를 만들어 준다는 뜻도 아니다. cancellation token이 handler에 전달된다는 사실은 cooperative cancellation의 증거이지, OS process 종료나 원격 rollback의 증거가 아니다. Claude Code 공개 저장소는 command·hook·settings 표면까지만 말해 주며 core scheduler는 판정 불가로 남는다. 이 장의 불변식은 loop를 리뷰할 때 무엇을 확인해야 하는지를 정할 뿐, 확인 없이 통과시켜도 되는 항목을 만들지 않는다.
+
+### 원전
+
+1. [Codex `run_turn`](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/session/turn.rs#L155-L232)
+2. [Codex `run_sampling_request`](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/session/turn.rs#L1361-L1461), [`try_run_sampling_request`](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/session/turn.rs#L2206-L2806)
+3. [Codex stream event loop와 item dispatch](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/session/turn.rs#L2280-L2423), [`drain_in_flight`](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/session/turn.rs#L2774-L2780)
+4. [Codex retryable 판정](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/protocol/src/error.rs#L371-L406), [retry delay/budget policy](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/responses_retry.rs#L44-L129)
+5. [Codex tool router](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/tools/router.rs#L245-L346), [tool registry dispatch](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/tools/registry.rs#L493-L772)
+6. [Codex parallel cancellation tests](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/tools/parallel.rs#L419-L675)
+7. [pi-agent truncated-call fence](https://github.com/badlogic/pi-mono/blob/853a80d26c90a14c1886f0ebb8ffaae133ca2185/packages/agent/src/agent-loop.ts#L220-L240), [ordered tool reduction](https://github.com/badlogic/pi-mono/blob/853a80d26c90a14c1886f0ebb8ffaae133ca2185/packages/agent/src/agent-loop.ts#L409-L553)
+8. [Claude Code Ralph Wiggum public plugin](https://github.com/anthropics/claude-code/tree/a1e64dc407dd57dfb4ea283b0f8049adf3eabee5/plugins/ralph-wiggum)
+
 ## 더 읽을 것
 
-- [2장 — ReAct를 상태 기계로 읽기](02-react-state-machine.md)
-- [8장 — 모델 요청 재시도](08-model-request-retry.md)
-- [9장 — stream reduction](09-stream-reduction.md)
-- [13장 — logical call과 external effect](13-logical-call-effect.md)
-- [14장 — 병렬 speculation](14-parallel-speculation.md)
-- [15장 — parent/child 위임](15-delegation-parent-child.md)
-- [27장 — interrupt, steer, resume](27-interrupt-steer-resume.md)
-- [32장 — trace·metric·log·receipt](32-trace-metric-log-receipt.md)
-- [40장 — crash recovery 배포 실습](40-crash-recovery-deployment-lab.md)
-- [41장 — 새 framework 해부법](41-new-framework-autopsy.md)
+- [2장 — ReAct를 상태 기계로 읽기](./02-react-state-machine.md)
+- [8장 — 모델 요청 재시도](./08-model-request-retry.md)
+- [9장 — stream reduction](./09-stream-reduction.md)
+- [13장 — logical call과 external effect](./13-logical-call-effect.md)
+- [14장 — 병렬 speculation](./14-parallel-speculation.md)
+- [15장 — parent/child 위임](./15-delegation-parent-child.md)
+- [27장 — interrupt, steer, resume](./27-interrupt-steer-resume.md)
+- [32장 — trace·metric·log·receipt](./32-trace-metric-log-receipt.md)
+- [40장 — crash recovery 배포 실습](./40-crash-recovery-deployment-lab.md)
+- [41장 — 새 framework 해부법](./41-new-framework-autopsy.md)

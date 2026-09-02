@@ -229,6 +229,8 @@ approval은 사람을 보안 장비로 취급하는 방식이 아니라, 자동�
 
 권한 설계의 좋은 종료 상태는 ‘아무것도 못 한다’가 아니라, 기대한 action은 근거와 함께 통과하고 예상하지 않은 action은 왜 멈췄는지 설명 가능한 상태다. 그 균형은 모델 tuning이 아니라 capability, receipt, sandbox, receiver 확인을 함께 운영할 때 나온다.
 
+이 계약을 승인 화면 하나에서 검색·계획·실행 전체로 넓히면 권한은 UI가 아니라 제어면이 된다. 누가 어떤 근거를 볼 수 있고 어떤 effect를 만들 수 있는지를 typed edge로 검사하고, effect 직전에 그 판정을 다시 여는 설계는 [45장](./45-ontology-agent-control-plane.md)에서 다룬다.
+
 ### 12.14.1 policy 변경의 배포
 
 policy도 code처럼 staged rollout이 필요하다. 처음에는 shadow mode로 기존 결정과 새 결정의 차이를 기록하고, high-risk deny 규칙은 break-glass 절차와 함께 넣으며, 변경 뒤 stale approval·deny surge·unknown effect를 관찰한다. 새 revision을 배포한 순간 과거 receipt를 어떻게 처리하는지 명시하지 않으면 pause/resume 경로에서 가장 늦게, 가장 위험한 방식으로 결함이 드러난다.

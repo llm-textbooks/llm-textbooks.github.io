@@ -136,6 +136,8 @@ reconciler 자체도 두 번 실행될 수 있으므로 lease/fencing, stable wo
 
 idempotency key 하나가 모든 외부 시스템에 exactly-once를 부여하지는 않는다. 수신자가 key를 무시할 수 있고, business action이 다중 시스템을 건드릴 수 있으며, receipt store도 장애 날 수 있다. 이 장의 목적은 불가능한 확실성을 포장하는 데 있지 않다. 어디에서 확실성이 끊겼는지 기록하고 그 지점에서 재조정하게 하는 데 있다.
 
+어디에서 확실성이 끊겼는지 기록하려면 loop 자체가 그 경계를 상태로 갖고 있어야 한다. sampling attempt, in-flight tool future, cancel, postflight를 서로 다른 전이로 두어 `unknown`이 생기는 지점을 코드 위치로 지목하는 방법은 [42장](./42-loop-engineering.md)에서 이어 읽는다.
+
 ## 13.9 action digest는 무엇을 묶어야 하는가
 
 idempotency key를 UUID 하나로만 만들면 같은 key가 전혀 다른 요청에 재사용됐을 때 receiver가 무엇을 해야 하는지 모른다. 반대로 payload 전체를 그대로 해시하면 timestamp·nonce·표시 순서처럼 의미 없는 변화가 같은 business action을 다른 것으로 만든다. 그래서 action digest는 canonical business intent를 묶어야 한다.

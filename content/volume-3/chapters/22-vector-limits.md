@@ -238,6 +238,7 @@ post-filter는 품질만 나쁜 것이 아니다. 금지된 payload와 score가 
 - [ ] ANN miss와 policy ordering miss를 같은 recall로 부르지 않는가?
 - [ ] negative answer에 complete inventory·owner·coverage가 있는가?
 - [ ] 답마다 revision과 정확한 source span을 복원할 수 있는가?
+- [ ] 이 빈칸들을 실행 직전의 gate로 바꾸는 admission 술어가 있는가? ([45장](./45-ontology-agent-control-plane.md))
 
 다음 장에서는 후보 조각을 entity와 typed edge로 결합하는 그래프 질의를 다룬다. 그래프는 이 빈칸을 표현하고 검사하는 데 도움이 되지만, 그래프에 edge가 있다는 사실만으로 세계가 완결되는 것은 아니다.
 

@@ -162,6 +162,8 @@ OpenTelemetry의 span status는 instrumentation이 관측한 operation 결과를
 
 failure lab은 네 channel을 독립적으로 끊는다. collector를 중단해 span·log export를 잃고도 receiver receipt가 남는지, metric scrape를 건너뛰어도 execution ledger가 유지되는지, receiver response만 버려 span을 error로 끝내도 나중 조회로 commit이 드러나는지, log redaction으로 effect ID가 사라져도 access-controlled lookup이 가능한지 본다. 각 trial은 `(runId, logicalCallId, attemptId, effectId, receiptId)`에서 어떤 join이 정의됐는지와 왜 정의되지 않았는지를 함께 출력한다. null을 빈 문자열로 채우면 “관측 불가”가 “동일 사건”으로 합쳐지므로 join key가 없을 때는 명시적으로 `unjoinable`을 반환한다.
 
+이 네 channel의 분리를 층별로 펼치면 [42장](./42-loop-engineering.md)의 loop 진단 metric, [43장](./43-cache-engineering.md)의 freshness·invalidation 지표, [44장](./44-subagents-goals.md)의 goal proof 지표, [45장](./45-ontology-agent-control-plane.md)의 generation skew 지표가 된다. 층이 달라져도 규칙은 같다. 어느 층의 숫자도 receipt를 대신하지 않는다.
+
 ## 32.10 한 수직 실행에서 관측을 연결하되, 전달 보증은 만들지 않는다
 
 OpenFGA 판정 → MCP tool → local receipt를 실제 loopback으로 통과시킨 실행에서 allow arm에는 `security.openfga.check`, `mcp.tools.call`, `receiver.receipt`, structured log, root span이 같은 trace ID로 남았고, deny arm에는 tool attempt와 receipt가 없었다. 이것은 authorization decision이 이 fixture의 dispatch gate가 되었고, trace로 실행의 **관계**를 살필 수 있다는 뜻이다.

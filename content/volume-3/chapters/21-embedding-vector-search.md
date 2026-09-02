@@ -76,7 +76,7 @@ embedding cache 또는 retrieval cache key에 query text만 쓰면 policy revisi
 |verified fact|명시된 validity interval|as-of·policy revision|
 |final answer|거의 없음|source·scope·request purpose 전부|
 
-이 표는 final answer cache가 불가능하다는 뜻은 아니다. 다만 answer cache의 key와 invalidation surface가 가장 크므로, retrieval hit을 그대로 answer hit으로 승격하는 shortcut은 위험하다는 뜻이다.
+이 표는 final answer cache가 불가능하다는 뜻은 아니다. 다만 answer cache의 key와 invalidation surface가 가장 크므로, retrieval hit을 그대로 answer hit으로 승격하는 shortcut은 위험하다는 뜻이다. cache 대상별 key 축, TTL과 generation의 차이, 권한 철회 뒤에도 살아남는 후보를 잡아내는 fault 목록은 [43장](./43-cache-engineering.md)에서 한 장으로 다룬다.
 
 ## 21.7 품질·안전성 평가를 분리한다
 

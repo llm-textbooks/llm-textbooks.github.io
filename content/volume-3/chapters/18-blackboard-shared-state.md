@@ -103,6 +103,8 @@ shared board에 쓴 것이 곧 모든 agent가 읽어도 되는 문서는 아니
 
 planner가 generation 8을 읽는 동안 worker가 generation 9를 쓰면, planner는 둘을 한 fact set으로 섞으면 안 된다. run 시작 시 read generation을 고정하거나, join 시 모든 input의 generation compatibility를 검사한다. 이 원칙은 database snapshot isolation의 완전한 구현 주장이 아니다. 다만 ‘현재’라는 단어가 worker마다 다른 값을 가리키는 상황을 드러낸다. incident review에는 read generation, observed-at, accepted-at, policy revision을 함께 남긴다.
 
+같은 위험이 board 바깥의 cache에도 있다. generation 8에서 만든 후보를 generation 9의 결정 근거로 재사용하면 time travel을 만드는 것은 board가 아니라 cache다. generation을 cache key의 축으로 삼아 stale 후보를 miss로 떨어뜨리는 설계는 [43장](./43-cache-engineering.md)에서 다룬다.
+
 ### blackboard를 쓰지 말아야 할 때
 
 exclusive write, very small task, one-shot read-only query에는 shared board가 불필요한 race와 retention surface를 만든다. actor mailbox가 owner isolation을 더 잘 제공하는 경우도 있다. 반대로 여러 독립 조사자가 long-lived hypothesis와 source span을 공유해야 할 때는 board가 message fan-out을 줄인다. 선택 기준은 framework 이름이 아니라 shared mutable state가 정말 필요한지, writer conflict·visibility·deletion owner를 감당할 수 있는지다.

@@ -188,6 +188,7 @@ MCP tool result나 A2A Task 완료는 node input을 얻었다는 신호일 수 �
 - [ ] worker budget이 verifier reserve를 잠식하지 않는가?
 - [ ] retry가 같은 effect identity를 중복 commit하지 않는가?
 - [ ] trace sampling의 빈칸을 실행 부재로 해석하지 않는가?
+- [ ] DAG의 terminal node가 아니라 별도의 completion proof가 목표를 닫는가? ([44장](./44-subagents-goals.md))
 
 ### 원전
 

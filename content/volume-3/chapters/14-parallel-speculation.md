@@ -329,6 +329,8 @@ timeout이 만료되면 application task는 돌아올 수 있다. 그것은 remo
 
 좋은 시스템은 가장 빠른 결과를 사랑하지 않는다. 같은 state와 권한 아래에서 검증된 결과만 선택하고, 버린 결과가 남긴 흔적은 취소가 아니라 reconciliation으로 끝까지 추적한다. 그래프는 그 경계를 보이게 하고, 검색은 후보를 찾게 하며, verifier와 receiver receipt가 마지막 결정을 맡는다.
 
+이 판단을 매 turn 반복할 수 있게 만들려면 병렬 branch의 admission·start·settle·cancel 시각과 transcript 순서를 따로 기록하는 loop가 필요하다. tool future의 join 불변식과 ordered reducer 계약은 [42장](./42-loop-engineering.md)에서 함수 단위로 다룬다.
+
 ## 원전으로 더 파고들기
 
 - [Faiss FAQ — filtering·incomplete search](https://github.com/facebookresearch/faiss/wiki/FAQ)

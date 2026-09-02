@@ -156,6 +156,8 @@ compaction이 실패했다고 해서 원 history가 손상되어야 하는 것�
 
 또한 summary를 checkpoint로 오해하면 안 된다. checkpoint는 recovery가 필요로 하는 ID·전이·control state를 durable하게 보관하는 구조이고, summary는 다음 model request의 token budget을 줄이는 표현이다. 좋은 시스템은 둘을 함께 둘 수 있지만 하나가 다른 하나를 대체하지 않는다.
 
+compaction이 잘라 낸 자리에는 cache가 들어온다. 요약이 지운 approval, receipt, `Unknown` effect를 cache entry가 슬그머니 다시 채워 넣지 않으려면 compaction artifact와 cache key가 같은 generation 축을 공유해야 한다. 압축된 history를 재사용 가능한 prompt prefix와 후보 cache로 바꿀 때의 key 설계와 invalidation 계약은 [43장](./43-cache-engineering.md)에서 이어 읽는다.
+
 ## 6.10 비교
 
 | 관점 | Codex 공개 근거 | 일반적인 설계 결론 |
@@ -178,6 +180,7 @@ pi-agent의 context compaction과 harness는 turn boundary와 structural linkage
 6. compactor failure가 원 history를 in-place로 파괴하지 않는가?
 7. stale child result와 old schema proposal을 새 generation에서 재검증하는가?
 8. summary quality와 safety invariant를 다른 평가로 측정하는가?
+9. 압축 뒤의 요약을 cache key나 prompt prefix로 재사용할 때 `Unknown` effect와 만료 가능한 approval이 typed state로 남는가? ([43장](./43-cache-engineering.md))
 
 ## 이 장의 원전 바로가기
 

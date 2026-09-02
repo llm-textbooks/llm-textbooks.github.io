@@ -270,6 +270,7 @@ process kill, 양방향 partition, 비대칭 packet loss, disk stall은 서로 �
 - [ ] canceled-loser work와 queue wait를 p50만이 아니라 p95/p99와 함께 보는가?
 - [ ] unsupported answer 대신 `unknown`을 반환하고 그 이유를 trace로 남기는가?
 - [ ] expected policy generation, source hash, locator가 없는 후보를 effect 경계 앞에서 막는가?
+- [ ] 후보가 effect로 승격될 때 graph·vector·policy generation이 같은 값으로 고정되는가? ([45장](./45-ontology-agent-control-plane.md))
 
 ## 원전
 

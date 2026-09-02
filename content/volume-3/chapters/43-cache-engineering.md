@@ -2,9 +2,9 @@
 
 에이전트에서 캐시는 비용을 줄이는 장치인 동시에 가장 조용한 오류 증폭기다. 같은 질문을 두 번 받았다고 해서 같은 답을 다시 써도 되는 것은 아니다. 첫 질문 뒤에 권한이 철회되었을 수 있고, 도구의 스키마가 바뀌었을 수 있으며, 그래프의 근거가 정정되었을 수 있다. 반대로 매번 모든 것을 새로 계산하면, 고정된 긴 시스템 지시문과 동일한 도구 설명을 계속 전송하고, 동일한 문서를 다시 embedding하고, 이미 끝난 작업을 다시 실행하는 비용을 낸다.
 
-따라서 캐시 설계의 첫 질문은 “무엇을 저장할까?”가 아니라 **어떤 사실이 재사용되어도 같은 의미를 유지하는가**다. 이 장에서는 prompt prefix, 모델 turn 상태, 스키마와 도구, 검색 후보, 벡터와 그래프, 외부 효과의 여섯 경계를 분리한다. 마지막 경계인 효과는 캐시가 아니라 receiver의 idempotency/receipt 계약으로 다뤄야 한다. 이 분리를 잃으면 `cache hit`를 `안전한 재실행`으로 오해하게 된다.
+따라서 캐시 설계의 첫 질문은 “무엇을 저장할까?”가 아니라 **어떤 사실이 재사용되어도 같은 의미를 유지하는가**다. 이 장에서는 prompt prefix, 모델 turn 상태, 스키마와 도구, 검색 후보, 벡터와 그래프, 외부 효과의 여섯 경계를 분리한다. 마지막 경계인 효과는 캐시가 아니라 receiver의 idempotency/receipt 계약으로 다뤄야 한다. 이 분리를 잃으면 `cache hit`를 `안전한 재실행`으로 오해한다.
 
-> 선수 지식: [4장](04-context-assembly.md)의 문맥 조립, [6장](06-context-compaction.md)의 압축, [13장](13-logical-call-effect.md)의 논리 호출과 receipt, [21장](21-embedding-vector-search.md)~[24장](24-hybrid-retrieval.md)의 검색을 먼저 읽으면 좋다.
+> 선수 지식: [4장](./04-context-assembly.md)의 문맥 조립, [6장](./06-context-compaction.md)의 압축, [13장](./13-logical-call-effect.md)의 논리 호출과 receipt, [21장](./21-embedding-vector-search.md)~[24장](./24-hybrid-retrieval.md)의 검색을 먼저 읽으면 좋다.
 
 ## 43.1 먼저 분해한다: 여섯 저장물은 서로 다른 계약을 가진다
 
@@ -35,7 +35,7 @@ flowchart TD
   E -. not a response cache .-> C
 ```
 
-그림의 순서는 구현의 보편적인 내부 순서를 주장하지 않는다. 그러나 `retrieval cache → effect` 사이에 policy/tool admission을 생략해서는 안 된다는 설계 원칙은 분명하다. 검색할 때 허용된 문서가 commit 때도 허용되는지, 당시의 tool schema가 지금도 유효한지를 재검사해야 한다.
+이 그림이 모든 구현의 내부 순서를 대표하지는 않는다. 그러나 `retrieval cache → effect` 사이에 policy/tool admission을 생략해서는 안 된다는 설계 원칙은 분명하다. 검색할 때 허용된 문서가 commit 때도 허용되는지, 당시의 tool schema가 지금도 유효한지를 재검사해야 한다.
 
 ## 43.2 cache key는 해시 문자열이 아니라 의미 보존 서명이다
 
@@ -59,7 +59,7 @@ retrieval_key = H(
 
 여기서 `principal_scope_digest`는 raw ACL이나 사용자 식별자를 key namespace에 그대로 흘리지 않기 위한 canonical, secret-safe representation이다. 단, digest가 같다고 두 주체가 반드시 같은 권한이라는 뜻으로 쓰면 안 된다. 권한 결정을 재사용하려면 policy engine의 명시적 decision cache 계약, 만료와 철회 event가 별도로 필요하다.
 
-`generation`은 TTL보다 강한 축이다. TTL은 “이 시간 이후에는 다시 확인한다”는 상한일 뿐이다. source가 삭제·정정되거나 policy가 즉시 철회된 경우, 5분 TTL은 5분 동안 오래된 권한을 허용한다. 반면 `graph_generation=42`인 entry는 현재 generation 43과 다를 때 즉시 후보로만 취급하거나 miss로 처리할 수 있다. generation을 매 mutation마다 전역 증가시키면 invalidation 폭발이 일어날 수 있으므로 tenant/collection/source family/policy scope처럼 실제 일관성 요구에 맞게 계층화한다.
+`generation`은 TTL보다 강한 축이다. TTL은 “이 시간 이후에는 다시 확인한다”는 상한일 뿐이다. source가 삭제·정정되거나 policy가 즉시 철회된 경우, 5분 TTL은 5분 동안 오래된 권한을 허용한다. 반면 `graph_generation=42`인 entry는 현재 generation 43과 다를 때 즉시 후보로만 취급하거나 miss로 처리할 수 있다. mutation마다 generation을 전역으로 증가시키면 invalidation 폭발이 일어날 수 있으므로 tenant/collection/source family/policy scope처럼 실제 일관성 요구에 맞게 계층화한다.
 
 ### 키의 두 층: 공유 가능한 것과 개인적인 것
 
@@ -75,17 +75,19 @@ retrieval_key = H(
 
 ## 43.3 Codex 공개 코드에서 읽는 prefix와 turn-state의 경계
 
-고정 리비전 `0344625ccf4ae0ab6472c6c1e7b4ace6af14661e`의 Codex는 `prompt_cache_key`를 응답 요청에 넣는다. [키 선택 코드](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/client.rs#L540-L550)는 override가 있으면 그것을 우선하고, 없으면 internal source와 parent thread ID, 그마저 없으면 session ID를 기반으로 값을 구성한다. 이 값은 `build_responses_request`에서 request property로 전달된다. [요청 조립 경로](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/client.rs#L927-L1029)
+고정 revision `0344625ccf4ae0ab6472c6c1e7b4ace6af14661e`의 Codex는 `prompt_cache_key`를 응답 요청에 넣는다. [키 선택 코드](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/client.rs#L540-L552)는 override가 있으면 그것을 우선하고, 없으면 internal source와 parent thread ID, 그마저 없으면 session ID를 기반으로 값을 구성한다. 이 값은 `build_responses_request`에서 request property로 전달된다. [요청 조립 경로](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/client.rs#L1012-L1031)
 
 이 코드에서 확실히 말할 수 있는 것은 **클라이언트가 안정적인 key를 제공한다**는 사실이다. hit/miss, 서버 TTL, eviction, provider별 할인율, 저장 위치는 이 공개 경로만으로 판정할 수 없다. 따라서 운영 대시보드에서 “Codex가 이 key로 80% hit”라고 쓰려면 provider usage 필드 또는 별도 비용 계측이라는 독립 근거가 있어야 한다.
 
-더 엄격한 경계는 `ModelClientSession`이다. [세션 구조와 주석](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/client.rs#L305-L405)은 WebSocket과 sticky `x-codex-turn-state`를 보존하되, session이 한 turn 용도이며 turn 간 재사용을 명시적으로 금한다. 요청의 model, instructions, tools, tool choice, parallel tool calls, reasoning, store, stream, include, tier, prompt-cache key, text schema가 일치하는지도 continuation 조건으로 비교한다.
+더 엄격한 경계는 `ModelClientSession`이다. [세션 구조와 주석](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/client.rs#L302-L329)은 WebSocket과 sticky `x-codex-turn-state`를 보존하되, session이 한 turn 용도이며 turn 간 재사용을 명시적으로 금한다. [property 비교 함수](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/client.rs#L351-L406)는 요청의 model, instructions, tools, tool choice, parallel tool calls, reasoning, store, stream, include, tier, prompt-cache key, text schema가 일치하는지를 continuation 조건으로 비교한다.
 
 ```rust
 // 개념을 보여 주기 위한 축약; 실제 비교 항목은 아래 원전을 확인한다.
 if !responses_request_properties_match(previous, next) {
-    // 같은 연결이 있어도 continuation으로 간주하지 않는다.
-    return FreshRequest;
+    // 같은 연결이 있어도 증분 continuation으로 간주하지 않는다.
+    // 실제 코드는 None을 반환해 증분 delta 재사용을 포기하고
+    // 같은 연결로 전체 input을 다시 보낸다.
+    return None;
 }
 ```
 
@@ -98,15 +100,15 @@ if !responses_request_properties_match(previous, next) {
 |prompt cache|provider cache일 수 있음|cache key와 provider 계약|서버 정책·key 변화|
 |conversation history|thread/session 기록|application context builder|compaction·branch·policy|
 
-Codex의 turn loop는 sampling 전에 compaction과 step context capture를 거쳐 request를 새로 조립한다. [`run_turn`의 loop](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/session/turn.rs#L155-L530)와 retry 시 현재 history에서 prompt를 재구성하는 [sampling request 경로](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/session/turn.rs#L1361-L1462)는 이를 보여 준다. 그래서 prefix를 최적화할 때도 “history를 한 번 해시해 재사용”이 아니라, compaction 뒤의 canonical prompt가 무엇인지 먼저 정의해야 한다.
+Codex의 turn loop는 sampling 전에 compaction과 step context capture를 거쳐 request를 새로 조립한다. [`run_turn`의 pre-sampling compact와 step context capture](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/session/turn.rs#L167-L216)와 retry 시 현재 history에서 prompt를 재구성하는 [sampling request 경로](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/session/turn.rs#L1386-L1408)는 이를 보여 준다. 그래서 prefix를 최적화할 때도 “history를 한 번 해시해 재사용”이 아니라, compaction 뒤의 canonical prompt가 무엇인지 먼저 정의해야 한다.
 
 ## 43.4 compaction은 cache eviction이 아니라 의미 보존 변환이다
 
 문맥 창이 차면 오래된 대화를 버리는 일이 필요하다. 그러나 이를 LRU eviction처럼 말하면 위험하다. 대화의 오래된 항목에는 아직 유효한 approval, tool result, receipt, unresolved question이 있을 수 있다. 압축의 정답성은 token 수가 줄었는지가 아니라, 이후 행동에 필요한 사실과 그 출처가 보존되는가에 있다.
 
-Codex에는 token budget에 맞춰 새 context window를 여는 경로와 요약을 만드는 local/remote compaction 경로가 분리되어 있다. [token-budget compaction](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/compact_token_budget.rs#L21-L92), [local summary와 history replacement](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/compact.rs#L174-L320), [remote compaction lifecycle](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/compact_remote.rs#L53-L170)를 구별해 읽어야 한다. 같은 “compact”라는 이름이 같은 summary algorithm이나 같은 provenance 보존을 보장하지는 않는다.
+Codex에는 token budget에 맞춰 새 context window를 여는 경로와 요약을 만드는 local/remote compaction 경로가 분리되어 있다. [token-budget compaction](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/compact_token_budget.rs#L21-L93), [compaction dispatch와 hook 경계](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/compact.rs#L174-L243), [local summary와 history replacement](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/compact.rs#L352-L399), [remote compaction lifecycle](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/compact_remote.rs#L53-L170)를 구별해 읽어야 한다. 같은 “compact”라는 이름이 같은 summary algorithm이나 같은 provenance 보존을 보장하지는 않는다.
 
-pi-agent도 harness compaction에서 메시지 구간을 변환한다. [pi-agent compaction 경로](https://github.com/badlogic/pi-mono/blob/853a80d26c90a14c1886f0ebb8ffaae133ca2185/packages/agent/src/harness/compaction/compaction.ts#L216-L252)와 [aborted compaction test](https://github.com/badlogic/pi-mono/blob/853a80d26c90a14c1886f0ebb8ffaae133ca2185/packages/agent/src/harness/compaction/compaction.test.ts#L647-L674)는 변환 중단을 별도 상태로 다룰 필요를 보여 준다. host 재시작 뒤의 durable checkpoint나 외부 effect의 replay safety까지 이 코드가 보장한다고 확대해서는 안 된다.
+pi-agent도 harness compaction에서 메시지 구간을 변환한다. [pi-agent compaction 경로](https://github.com/badlogic/pi-mono/blob/853a80d26c90a14c1886f0ebb8ffaae133ca2185/packages/agent/src/harness/compaction/compaction.ts#L707-L794)와 중단을 오류 상태로 돌려주는 [aborted 처리](https://github.com/badlogic/pi-mono/blob/853a80d26c90a14c1886f0ebb8ffaae133ca2185/packages/agent/src/harness/compaction/compaction.ts#L578-L579), 이를 검증하는 [aborted compaction test](https://github.com/badlogic/pi-mono/blob/853a80d26c90a14c1886f0ebb8ffaae133ca2185/packages/agent/test/harness/compaction.test.ts#L647-L672)는 변환 중단을 별도 상태로 다룰 필요를 보여 준다. host 재시작 뒤의 durable checkpoint나 외부 effect의 replay safety까지 이 코드가 보장한다고 확대해서는 안 된다.
 
 ### compaction artifact의 최소 계약
 
@@ -140,7 +142,7 @@ compaction:
 
 도구 설명은 보통 길고 stable하여 prefix cache에 넣기 좋은 후보다. 하지만 `schema cache hit`는 그 도구가 지금 실행 가능하다는 뜻이 아니다. registry가 같은 이름의 새 version을 배포했을 수 있고, tenant feature flag가 꺼졌을 수 있으며, effect-time policy가 달라졌을 수 있다.
 
-Codex의 tool registry는 validation, handler, post hook의 경계를 둔다. [registry의 validation과 handler 흐름](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/tools/registry.rs#L493-L773)을 읽을 때, post-tool hook이 완료된 외부 실행을 되돌린다는 뜻으로 읽어서는 안 된다. 코드의 주석이 말하듯 post hook에서 reject해도 이미 완료된 execution 자체는 rollback되지 않는다. 따라서 cache된 schema로 model proposal을 만들더라도 다음 세 단계는 매 attempt에서 남아야 한다.
+Codex의 tool registry는 payload 종류 검사, pre-tool-use hook, handler, post-tool-use hook의 경계를 둔다. [payload kind 검사](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/tools/registry.rs#L564-L579), [pre-tool-use hook](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/tools/registry.rs#L582-L634), [post-tool-use hook](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/tools/registry.rs#L689-L756)을 읽을 때 두 가지를 확대하면 안 된다. 첫째, registry 경계에는 JSON Schema 검증이 없다. 인수 검증은 각 handler의 역직렬화에 흩어져 있으므로, 아래에서 말하는 current schema validation은 Codex 관측이 아니라 이 장의 설계 권고다. 둘째, post-tool hook이 완료된 외부 실행을 되돌린다는 뜻으로 읽어서는 안 된다. 코드의 주석이 말하듯 post hook에서 reject해도 이미 완료된 execution 자체는 rollback되지 않는다. 따라서 cache된 schema로 model proposal을 만들더라도 다음 세 단계는 매 attempt에서 남아야 한다.
 
 ```mermaid
 flowchart LR
@@ -157,9 +159,9 @@ flowchart LR
 
 ## 43.6 검색 cache는 답 cache가 아니라 후보 cache다
 
-RAG 시스템은 `query → top-k chunks`를 cache하면 큰 비용을 아낄 수 있다. 하지만 vector similarity는 권한·시간·근거의 진실값을 모른다. [22장](22-vector-limits.md)에서 다뤘듯 가까운 벡터는 “허용된 현재 근거”라는 predicate가 아니다.
+RAG 시스템은 `query → top-k chunks`를 cache하면 큰 비용을 아낄 수 있다. 하지만 vector similarity는 권한·시간·근거의 진실값을 모른다. [22장](./22-vector-limits.md)에서 다뤘듯 가까운 벡터는 “허용된 현재 근거”라는 predicate가 아니다.
 
-Open Ontologies의 공개 구현은 Turtle을 모두 parse한 뒤 graph에 넣는 경계와, exact vector search와 HNSW search를 구분해 둔다. [Turtle parse/insert](https://github.com/epoko77-ai/open-ontologies/blob/d423869aa071afebf0806e7e79e724be5fe81ac6/src/graph.rs#L108-L130), [exact vector search](https://github.com/epoko77-ai/open-ontologies/blob/d423869aa071afebf0806e7e79e724be5fe81ac6/src/vecstore.rs#L322-L335), [HNSW 경로](https://github.com/epoko77-ai/open-ontologies/blob/d423869aa071afebf0806e7e79e724be5fe81ac6/src/vecstore.rs#L337-L369)가 그 예다. 이는 index 알고리즘 경계에 대한 근거이며, cache invalidation이나 authorization semantics를 제품 전체가 자동으로 해결한다는 주장은 아니다.
+Open Ontologies의 공개 구현은 Turtle을 모두 parse한 뒤 graph에 넣는 경계와, exact vector search와 HNSW search를 구분해 둔다. [Turtle parse/insert](https://github.com/fabio-rovai/open-ontologies/blob/d423869aa071afebf0806e7e79e724be5fe81ac6/src/graph.rs#L108-L130), [exact vector search](https://github.com/fabio-rovai/open-ontologies/blob/d423869aa071afebf0806e7e79e724be5fe81ac6/src/vecstore.rs#L322-L335), [HNSW 경로](https://github.com/fabio-rovai/open-ontologies/blob/d423869aa071afebf0806e7e79e724be5fe81ac6/src/vecstore.rs#L337-L369)가 그 예다. 이는 index 알고리즘 경계에 대한 근거이며, cache invalidation이나 authorization semantics를 제품 전체가 자동으로 해결한다는 주장은 아니다.
 
 검색 cache entry는 최소한 다음을 저장한다.
 
@@ -204,7 +206,7 @@ flowchart TD
   H -->|no| R[retrieve/rebuild]
 ```
 
-Open Ontologies에는 temporal query 경계도 있다. [temporal evaluation 코드](https://github.com/epoko77-ai/open-ontologies/blob/d423869aa071afebf0806e7e79e724be5fe81ac6/src/temporal.rs#L1866-L1934)와 [negative temporal test](https://github.com/epoko77-ai/open-ontologies/blob/d423869aa071afebf0806e7e79e724be5fe81ac6/src/temporal.rs#L2290-L2316)는 valid time을 query 의미에 넣어야 한다는 점을 보여 준다. 따라서 “그래프 cache가 hit했다”는 말에는 적어도 `recorded_at`과 `valid_at` 중 어느 시간을 기준으로 했는지가 붙어야 한다. 과거에는 참이었으나 지금은 철회된 근거를 현재 답에 쓰는 사고는 대부분 이 구분을 생략할 때 생긴다.
+Open Ontologies에는 temporal query 경계도 있다. [temporal evaluation 코드](https://github.com/fabio-rovai/open-ontologies/blob/d423869aa071afebf0806e7e79e724be5fe81ac6/src/temporal.rs#L1866-L1942)와 [temporal scope escape 방어 테스트](https://github.com/fabio-rovai/open-ontologies/blob/d423869aa071afebf0806e7e79e724be5fe81ac6/src/temporal.rs#L2289-L2323)는 valid time을 query 의미에 넣어야 한다는 점을 보여 준다. 따라서 “그래프 cache가 hit했다”는 말에는 적어도 `recorded_at`과 `valid_at` 중 어느 시간을 기준으로 했는지가 붙어야 한다. 과거에는 참이었으나 지금은 철회된 근거를 현재 답에 쓰는 사고는 대부분 이 구분을 생략할 때 생긴다. generation이 어긋난 후보를 실행으로 승격시키지 않는 admission 술어 자체는 [45장](./45-ontology-agent-control-plane.md)이 다룬다. 이 절은 그 술어가 참이 되려면 cache key에 무엇이 들어가야 하는지까지만 말한다.
 
 ### stale-while-revalidate의 안전한 한계
 
@@ -220,25 +222,25 @@ Open Ontologies에는 temporal query 경계도 있다. [temporal evaluation 코�
 
 ## 43.8 Claude Code는 공개 계약까지만 비교한다
 
-Claude Code의 공식 공개 저장소 고정 리비전 `a1e64dc407dd57dfb4ea283b0f8049adf3eabee5`는 plugins, settings, hooks, skills 같은 공개 구성 표면을 제공한다. 그러나 이 저장소는 host 제품의 core loop, prompt cache key, invalidation 순서, summary algorithm, checkpoint fsync, scheduler 내부를 검증할 source tree가 아니다. 이 장에서 그런 내부를 추정하지 않는 이유는 제품을 낮게 평가해서가 아니라, cache는 세부 순서 하나가 안전성을 바꾸기 때문이다.
+Claude Code의 공식 공개 저장소 고정 revision `a1e64dc407dd57dfb4ea283b0f8049adf3eabee5`는 plugins, settings, hooks, skills 같은 공개 구성 표면을 제공한다. 그러나 이 저장소는 host 제품의 core loop, prompt cache key, invalidation 순서, summary algorithm, checkpoint fsync, scheduler 내부를 검증할 source tree가 아니다. 이 장에서 그런 내부를 추정하지 않는 이유는 제품을 낮게 평가해서가 아니라, cache는 세부 순서 하나가 안전성을 바꾸기 때문이다.
 
-공개 계약에서 관찰 가능한 사실은 있다. 예를 들어 최신 [CHANGELOG](https://github.com/anthropics/claude-code/blob/a1e64dc407dd57dfb4ea283b0f8049adf3eabee5/CHANGELOG.md#L632-L668)는 `/goal`의 background check-in, task tools visibility, fork가 conversation/prompt cache를 상속한다는 release note를 담고 있다. 같은 파일은 prompt cache metrics, cache read pricing, tool definitions 및 fork/compaction 관련 release note도 포함한다. 이들은 사용자에게 노출된 동작·변경의 근거이지, key field·TTL·eviction algorithm·tenant isolation을 역으로 증명하는 근거는 아니다.
+공개 계약에서 관찰 가능한 사실은 있다. 예를 들어 고정 revision의 [CHANGELOG](https://github.com/anthropics/claude-code/blob/a1e64dc407dd57dfb4ea283b0f8049adf3eabee5/CHANGELOG.md#L632-L668)는 `/goal`의 background check-in, task tools visibility, fork가 conversation/prompt cache를 상속한다는 release note를 담고 있다. 같은 파일은 prompt cache metrics, cache read pricing, tool definitions 및 fork/compaction 관련 release note도 포함한다. 이들은 사용자에게 노출된 동작·변경의 근거이지, key field·TTL·eviction algorithm·tenant isolation을 역으로 증명하는 근거는 아니다.
 
-Ralph Wiggum plugin은 stop hook을 이용해 조건이 충족될 때까지 prompt를 반복시키는 공개 예다. [plugin README](https://github.com/anthropics/claude-code/blob/a1e64dc407dd57dfb4ea283b0f8049adf3eabee5/plugins/ralph-wiggum/README.md#L3-L27), [stop hook state/decision script](https://github.com/anthropics/claude-code/blob/a1e64dc407dd57dfb4ea283b0f8049adf3eabee5/plugins/ralph-wiggum/hooks/stop-hook.sh#L13-L55)를 host의 durable resume, effect reconciliation, global cache policy로 일반화하면 안 된다. plugin의 state file atomic move는 그 plugin state의 구현 사실이지 Claude Code 전체 checkpoint의 durability claim이 아니다.
+Ralph Wiggum plugin은 stop hook으로 조건이 충족될 때까지 prompt를 반복시키는 공개 예다. [plugin README](https://github.com/anthropics/claude-code/blob/a1e64dc407dd57dfb4ea283b0f8049adf3eabee5/plugins/ralph-wiggum/README.md#L3-L27)가 보여 주는 것은 반복 command와 stop 조건이라는 표면이며, 이를 host의 durable resume이나 global cache policy로 일반화하면 안 된다. stop hook 코드에서 무엇이 Observed인지는 [42장](./42-loop-engineering.md)이, plugin이 자기 state file을 다루는 방식과 host checkpoint의 durability가 왜 다른 층인지는 [44장](./44-subagents-goals.md)이 다룬다.
 
 이 비교에서 옳은 문장은 다음처럼 좁다.
 
-|문장|판정|
-|---|---|
-|“공개 release note가 prompt cache를 언급한다.”|관찰 가능|
-|“fork가 어떤 prompt cache key를 상속한다.”|공개 코드만으로 미판정|
-|“hook이 반복 prompt를 막거나 허용할 수 있다.”|plugin 계약 범위에서 관찰 가능|
-|“hook 거절이 이미 수행된 외부 effect를 rollback한다.”|근거 없음|
-|“Claude Code core가 특정 TTL로 cache를 무효화한다.”|근거 없음|
+|문장|판정|그래서 운영에서 해야 할 것|
+|---|---|---|
+|“공개 release note가 prompt cache를 언급한다.”|문서화됨|release note의 날짜와 배포 시점을 함께 기록|
+|“fork가 어떤 prompt cache key를 상속한다.”|공개 코드만으로 미판정|fork 뒤 policy를 revoke하고 effect가 막히는지 측정|
+|“hook이 반복 prompt를 막거나 허용할 수 있다.”|plugin 계약 범위에서 코드로 관측 가능|hook 결과를 audit ledger에 별도 event로 기록|
+|“hook 거절이 이미 수행된 외부 effect를 rollback한다.”|근거 없음|deny 뒤 receiver를 idempotency key로 조회해 반증|
+|“Claude Code core가 특정 TTL로 cache를 무효화한다.”|근거 없음|TTL 가정 대신 wrapper에 generation fence를 둔다|
 
 ## 43.9 cold/warm을 하나의 latency로 뭉개지 않는다
 
-캐시 최적화가 성공했는지 보려면 평균 응답 시간 하나로는 부족하다. warm hit가 빨라져도 invalidation storm이 backend를 쓰러뜨리거나, prompt cache cost 절감이 retrieval miss 비용 증가로 상쇄될 수 있다. stage와 disposition을 분리한다.
+cache 최적화가 성공했는지 보려면 평균 응답 시간 하나로는 부족하다. warm hit가 빨라져도 invalidation storm이 backend를 쓰러뜨리거나, prompt cache cost 절감이 retrieval miss 비용 증가로 상쇄될 수 있다. stage와 disposition을 분리한다.
 
 |지표|권장 분해|무엇을 찾는가|
 |---|---|---|
@@ -262,7 +264,7 @@ agent_cache_requests_total{
 } 1
 ```
 
-`hit ratio = hits / requests`도 그대로 믿지 않는다. 애초에 캐시할 수 없는 요청이 급증하면 ratio가 내려가지만 성능 퇴화가 아닐 수 있다. 다음처럼 eligibility를 분리한다.
+`hit ratio = hits / requests`도 그대로 믿지 않는다. 애초에 cache할 수 없는 요청이 급증하면 ratio가 내려가지만 성능 퇴화가 아닐 수 있다. 다음처럼 eligibility를 분리한다.
 
 ```text
 eligible_hit_ratio = eligible_hits / eligible_lookups
@@ -274,7 +276,7 @@ unsafe_bypass_rate = admission_rejected_after_cache / cached_candidates
 
 ## 43.10 비용 모델: hit 하나가 절약하는 것과 새로 만드는 것을 같이 센다
 
-캐시의 기대 이득은 다음처럼 대략 모델링할 수 있다.
+cache의 기대 이득은 다음처럼 대략 모델링할 수 있다.
 
 ```text
 expected_saving
@@ -417,14 +419,14 @@ admissible = [c for c in candidates if policy_allows_now(c, principal)]
 
 ## 이 장의 원전 바로가기
 
-1. [Codex prompt cache key와 request properties](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/client.rs#L305-L405)
-2. [Codex prompt cache key 선택](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/client.rs#L540-L550)
-3. [Codex Responses request 조립](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/client.rs#L927-L1029)
-4. [Codex turn loop](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/session/turn.rs#L155-L530)
-5. [Codex compaction dispatch/local replacement](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/compact.rs#L174-L320)
-6. [Codex tool registry validation/handler/post-hook](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/tools/registry.rs#L493-L773)
-7. [pi-agent compaction](https://github.com/badlogic/pi-mono/blob/853a80d26c90a14c1886f0ebb8ffaae133ca2185/packages/agent/src/harness/compaction/compaction.ts#L216-L252)
-8. [Open Ontologies exact/HNSW vector search](https://github.com/epoko77-ai/open-ontologies/blob/d423869aa071afebf0806e7e79e724be5fe81ac6/src/vecstore.rs#L322-L369)
-9. [Open Ontologies temporal evaluation](https://github.com/epoko77-ai/open-ontologies/blob/d423869aa071afebf0806e7e79e724be5fe81ac6/src/temporal.rs#L1866-L1934)
+1. [Codex `ModelClientSession` 계약](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/client.rs#L302-L329), [request property 비교](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/client.rs#L351-L406)
+2. [Codex prompt cache key 선택](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/client.rs#L540-L552)
+3. [Codex Responses request 조립](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/client.rs#L1012-L1031)
+4. [Codex turn loop의 pre-sampling compact](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/session/turn.rs#L167-L216)
+5. [Codex compaction dispatch](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/compact.rs#L174-L243), [local summary와 history replacement](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/compact.rs#L352-L399)
+6. [Codex tool registry dispatch/hook 경계](https://github.com/openai/codex/blob/0344625ccf4ae0ab6472c6c1e7b4ace6af14661e/codex-rs/core/src/tools/registry.rs#L493-L772)
+7. [pi-agent compaction](https://github.com/badlogic/pi-mono/blob/853a80d26c90a14c1886f0ebb8ffaae133ca2185/packages/agent/src/harness/compaction/compaction.ts#L707-L794)
+8. [Open Ontologies exact/HNSW vector search](https://github.com/fabio-rovai/open-ontologies/blob/d423869aa071afebf0806e7e79e724be5fe81ac6/src/vecstore.rs#L322-L369)
+9. [Open Ontologies temporal evaluation](https://github.com/fabio-rovai/open-ontologies/blob/d423869aa071afebf0806e7e79e724be5fe81ac6/src/temporal.rs#L1866-L1942)
 10. [Claude Code public release notes (pinned)](https://github.com/anthropics/claude-code/blob/a1e64dc407dd57dfb4ea283b0f8049adf3eabee5/CHANGELOG.md)
 11. [Claude Code Ralph Wiggum public plugin](https://github.com/anthropics/claude-code/tree/a1e64dc407dd57dfb4ea283b0f8049adf3eabee5/plugins/ralph-wiggum)

@@ -1,8 +1,18 @@
 # 45장. 온톨로지를 에이전트의 제어면으로 쓰는 법
 
-온톨로지를 에이전트에 붙인다는 말을 흔히 “지식 그래프에서 관련 문서를 찾아 프롬프트에 넣는다”로 줄인다. 그것은 가장 얕은 사용법이다. 실행하는 에이전트에게 더 중요한 질문은 따로 있다. 이 이름이 어느 실체를 가리키는가, 이 사실은 언제 유효했는가, 이 사용자가 지금 이 사실을 볼 수 있는가, 계획의 선행 조건은 충족됐는가, 이 도구 호출은 어떤 효과를 만들 권한이 있는가, 재시도된 호출이 같은 효과인지 다른 효과인지, 완료 주장을 어떤 영수증으로 반증할 수 있는가.
+온톨로지를 에이전트에 붙인다는 말을 흔히 “지식 그래프에서 관련 문서를 찾아 프롬프트에 넣는다”로 줄인다. 그것은 가장 얕은 사용법이다. 실행하는 에이전트에게는 더 좁은 질문이 필요하다. 환불 하나를 처리한다고 하자. 사용자가 말한 “그 고객”이 CRM의 어느 계정인가. 그 주문이 결제됐다는 기록은 지금도 유효한가. 이 상담원은 10초 전에 문서를 읽을 수 있었는데 지금도 환불을 실행할 수 있는가. timeout 뒤 다시 보낸 호출은 같은 환불인가 두 번째 환불인가. “처리했습니다”라는 문장은 어떤 receipt로 반증할 수 있는가. 온톨로지는 이 다섯 질문에 기계가 답하게 만드는 자리에 놓인다.
 
-이 장에서 온톨로지는 모델을 대신해 생각하는 장치가 아니다. 벡터 검색을 없애는 장치도 아니다. **지식·근거·정책·실행 상태의 타입과 관계를 기계가 검사할 수 있게 만드는 실행 제어면**이다. 목표는 더 많은 답을 억지로 내는 것이 아니라, 근거가 부족한 후보가 실행으로 승격되는 순간을 붙잡는 데 있다.
+> 선수 지식: [22장](./22-vector-limits.md)의 후보와 답의 구분, [23장](./23-graph-reasoner-temporal.md)의 open world와 시간 범위, [13장](./13-logical-call-effect.md)의 effect identity.
+
+이 장에서 온톨로지는 모델을 대신해 생각하는 장치가 아니다. 벡터 검색을 없애는 장치도 아니다. **근거가 부족한 후보가 실행으로 넘어가는 순간을 기계가 붙잡게 만드는 제어면**이다. 붙잡으려면 네 가지를 각각 타입으로 두어야 한다. 무엇을 알고 있는가(지식), 그것을 어디서 읽었는가(근거), 누가 볼 수 있는가(정책), 지금 무슨 일이 벌어졌는가(실행 상태). 이 넷을 한 덩어리 그래프에 섞으면 “관련 있다”가 “허용된다”로 조용히 바뀐다.
+
+## 45.0 실패 장면: 어제의 허가로 오늘의 환불을 실행하다
+
+상담원이 “이 고객 환불해 줘”라고 말한다. 에이전트가 벡터 검색으로 주문 문서를 찾고, 결제 완료 문장을 인용하고, 환불 도구를 호출하고, “처리했습니다”라고 답한다. 근거도 있고 인용도 있다.
+
+문제는 셋이었다. 검색이 찾은 문서는 동명이인의 주문이었다. 결제 완료라는 문장은 지난달에 참이었고 이번 주에 취소로 정정됐다. 상담원의 환불 권한은 아침 교대 때 회수됐는데, 검색 단계에서 통과한 허가를 실행 단계에서 그대로 재사용했다.
+
+세 실패 중 어느 것도 모델이 문장을 잘못 만들어서 생긴 것이 아니다. 실체를 가리키는 일, 사실이 유효한 시점을 정하는 일, 권한을 언제 다시 묻는가 하는 일이 전부 검색 점수 하나로 눌려 있었기 때문이다.
 
 ## 45.1 네 그래프를 한 덩어리로 만들지 않는다
 
@@ -12,7 +22,7 @@
 |---|---|---|---|
 |지식·검색|`Entity`, `Claim`, `Relation`, `SourceSpan`|무엇과 무엇이 관련되는가|관련 edge를 최신 사실로 간주|
 |근거·provenance|`Evidence`, `SourceRevision`, `ExtractionActivity`|누가 어느 원문 revision에서 무엇을 얻었는가|인용이 있다는 이유로 참이라 간주|
-|실행·효과|`AgentRun`, `StateRevision`, `LogicalToolCall`, `Attempt`, `Effect`, `Receipt`|무엇을 시도했고 외부 세계에는 무엇이 commit됐는가|tool result를 실제 효과 영수증으로 간주|
+|실행·효과|`AgentRun`, `StateRevision`, `LogicalToolCall`, `Attempt`, `Effect`, `Receipt`|무엇을 시도했고 외부 세계에는 무엇이 commit됐는가|tool result를 실제 effect receipt로 간주|
 |정책·capability|`Principal`, `Capability`, `PolicyDecision`, `Consent`, `Scope`|누가 언제 무엇을 볼 수 있고 실행할 수 있는가|검색 시점의 허용을 실행 시점 권한으로 재사용|
 
 ```mermaid
@@ -29,11 +39,11 @@ flowchart LR
   T --> Q[postcondition / evaluation]
 ```
 
-벡터 검색은 이 경로의 후보 생성기다. cosine 거리가 가깝다는 사실은 “참이다”, “최신이다”, “이 tenant에게 허용됐다”, “실행 권한이 있다” 중 어느 것도 뜻하지 않는다. exact kNN으로 바꾸면 ANN 근사 오차는 줄지만 entity linking 오류, 시간 경과, ACL, 출처 누락, 논리적 조합 문제는 그대로 남는다.
+벡터 검색은 이 경로의 후보 생성기다. cosine 거리가 가깝다는 사실은 “참이다”, “최신이다”, “이 tenant에게 허용됐다”, “실행 권한이 있다” 중 어느 것도 뜻하지 않는다. exact kNN으로 바꾸면 ANN 근사 오차는 줄지만 entity linking 오류, 시간 경과, ACL, 출처 누락, 논리적 조합 문제는 그대로 남는다. 벡터 점수가 왜 허가 술어가 될 수 없는지는 [22장](./22-vector-limits.md)에서, 그 후보를 graph join과 시간 범위로 좁히는 방법은 [23장](./23-graph-reasoner-temporal.md)에서 다뤘다. 이 장은 그 결과를 effect 직전의 gate로 옮긴다.
 
 ## 45.2 실행 결론에는 검색 점수보다 긴 identity가 필요하다
 
-운영 시스템에서 `document_id` 하나만 보존하면 나중에 같은 판단을 재현할 수 없다. 문서는 바뀌고, 정책은 철회되며, graph와 vector index는 서로 다른 시점에 배포될 수 있다. 실행을 재현하고 반증하려면 적어도 다음 tuple이 필요하다.
+운영 시스템에서 `document_id` 하나만 보존하면 나중에 같은 판단을 재현할 수 없다. 문서는 바뀌고, 정책은 철회되며, graph와 vector index는 서로 다른 시점에 배포될 수 있다. [42장](./42-loop-engineering.md)이 고정한 실행 identity — `run_id`, `turn_id`, `logical_call_id`, `attempt_id`, `receipt` — 위에 온톨로지 제어면은 **지식과 권한의 좌표**를 얹는다. 아래 tuple에서 generation·시간·출처에 해당하는 뒤쪽 절반이 이 장의 고유한 기여다.
 
 ```text
 (run_id, turn_id, branch_id, state_revision,
@@ -45,7 +55,7 @@ flowchart LR
 
 `LogicalToolCall`과 `Attempt`는 특히 분리한다. timeout 뒤 재시도와 speculative hedge는 여러 attempt일 수 있지만, 사용자 관점의 효과는 하나여야 한다. 반대로 같은 tool과 같은 인수라도 사용자가 두 번 명시적으로 요청했다면 logical call은 둘이다. 문자열 hash만으로 둘을 합치면 정상적인 두 번째 주문을 지울 수 있다.
 
-효과를 허용하는 조건을 의사식으로 쓰면 다음과 같다.
+효과를 허용하는 조건을 의사식으로 쓰면 다음과 같다. 이 식은 대상 `d`가 검색 경로로 들어온 경우를 다룬다. 첫 conjunct `candidate`는 후보의 출처와 세대를 고정할 뿐 승인 근거가 아니며, 사용자가 직접 지목한 대상은 검색 후보 대신 그에 맞는 provenance 술어로 같은 게이트를 통과시킨다.
 
 ```text
 admit(effect, d, g) =
@@ -63,7 +73,7 @@ admit(effect, d, g) =
 
 ## 45.3 loop의 어디에 연결하는가
 
-온톨로지 query를 매 turn마다 한 번 호출하는 것으로는 부족하다. 판단이 바뀌는 경계마다 다른 검사가 필요하다.
+turn마다 온톨로지 query를 한 번 호출하는 것으로는 부족하다. 판단이 바뀌는 경계마다 다른 검사가 필요하다.
 
 ### 45.3.1 context 조립 전: identity와 노출 범위
 
@@ -88,7 +98,7 @@ PlanStep(refund)
 
 검색 시점에 문서를 볼 수 있었다고 10초 뒤 환불을 실행할 권한이 보장되는 것은 아니다. 그 사이 역할이 철회되거나 주문 revision이 바뀔 수 있다. 따라서 tool preflight에서 capability, policy generation, consent, current state revision, idempotency reservation을 다시 검사한다.
 
-pi-agent의 공개 loop에는 이 연결 지점이 선명하다. 고정 revision `853a80d26c90a14c1886f0ebb8ffaae133ca2185`의 `agent-loop.ts`에서 tool lookup·argument validation·`beforeToolCall`·block·abort check가 실행보다 앞선다([source](https://github.com/badlogic/pi-mono/blob/853a80d26c90a14c1886f0ebb8ffaae133ca2185/packages/ai/src/agent-loop.ts#L598-L724)). 이 코드는 ontology authorization을 내장했다는 증거가 아니다. 다만 host가 policy adapter와 generation fence를 넣을 정확한 경계를 보여 준다.
+pi-agent의 공개 loop에는 이 연결 지점이 선명하다. 고정 revision `853a80d26c90a14c1886f0ebb8ffaae133ca2185`의 `agent-loop.ts`에서 tool lookup·argument validation·`beforeToolCall`·block·abort check가 실행보다 앞선다([source](https://github.com/badlogic/pi-mono/blob/853a80d26c90a14c1886f0ebb8ffaae133ca2185/packages/agent/src/agent-loop.ts#L598-L666)). 이 코드는 ontology authorization을 내장했다는 증거가 아니다. 다만 host가 policy adapter와 generation fence를 넣을 정확한 경계를 보여 준다.
 
 ### 45.3.4 실행 직후: observation이 아니라 receipt를 연결한다
 
@@ -100,11 +110,11 @@ Open Ontologies의 고정 revision `d423869aa071afebf0806e7e79e724be5fe81ac6`은
 
 |구현 경로|관측되는 동작|운영자가 별도로 닫아야 할 경계|
 |---|---|---|
-|[`src/graph.rs#L61-L130`](https://github.com/fabio-rovai/open-ontologies/blob/d423869aa071afebf0806e7e79e724be5fe81ac6/src/graph.rs#L61-L130)|in-memory/Oxigraph 또는 persistent store, Turtle 전체 parse 뒤 insert|persistent directory가 multi-writer transaction·복제를 보장하지 않음|
+|[`src/graph.rs#L61-L130`](https://github.com/fabio-rovai/open-ontologies/blob/d423869aa071afebf0806e7e79e724be5fe81ac6/src/graph.rs#L61-L130)|in-memory Oxigraph store 또는 RocksDB 기반 persistent store, Turtle 전체 parse 뒤 insert|persistent directory가 multi-writer transaction·복제를 보장하지 않음|
 |[`src/vecstore.rs#L322-L424`](https://github.com/fabio-rovai/open-ontologies/blob/d423869aa071afebf0806e7e79e724be5fe81ac6/src/vecstore.rs#L322-L424)|exact, HNSW, Poincaré/product score 후보화|score는 진실·권한·시간 유효성 판정이 아님|
 |[`src/shacl.rs`](https://github.com/fabio-rovai/open-ontologies/blob/d423869aa071afebf0806e7e79e724be5fe81ac6/src/shacl.rs)|선언한 shape의 constraint 검사|선언하지 않은 정책·사실성·완전성을 보장하지 않음|
-|[`src/temporal.rs#L1866-L1934`](https://github.com/fabio-rovai/open-ontologies/blob/d423869aa071afebf0806e7e79e724be5fe81ac6/src/temporal.rs#L1866-L1934)|valid/recorded time 기반 named graph scope|현재 projection과 과거 질의의 generation 정합성은 호출자가 고정|
-|[`src/plugins.rs#L132-L213`](https://github.com/fabio-rovai/open-ontologies/blob/d423869aa071afebf0806e7e79e724be5fe81ac6/src/plugins.rs#L132-L213)|fresh WASM instance, fuel, 제한된 ABI/return|plugin isolation이 state persistence나 business authorization을 뜻하지 않음|
+|[`src/temporal.rs#L1866-L1942`](https://github.com/fabio-rovai/open-ontologies/blob/d423869aa071afebf0806e7e79e724be5fe81ac6/src/temporal.rs#L1866-L1942)|valid/recorded time 기반 named graph scope|현재 projection과 과거 질의의 generation 정합성은 호출자가 고정|
+|[`src/plugins.rs#L132-L215`](https://github.com/fabio-rovai/open-ontologies/blob/d423869aa071afebf0806e7e79e724be5fe81ac6/src/plugins.rs#L132-L215)|fresh WASM instance, fuel, 제한된 ABI/return|plugin isolation이 state persistence나 business authorization을 뜻하지 않음|
 
 Turtle loader가 문서 전체를 parse한 다음 insert하는 선택은 malformed input의 부분 적재를 피한다. 하지만 graph 적재와 vector projection의 교체를 하나의 원자 transaction으로 만들어 주지는 않는다. 그래서 query context에 양쪽 generation을 명시해야 한다.
 
@@ -115,7 +125,7 @@ AND inventory_complete(g)
 AND requested_generation = g
 ```
 
-`doc-1`을 vector generation `g1`에서 찾고 graph `g2`의 ACL로 허용하면, 존재한 적 없는 혼합 snapshot에 대해 판단하게 된다. 안전한 선택은 같은 generation으로 재조회하거나 `GENERATION_SKEW`로 보류하는 것이다.
+`doc-1`을 vector generation `g1`에서 찾고 graph `g2`의 ACL로 허용하면, 존재한 적 없는 혼합 snapshot에 대해 판단하게 된다. 안전한 쪽은 같은 generation으로 다시 조회하거나 `GENERATION_SKEW`로 보류하는 것이다.
 
 ## 45.5 부정 질의는 데이터 완전성 계약을 요구한다
 
@@ -127,7 +137,7 @@ SPARQL `NOT EXISTS` 결과가 비었다고 “금지 dependency가 없다”고 
 - source revision과 graph generation은 무엇인가
 - 이후 supersession 또는 tombstone이 적용됐는가
 
-이 metadata가 없으면 `NOT_FOUND`가 아니라 `UNKNOWN`. “경쟁 라이브러리 없음”, “미승인 dependency 없음”, “이 사용자에게 다른 계정 없음” 같은 부정 결론은 특히 이 규칙을 따라야 한다.
+이 metadata가 없으면 결과는 `NOT_FOUND`가 아니라 `UNKNOWN`이다. “경쟁 라이브러리 없음”, “미승인 dependency 없음”, “이 사용자에게 다른 계정 없음” 같은 부정 결론은 특히 이 규칙을 따라야 한다.
 
 SHACL도 같은 경계를 가진다. `conforms=true`는 실행한 shape와 focus node 범위가 통과했다는 뜻이다. shape에 없는 predicate, 지원하지 않는 path, 최신성, 원문 사실성까지 검증했다는 뜻이 아니다.
 
@@ -147,7 +157,7 @@ SHACL도 같은 경계를 가진다. `conforms=true`는 실행한 shape와 focus
 
 ## 45.7 서브에이전트와 graph: branch 수가 근거 수는 아니다
 
-여러 서브에이전트가 같은 source snapshot과 같은 embedding index에서 답을 만들면, 세 개의 동의는 독립 증거 세 개가 아니다. provenance graph에서 공통 조상을 접으면 실질적인 evidence는 하나일 수 있다.
+vote 수와 독립 근거 수가 다르다는 사실은 [17장](./17-debate-vote-verifier.md)에서 이미 세웠고, join 시점의 stale child 격리는 [44장](./44-subagents-goals.md)이 다룬다. 이 절이 더하는 것은 하나다. 그 두 판정을 사람의 직관이 아니라 provenance graph의 조상 접기로 계산할 수 있다는 것이다. 세 worker가 같은 `SourceRevision`에서 후보를 받았다면, `derivedFrom` edge를 따라 공통 조상을 접었을 때 실질 evidence는 하나다.
 
 ```mermaid
 flowchart TD
@@ -160,13 +170,11 @@ flowchart TD
   J -->|두 표가 아니라 하나의 공통 근거|D[Decision]
 ```
 
-child run에는 `parent_run_id`, fork `state_revision`, policy/graph/vector generation, delegated scope, budget, expected artifact type을 붙인다. join 시점에는 단순 majority vote가 아니라 다음을 검사한다.
+child run에는 `parent_run_id`, fork `state_revision`, policy/graph/vector generation, delegated scope, budget, expected artifact type을 붙인다. state revision의 신선도와 source 독립성 검사는 [44장](./44-subagents-goals.md)의 join predicate가 다뤘으므로, 이 절의 join은 graph가 답할 수 있는 세 가지를 검사한다.
 
-1. child가 fork한 state revision이 아직 current인가.
-2. 서로 다른 답이 실제로 독립 source revision에 기대는가.
-3. delegated capability를 넘어선 effect가 있는가.
-4. parent가 이미 취소한 logical call을 child가 commit하지 않았는가.
-5. verifier가 읽은 결과와 receiver receipt가 같은 attempt를 가리키는가.
+1. delegated capability를 넘어선 effect가 있는가.
+2. parent가 이미 취소한 logical call을 child가 commit하지 않았는가.
+3. verifier가 읽은 결과와 receiver receipt가 같은 attempt를 가리키는가.
 
 stale child의 설명은 참고 자료로 합칠 수 있어도 효과 commit은 receiver-side compare-and-set에서 거부해야 한다. graph의 `derivedFrom` edge는 merge authority가 아니다.
 
@@ -209,7 +217,7 @@ shape에 없는 invented predicate를 추가한다. validation이 통과해도 p
 |`policy_recheck_latency`|effect-time authorization 비용|cache 최적화가 철회를 숨기지 않는가|
 |`receipt_reconciliation_gap`|trace success와 receiver receipt 불일치|unknown effect queue가 소유자를 갖는가|
 
-ontology query latency를 줄이려고 policy decision을 오래 cache하면 철회 창이 커진다. cache key에는 principal, tenant, resource/action, policy generation, relevant state revision을 넣고, effectful action은 짧은 TTL보다 commit-time generation check를 우선한다. “cache hit”는 권한 증명이 아니다.
+ontology query latency를 줄이려고 policy decision을 오래 cache하면 철회 창이 커진다. cache key에는 principal, tenant, resource/action, policy generation, relevant state revision을 넣고, effectful action은 짧은 TTL보다 commit-time generation check를 우선한다. “cache hit”는 권한 증명이 아니다. 여기 지표들은 [32장](./32-trace-metric-log-receipt.md)의 네 기록 구분 위에 있다. `receipt_reconciliation_gap`이 trace와 receipt의 불일치를 세는 지표인 것도 그 때문이다.
 
 ## 45.10 도입 체크리스트와 순서
 
@@ -222,6 +230,10 @@ ontology query latency를 줄이려고 policy decision을 오래 cache하면 철
 5. negative conclusion이 필요한 inventory에만 명시적 completeness 계약을 둔다.
 6. stale fork, policy revoke, crash/retry, generation skew를 CI fixture로 만든다.
 7. 그 다음에 domain vocabulary와 reasoner 규칙을 확장한다.
+
+### 이 장이 보장하지 않는 것
+
+typed edge와 generation fence는 잘못된 실행을 **막을 자리**를 만들 뿐, 그 자리에 옳은 규칙이 들어 있다고 보장하지 않는다. SHACL의 `conforms=true`는 선언한 shape에 대해서만 참이고, `NOT EXISTS`의 빈 결과는 inventory owner가 완전성을 선언한 범위에서만 `false`가 된다. Open Ontologies의 공개 구현은 graph store와 vector store의 경계를 보여 주지만 둘의 교체를 하나의 transaction으로 만들어 주지 않으며, plugin의 WASM 격리는 business authorization과 다른 층이다. receiver가 receipt를 제공하지 않으면 이 장의 어떤 술어도 `UNKNOWN`을 `TRUE`로 바꿀 수 없다.
 
 좋은 온톨로지는 모든 것을 아는 백과사전이 아니다. 모델이 무엇을 추정했고 시스템이 무엇을 검증했는지, 누가 무엇을 허용했고 receiver가 무엇을 commit했는지, 어느 시점의 어느 원문으로 그 결론을 뒤집을 수 있는지를 잃지 않는 구조다. 에이전트와 온톨로지가 제대로 엮였는지는 graph 크기가 아니라 **불충분한 근거가 실행으로 넘어가지 않는가**로 판정한다.
 
