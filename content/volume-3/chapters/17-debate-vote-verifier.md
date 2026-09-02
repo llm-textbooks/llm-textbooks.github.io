@@ -35,7 +35,7 @@ vote는 후보를 좁히는 입력이 될 수 있다. 다만 `decision_authority
 
 Self-consistency는 여러 reasoning path를 샘플링해 answer를 고르는 접근이고, [Self-Consistency](https://arxiv.org/abs/2203.11171v4)는 이 선택의 조건을 다룬다. [Multiagent Debate](https://arxiv.org/abs/2305.14325v1)는 debate가 factuality·reasoning에 미칠 수 있는 영향을 연구한다. 이는 어떤 production 요청에서도 agent 수를 늘리면 정확해진다는 보장이 아니다. model revision, sampling temperature, prompts, judge, task split, evidence access가 바뀌면 결과의 의미도 바뀐다.
 
-debate framework의 전형적인 구현은 proposal, `AGREE` 처리, `WINNER:` 선택 같은 control flow를 제공한다. 이 사실은 parsing과 turn loop가 있다는 뜻이다. 그것이 factual predicate, calibrated uncertainty, 독립 evidence, durable decision record를 자동으로 만든다는 뜻은 아니다. 특히 텍스트 `AGREE`는 surface token일 뿐, vote로 볼 수 없다.
+Jikji의 고정 revision debate orchestrator는 proposal round, [`AGREE` 접두 파싱 기반 consensus 투표](https://github.com/jikji-labs/jikji/blob/d0cb4997e1882f9f5fc28b0b601ddf97317baf43/jikji/internal/forme/debate_orchestrator.go#L135-L174), [`WINNER:` 라인 추출](https://github.com/jikji-labs/jikji/blob/d0cb4997e1882f9f5fc28b0b601ddf97317baf43/jikji/internal/forme/debate_orchestrator.go#L323-L332) 같은 control flow를 제공한다. 이 사실은 parsing과 turn loop가 있다는 뜻이다. 그것이 factual predicate, calibrated uncertainty, 독립 evidence, durable decision record를 자동으로 만든다는 뜻은 아니다. 특히 `strings.HasPrefix(upper, "AGREE")`로 판정되는 텍스트 `AGREE`는 surface token일 뿐, vote로 볼 수 없다.
 
 ```mermaid
 flowchart LR
@@ -205,3 +205,4 @@ verifier가 timeout이면 `approved`로 바꾸지도, 반대 vote로 세지도 �
 
 - [Self-Consistency](https://arxiv.org/abs/2203.11171v4)
 - [Improving Factuality and Reasoning through Multiagent Debate](https://arxiv.org/abs/2305.14325v1)
+- [Jikji debate orchestrator](https://github.com/jikji-labs/jikji/blob/d0cb4997e1882f9f5fc28b0b601ddf97317baf43/jikji/internal/forme/debate_orchestrator.go#L53-L332)
